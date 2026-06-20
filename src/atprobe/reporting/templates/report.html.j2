@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>ATProbe 测试报告 · {{ summary.start_time or 'session' }}</title>
+  <style>
+    {# =========================================================================
+       设计令牌：与 src/atprobe/gui/theme.py 的 LIGHT_TOKENS / DARK_TOKENS 完全同步。
+       修改任一处时请同步另一处（Primer 降饱和配色，非 Material 高饱和）。
+       ========================================================================= #}
+    :root {
+      --pass: #1a7f37; --pass-bg: #dafbe1;
+      --fail: #cf222e; --fail-bg: #ffebe9;
+      --skipped: #9a6700; --skipped-bg: #fff8c5;
+      --interrupted: #6e7781; --interrupted-bg: #eaeef2;
+      --accent: #0969da; --accent-bg: #ddf4ff;
+      --bg-app: #f6f8fa; --bg-surface: #ffffff; --bg-inset: #f0f3f6;
+      --bg-terminal: #0d1117; --bg-terminal-alt: #161b22;
+      --border: #d0d7de; --border-muted: #eaeef2;
+      --text: #1f2328; --text-secondary: #656d76; --text-disabled: #8c959f;
+      --text-on-terminal: #e6edf3; --text-terminal-muted: #8b949e;
+      --shadow-sm: 0 1px 0 rgba(31,35,40,0.04);
+      --shadow-md: 0 3px 6px rgba(140,149,159,0.15);
+      --data-tx: #0969da; --data-rx: #1f2328;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --pass: #3fb950; --pass-bg: #23863622;
+        --fail: #f85149; --fail-bg: #da363322;
+        --skipped: #d29922; --skipped-bg: #bf870022;
+        --interrupted: #8b949e; --interrupted-bg: #6e768122;
+        --accent: #2f81f7; --accent-bg: #1f6feb22;
+        --bg-app: #0d1117; --bg-surface: #161b22; --bg-inset: #010409;
+        --bg-terminal: #010409; --bg-terminal-alt: #0d1117;
+        --border: #30363d; --border-muted: #21262d;
+        --text: #e6edf3; --text-secondary: #8b949e; --text-disabled: #484f58;
+        --text-on-terminal: #e6edf3; --text-terminal-muted: #8b949e;
+        --shadow-sm: 0 1px 0 rgba(1,4,9,0.3);
+        --shadow-md: 0 3px 6px rgba(1,4,9,0.5);
+        --data-tx: #58a6ff; --data-rx: #e6edf3;
+        color-scheme: dark;
+      }
+    }
+
+    {# ============== 基础排版 ============== #}
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+      margin: 0; padding: 32px 24px 64px;
+      background: var(--bg-app); color: var(--text);
+      font-size: 14px; line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 1280px; margin: 0 auto; }
+    .mono { font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+    {# ============== SIGNATURE: 终端启动横幅（hero）============== #}
+    {# 串口/AT 命令工具的领域 signature：模拟终端会话启动样式 #}
+    .hero {
+      background: var(--bg-terminal);
+      color: var(--text-on-terminal);
+      border-radius: 12px;
+      padding: 24px 28px 22px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow-md);
+      font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+      position: relative;
+      overflow: hidden;
+    }
+    {# macOS 风格窗口点 — 强化「这是终端/控制台」的语义 #}
+    .hero::before {
+      content: ''; position: absolute; top: 14px; left: 16px;
+      width: 12px; height: 12px; border-radius: 50%;
+      background: #ff5f56;
+      box-shadow: 20px 0 0 #ffbd2e, 40px 0 0 #27c93f;
+    }
+    .hero-cmd {
+      padding-left: 64px; margin-bottom: 18px;
+      color: var(--text-terminal-muted);
+      font-size: 13px; letter-spacing: 0.2px;
+    }
+    .hero-cmd .prompt { color: #58a6ff; }
+    .hero-cmd .ok { color: #3fb950; }
+
+    .hero-progress {
+      padding-left: 64px; margin-bottom: 20px;
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    }
+    .hero-pct {
+      font-size: 44px; font-weight: 700;
+      letter-spacing: -1px; line-height: 1;
+      color: var(--text-on-terminal);
+    }
+    .hero-pct.pass { color: #3fb950; }
+    .hero-pct.fail { color: #f85149; }
+    .hero-pct.partial { color: #d29922; }
+    .hero-bar {
+      flex: 1; min-width: 240px;
+      height: 10px; background: rgba(110,118,129,0.2);
+      border-radius: 6px; overflow: hidden;
+    }
+    .hero-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #3fb950 0%, #58a6ff 100%);
+      border-radius: 6px;
+      transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .hero-bar-fill.fail { background: linear-gradient(90deg, #f85149 0%, #ffa657 100%); }
+    .hero-bar-fill.partial { background: linear-gradient(90deg, #d29922 0%, #ffa657 100%); }
+
+    .hero-stats {
+      padding-left: 64px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, auto));
+      gap: 8px 28px; font-size: 13px;
+      color: var(--text-terminal-muted);
+    }
+    .hero-stat { display: flex; align-items: baseline; gap: 6px; }
+    .hero-stat .n { font-size: 18px; font-weight: 700; color: var(--text-on-terminal); }
+    .hero-stat .n.pass { color: #3fb950; }
+    .hero-stat .n.fail { color: #f85149; }
+    .hero-stat .n.skipped { color: #d29922; }
+    .hero-stat .n.interrupted { color: #8b949e; }
+
+    .hero-meta {
+      padding-left: 64px; margin-top: 14px;
+      color: var(--text-terminal-muted); font-size: 12px;
+    }
+    .hero-meta .arrow { color: #58a6ff; }
+
+    {# ============== 分节标题 ============== #}
+    h2.section {
+      font-size: 14px; font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase; letter-spacing: 0.8px;
+      margin: 32px 0 14px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    h2.section::before {
+      content: ''; width: 3px; height: 14px;
+      background: var(--accent); border-radius: 2px;
+    }
+    h2.section .count {
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-disabled); font-weight: 500;
+      font-size: 13px; letter-spacing: 0;
+    }
+
+    {# ============== 按标签分组表 ============== #}
+    .tag-table {
+      width: 100%; border-collapse: collapse;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-muted);
+      border-radius: 8px; overflow: hidden;
+      font-size: 13px;
+    }
+    .tag-table th {
+      background: var(--bg-app); text-align: left;
+      padding: 10px 14px; font-weight: 600;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-muted);
+    }
+    .tag-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-muted);
+    }
+    .tag-table tr:last-child td { border-bottom: none; }
+    .tag-table td.num { font-family: 'JetBrains Mono', monospace; }
+    .tag-table td.num.pass { color: var(--pass); }
+    .tag-table td.num.fail { color: var(--fail); }
+
+    {# ============== 用例卡片（状态色边条 + 内容）============== #}
+    .case {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-muted);
+      border-radius: 10px;
+      margin-bottom: 12px;
+      overflow: hidden;
+      box-shadow: var(--shadow-sm);
+      transition: box-shadow 0.2s, transform 0.2s;
+    }
+    .case:hover { box-shadow: var(--shadow-md); }
+    .case-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 18px 14px 18px;
+      border-left: 4px solid var(--interrupted);
+      cursor: default;
+    }
+    .case-header.PASS { border-left-color: var(--pass); background: linear-gradient(90deg, var(--pass-bg) 0%, transparent 30%); }
+    .case-header.FAIL { border-left-color: var(--fail); background: linear-gradient(90deg, var(--fail-bg) 0%, transparent 30%); }
+    .case-header.SKIPPED { border-left-color: var(--skipped); background: linear-gradient(90deg, var(--skipped-bg) 0%, transparent 30%); }
+    .case-header.INTERRUPTED { border-left-color: var(--interrupted); }
+    .case-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; word-break: break-all; }
+    .case-meta { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary); }
+    .case-body { padding: 0 18px 16px 22px; }
+
+    {# ============== 状态徽标 ============== #}
+    .badge {
+      display: inline-block; padding: 3px 10px;
+      border-radius: 20px; font-size: 11px;
+      font-weight: 700; letter-spacing: 0.5px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .badge.PASS { background: var(--pass-bg); color: var(--pass); }
+    .badge.FAIL { background: var(--fail-bg); color: var(--fail); }
+    .badge.SKIPPED { background: var(--skipped-bg); color: var(--skipped); }
+    .badge.INTERRUPTED { background: var(--interrupted-bg); color: var(--interrupted); }
+    .badge.partial { background: var(--skipped-bg); color: var(--skipped); }
+
+    {# ============== 标签 chip ============== #}
+    .tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .tags span {
+      background: var(--bg-inset); color: var(--text-secondary);
+      padding: 1px 8px; border-radius: 10px;
+      font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    }
+
+    {# ============== 步骤表格 ============== #}
+    .steps { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+    .steps th {
+      text-align: left; padding: 8px 10px;
+      font-weight: 600; color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-muted);
+      font-size: 12px;
+    }
+    .steps td { padding: 8px 10px; border-bottom: 1px solid var(--border-muted); vertical-align: top; }
+    .steps tr:last-child td { border-bottom: none; }
+    .steps td.idx { font-family: 'JetBrains Mono', monospace; color: var(--text-disabled); width: 32px; }
+    .steps td.cmd code {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      background: var(--bg-inset); padding: 2px 6px; border-radius: 4px;
+      color: var(--data-tx);
+    }
+    .steps td.port { font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); font-size: 12px; }
+    .steps td.dur { font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); text-align: right; white-space: nowrap; }
+
+    .status.PASS { color: var(--pass); font-weight: 600; }
+    .status.FAIL { color: var(--fail); font-weight: 600; }
+    .status.SKIPPED { color: var(--skipped); font-weight: 600; }
+    .status.INTERRUPTED { color: var(--interrupted); font-weight: 600; }
+    .assert { display: block; font-size: 12px; margin: 2px 0; }
+    .assert .mark { font-family: 'JetBrains Mono', monospace; font-weight: 700; display: inline-block; width: 14px; }
+    .assert.pass .mark { color: var(--pass); }
+    .assert.fail .mark { color: var(--fail); }
+    .assert .reason { color: var(--fail); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+    .annot { color: var(--text-disabled); font-family: 'JetBrains Mono', monospace; font-size: 11px; margin-left: 6px; }
+    .error-msg {
+      color: var(--fail); font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 4px 0 0;
+    }
+
+    {# ============== 响应内容（深色终端风格）============== #}
+    {# 即使浅色主题，响应区也用深色底，强化「这是终端输出」语义 #}
+    .resp {
+      background: var(--bg-terminal);
+      color: var(--text-on-terminal);
+      padding: 12px 16px; margin-top: 8px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+      font-size: 12px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-all;
+      border-left: 3px solid var(--fail);
+    }
+    details { margin: 6px 0; }
+    details > summary {
+      cursor: pointer; padding: 6px 0;
+      color: var(--text-secondary); font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      user-select: none; list-style: none;
+      display: flex; align-items: center; gap: 6px;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before {
+      content: '▸'; color: var(--text-disabled);
+      transition: transform 0.15s;
+      display: inline-block; width: 12px;
+    }
+    details[open] > summary::before { transform: rotate(90deg); }
+    details[open] > summary { color: var(--text); }
+
+    {# ============== 压测表格 ============== #}
+    .pressure-summary {
+      display: flex; gap: 20px; align-items: center;
+      padding: 12px 16px; margin-bottom: 8px;
+      background: var(--bg-inset); border-radius: 6px;
+      flex-wrap: wrap;
+    }
+    .pressure-summary .big {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 28px; font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .pressure-summary .big.pass { color: var(--pass); }
+    .pressure-summary .big.fail { color: var(--fail); }
+    .pressure-summary .meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; color: var(--text-secondary);
+    }
+    .pressure-summary .pressure-title {
+      font-size: 13px; font-weight: 700; color: var(--text-primary);
+      margin-right: auto;
+    }
+
+    {# ============== 页脚 ============== #}
+    .footer {
+      margin-top: 32px; padding-top: 16px;
+      border-top: 1px solid var(--border-muted);
+      color: var(--text-disabled); font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex; justify-content: space-between;
+    }
+    .footer a { color: var(--text-secondary); }
+
+    {# ============== Reduced motion ============== #}
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  {# ===================== SIGNATURE: 终端启动 hero ===================== #}
+  {% set pass_rate_pct = summary.pass_rate|round(1) %}
+  {% set hero_class = 'pass' if overall[1] == 'pass' else ('fail' if overall[1] == 'fail' else 'partial') %}
+  <section class="hero" aria-label="测试结果概览">
+    <div class="hero-cmd">
+      <span class="prompt">$</span> atprobe run
+      {% if result.env_snapshot %}--env loaded{% endif %}
+      · <span class="ok">exit {{ '0' if overall[1] == 'pass' else '1' }}</span>
+    </div>
+
+    <div class="hero-progress">
+      <div class="hero-pct {{ hero_class }}" title="通过率">{{ pass_rate_pct }}<span style="font-size:24px;">%</span></div>
+      <div class="hero-bar" aria-hidden="true">
+        <div class="hero-bar-fill {{ hero_class }}" style="width: {{ pass_rate_pct }}%;"></div>
+      </div>
+    </div>
+
+    <div class="hero-stats">
+      <div class="hero-stat"><span class="n pass">{{ summary.passed }}</span><span>通过用例 PASS</span></div>
+      <div class="hero-stat"><span class="n fail">{{ summary.failed }}</span><span>失败用例 FAIL</span></div>
+      <div class="hero-stat"><span class="n skipped">{{ summary.skipped }}</span><span>跳过 SKIPPED</span></div>
+      <div class="hero-stat"><span class="n interrupted">{{ summary.interrupted }}</span><span>中断 INTERRUPTED</span></div>
+      <div class="hero-stat"><span class="n">{{ summary.total_cases }}</span><span>用例总数 total</span></div>
+    </div>
+
+    <div class="hero-meta">
+      {{ summary.start_time or '—' }}
+      <span class="arrow">→</span> {{ summary.end_time or '—' }}
+      · duration {{ (summary.duration_ms / 1000.0)|round(2) }}s
+    </div>
+  </section>
+
+  {# ===================== 按标签分组（可选）===================== #}
+  {% if summary.by_tag %}
+  <h2 class="section">按标签分组 <span class="count">{{ summary.by_tag|length }}</span></h2>
+  <table class="tag-table">
+    <thead>
+      <tr><th>TAG</th><th style="text-align:right;">总数</th><th style="text-align:right;">通过</th><th style="text-align:right;">失败</th><th style="text-align:right;">通过率</th></tr>
+    </thead>
+    <tbody>
+      {% for tag, st in summary.by_tag.items() %}
+      <tr>
+        <td><code style="font-family:'JetBrains Mono',monospace;font-size:12px;">{{ tag }}</code></td>
+        <td class="num">{{ st.total }}</td>
+        <td class="num pass">{{ st.passed }}</td>
+        <td class="num fail">{{ st.failed }}</td>
+        <td class="num">{{ ((st.passed / st.total * 100.0)|round(1)) if st.total else 0 }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ===================== 用例详情 ===================== #}
+  <h2 class="section">用例详情 <span class="count">{{ result.case_results|length }}</span></h2>
+
+  {% for case in result.case_results %}
+  <article class="case">
+    <div class="case-header {{ case.status.value }}">
+      <span class="badge {{ case.status.value }}">{{ case.status.value }}</span>
+      <span class="case-name">{{ case.case_name }}</span>
+      {% if case.tags %}<span class="tags">{% for t in case.tags %}<span>{{ t }}</span>{% endfor %}</span>{% endif %}
+      <span class="case-meta">{{ case.ports|join(', ') }} · {{ (case.duration_ms/1000.0)|round(2) }}s</span>
+    </div>
+
+    <div class="case-body">
+      {% if case.error_msg %}
+      <div class="error-msg">⚠ {{ case.error_msg }}</div>
+      {% endif %}
+
+      {% if case.is_pressure and case.pressure_stats %}
+        {% set ps = case.pressure_stats %}
+        <div class="pressure-summary">
+          <div class="pressure-title">压测统计</div>
+          <div>
+            <div class="big {{ 'pass' if ps.passed else 'fail' }}">{{ ps.success_rate|round(1) }}%</div>
+            <div class="meta">success rate · threshold {{ ps.pass_threshold|round(1) }}%</div>
+          </div>
+          <div class="meta">
+            {{ ps.success_rounds }}/{{ ps.counted_rounds }} rounds passed
+            ({{ ps.total_rounds }} total{% if ps.warmup_rounds %}, {{ ps.warmup_rounds }} warmup{% endif %})
+            · <span class="{{ 'status PASS' if ps.passed else 'status FAIL' }}">{{ 'PASS' if ps.passed else 'FAIL' }}</span>
+          </div>
+        </div>
+        {% if ps.step_stats %}
+        <table class="steps">
+          <thead>
+            <tr><th>#</th><th>command</th><th style="text-align:right;">ok</th><th style="text-align:right;">fail</th><th style="text-align:right;">min</th><th style="text-align:right;">avg</th><th style="text-align:right;">p95</th><th style="text-align:right;">p99</th><th style="text-align:right;">max</th></tr>
+          </thead>
+          <tbody>
+            {% for ss in ps.step_stats %}
+            <tr>
+              <td class="idx">{{ ss.step_index }}</td>
+              <td class="cmd"><code>{{ ss.command }}</code></td>
+              <td class="dur">{{ ss.success_count }}</td>
+              <td class="dur" style="color:var(--fail);">{{ ss.fail_count }}</td>
+              <td class="dur">{{ ss.min_ms|round(0) }}</td>
+              <td class="dur">{{ ss.avg_ms|round(0) }}</td>
+              <td class="dur">{{ ss.p95_ms|round(0) }}</td>
+              <td class="dur">{{ ss.p99_ms|round(0) }}</td>
+              <td class="dur">{{ ss.max_ms|round(0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+
+      {% else %}
+        {% set all_steps = case.setup_results + case.step_results + case.teardown_results %}
+        {% if all_steps %}
+        <table class="steps">
+          <thead>
+            <tr><th>#</th><th>phase</th><th>command</th><th>port</th><th>result</th><th>assertions</th><th style="text-align:right;">dur</th></tr>
+          </thead>
+          <tbody>
+            {% for sr in all_steps %}
+            <tr>
+              <td class="idx">{{ sr.step_index }}</td>
+              <td class="port">{{ sr.phase }}</td>
+              <td class="cmd"><code>{{ sr.command }}</code></td>
+              <td class="port">{{ sr.port }}</td>
+              <td><span class="status {{ sr.status.value }}">{{ sr.status.value }}</span></td>
+              <td>
+                {% if sr.assertions %}
+                  {% for a in sr.assertions %}
+                  <span class="assert {{ 'pass' if a.passed else 'fail' }}">
+                    <span class="mark">{{ '✓' if a.passed else '✗' }}</span>{{ a.name }}
+                    {% if not a.passed %}<span class="reason"> · {{ a.reason }}</span>{% endif %}
+                  </span>
+                  {% endfor %}
+                {% endif %}
+                {% if sr.extracted_vars %}<span class="annot">extract:{{ sr.extracted_vars }}</span>{% endif %}
+                {% if sr.retry_count %}<span class="annot">retry×{{ sr.retry_count }}</span>{% endif %}
+                {% if sr.poll_iterations %}<span class="annot">poll×{{ sr.poll_iterations }}</span>{% endif %}
+              </td>
+              <td class="dur">{{ sr.duration_ms|round(0) }}ms</td>
+            </tr>
+            {% if sr.status.value == 'FAIL' and sr.response %}
+            <tr>
+              <td colspan="7" style="padding:0 0 8px;">
+                <details>
+                  <summary>response · click to expand</summary>
+                  <div class="resp">{{ sr.response }}</div>
+                </details>
+              </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      {% endif %}
+
+      {% if case.log_ref %}
+      <details style="margin-top:10px;">
+        <summary>原始日志 · {{ case.log_ref }}</summary>
+        <div class="annot" style="margin-top:6px;">{{ case.log_ref }}</div>
+      </details>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+
+  {# ===================== 环境配置快照 ===================== #}
+  {% if result.env_snapshot %}
+  <h2 class="section">环境配置快照 <span class="count">{{ result.env_snapshot|length }} groups</span></h2>
+  {% for group, params in result.env_snapshot.items() %}
+  <details style="background:var(--bg-surface);border:1px solid var(--border-muted);border-radius:8px;padding:6px 14px;margin-bottom:8px;">
+    <summary style="color:var(--text);font-weight:600;font-family:inherit;font-size:14px;">
+      <code style="font-family:'JetBrains Mono',monospace;font-size:13px;">{{ group }}</code>
+      <span class="count" style="color:var(--text-disabled);font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:400;">· {{ params|length }} params</span>
+    </summary>
+    <table class="tag-table" style="margin:8px 0 12px;border:none;">
+      <tbody>
+        {% for k, v in params.items() %}
+        <tr>
+          <td style="width:40%;"><code style="font-family:'JetBrains Mono',monospace;font-size:12px;">{{ k }}</code></td>
+          <td class="num">{{ v }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endfor %}
+  {% endif %}
+
+  {# ===================== 页脚 ===================== #}
+  <div class="footer">
+    <span>$ atprobe report · generated by ATProbe</span>
+    <span>{{ summary.end_time or summary.start_time or '—' }}</span>
+  </div>
+
+</div>
+</body>
+</html>

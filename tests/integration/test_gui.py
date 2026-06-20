@@ -1,0 +1,260 @@
+"""GUI 模块导入与构造冒烟测试（offscreen 模式）."""
+
+from __future__ import annotations
+
+import os
+import threading
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestRegistry:
+    def test_default_registry_has_all_types(self) -> None:
+        from atprobe.gui.tabs.registry import default_registry
+
+        reg = default_registry()
+        types = reg.types()
+        # §2.3 第一阶段 5 类选项卡（execution_progress 由引擎弹出，不侧栏注册）
+        for t in ("manual_debug", "case_execute", "monitor", "report_view", "env_config"):
+            assert t in types, f"缺少选项卡类型 {t}"
+
+    def test_display_names(self) -> None:
+        from atprobe.gui.tabs.registry import default_registry
+
+        names = default_registry().display_names()
+        assert names["manual_debug"] == "手动调试"
+        assert names["env_config"] == "环境配置"
+
+
+class TestMainWindow:
+    def test_constructs(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        assert win.windowTitle().startswith("ATProbe")
+        # 默认打开了一个选项卡
+        assert win.tabs.count() >= 1
+
+    def test_new_tab_creates_widget(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        initial = win.tabs.count()
+        win.new_tab("manual_debug")
+        assert win.tabs.count() == initial + 1
+        win.new_tab("env_config")
+        assert win.tabs.count() == initial + 2
+
+
+class TestEnvConfigTab:
+    def test_edit_and_save(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.env_config import EnvConfigWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 写一个测试 env.yaml
+        env_file = tmp_path / "env.yaml"
+        env_file.write_text("ftp:\n  host: 1.2.3.4\n  port: 21\n", encoding="utf-8")
+
+        binding = TabBinding(type_name="env_config", params={})
+        widget = EnvConfigWidget(binding, object())  # type: ignore[arg-type]
+        widget._load_path(env_file)  # noqa: SLF001
+        # 表单应包含 ftp 组的两个参数
+        assert "ftp" in widget._group_widgets  # noqa: SLF001
+        assert "host" in widget._group_widgets["ftp"]  # noqa: SLF001
+        assert widget._group_widgets["ftp"]["host"].text() == "1.2.3.4"  # noqa: SLF001
+
+
+class _FakeMain:
+    """最小化的主窗口替身：模拟端口连接管理与发送，供 ManualDebugWidget 测试.
+
+    send_manual 设置 last_command 后触发 sent_event，便于测试同步。
+    支持 subscribe_rx/unsubscribe_rx（纯流式接收）+ emit_rx 模拟回包。
+    """
+
+    def __init__(self) -> None:
+        self._connected: set[str] = set()
+        self.open_calls: list[tuple[str, int, str]] = []
+        self.last_command: tuple[str, str] | None = None
+        self.sent_event = threading.Event()
+        self._rx_observers: dict[str, list] = {}
+
+    def available_ports(self) -> list[str]:
+        return ["COM1", "COM2"]
+
+    def is_port_connected(self, port: str) -> bool:
+        return port in self._connected
+
+    def open_port(self, port: str, baud: int = 115200, frame: str = "8N1") -> bool:
+        self.open_calls.append((port, baud, frame))
+        self._connected.add(port)
+        return True
+
+    def close_port(self, port: str) -> bool:
+        self._connected.discard(port)
+        return True
+
+    def send_manual(self, port: str, command: str) -> bool:
+        """流式写：记录命令（不再等待响应，回包经 subscribe_rx 流入）."""
+        if port not in self._connected:
+            return False
+        self.last_command = (port, command)
+        self.sent_event.set()
+        return True
+
+    def subscribe_rx(self, port: str, observer) -> object:
+        self._rx_observers.setdefault(port, []).append(observer)
+        return (port, observer)
+
+    def unsubscribe_rx(self, handle) -> None:
+        if isinstance(handle, tuple) and len(handle) == 2:
+            port, observer = handle
+            obs = self._rx_observers.get(port, [])
+            if observer in obs:
+                obs.remove(observer)
+
+    def emit_rx(self, port: str, data: bytes) -> None:
+        """测试辅助：向某端口的 RX 观察者投递字节（模拟模块回包）."""
+        for obs in self._rx_observers.get(port, []):
+            obs(data)
+
+
+class TestManualDebugPortControl:
+    def test_open_close_toggle(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 隔离 QSettings：用独立 key，避免污染其它测试/用户环境
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        # 默认 COM1 选中且未连接
+        assert widget._current_port() == "COM1"  # noqa: SLF001
+        assert main.is_port_connected("COM1") is False
+        assert widget.connect_btn.text() == "打开端口"
+
+        # 打开端口
+        widget._toggle_connect()  # noqa: SLF001
+        assert main.open_calls == [("COM1", 115200, "8N1")]
+        assert main.is_port_connected("COM1") is True
+        assert widget.connect_btn.text() == "关闭端口"
+        # 已连接 → 波特率/帧格式锁只读
+        assert widget.baud_combo.isEnabled() is False
+        assert widget.frame_combo.isEnabled() is False
+
+        # 再次点击 → 关闭
+        widget._toggle_connect()  # noqa: SLF001
+        assert main.is_port_connected("COM1") is False
+        assert widget.connect_btn.text() == "打开端口"
+        assert widget.baud_combo.isEnabled() is True
+
+    def test_send_requires_connection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        # 把所有模态弹窗打桩，防止阻塞测试（_send 未连接时弹 warning）
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        widget.send_edit.setText("AT+CSQ")
+        widget._send()  # noqa: SLF001  端口未连接 → 不应发送
+        assert main.last_command is None
+        # 连接后再发送（_toggle_connect 会建立 RX 订阅）
+        widget._toggle_connect()  # noqa: SLF001
+        assert main.is_port_connected("COM1") is True
+        widget._send()  # noqa: SLF001
+        # send_manual 是流式写，同步返回，立即写入记录
+        assert main.last_command == ("COM1", "AT+CSQ")
+        # TX 立即上屏（不等响应）
+        assert "TX> AT+CSQ" in widget.response_view.toPlainText()
+
+    def test_rx_streams_via_subscription(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """打开端口后 RX 订阅建立；模块回包字节经信号流式渲染到响应区."""
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        # 打开端口 → 建立订阅
+        widget._toggle_connect()  # noqa: SLF001
+        assert widget._rx_handle is not None  # noqa: SLF001
+
+        # 模拟模块回包（读线程上下文）→ 经信号到主线程渲染
+        main.emit_rx("COM1", b"+CSQ: 23,99\r\n")
+        # emit 在测试线程（非读线程）触发信号；Qt 信号默认直连主线程槽
+        text = widget.response_view.toPlainText()
+        assert "+CSQ: 23,99" in text
+
+        # 关闭端口 → 撤销订阅
+        widget._toggle_connect()  # noqa: SLF001
+        assert widget._rx_handle is None  # noqa: SLF001
+
+
+class TestManualDebugQuickCommands:
+    def test_add_remove_persist(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 清空自定义，回落默认
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        assert widget._quick_commands == ["AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?"]  # noqa: SLF001
+
+        # 添加一条自定义
+        widget._add_quick("AT+CGMM")  # noqa: SLF001
+        assert "AT+CGMM" in widget._quick_commands  # noqa: SLF001
+        # 持久化到 QSettings
+        saved = QSettings("ATProbe", "ATProbe").value("manual_debug/quick_commands")
+        assert saved is not None and "AT+CGMM" in list(saved)
+
+        # 删除一条
+        widget._remove_quick("AT+CGMM")  # noqa: SLF001
+        assert "AT+CGMM" not in widget._quick_commands  # noqa: SLF001
+
+    def test_loads_persisted_on_construct(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 预置持久化值
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", ["ATI", "ATZ"])
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        assert widget._quick_commands == ["ATI", "ATZ"]  # noqa: SLF001
+        # 清理：恢复默认，避免污染其它测试
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+

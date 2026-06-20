@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(brainstorming)",
+      "Skill(brainstorming:*)",
+      "WebSearch",
+      "Bash(mkdir -p \"C:/Users/33024/.claude/skills/frontend-design\")",
+      "Bash(curl -fsSL \"https://raw.githubusercontent.com/anthropics/skills/main/skills/frontend-design/LICENSE.txt\" -o \"C:/Users/33024/.claude/skills/frontend-design/LICENSE.txt\")"
+    ]
+  }
+}
