@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         list_widget.itemDoubleClicked.connect(self._on_sidebar_double_click)
         # 图标用浅色（接近白）：在深色未选中栏上清晰可读，选中(主色底)上更醒目
         icon_color = self._tokens["sidebar.item.text.selected"]
-        for type_name, display in self._registry.display_names().items():
+        for type_name, display in self._registry.sidebar_items().items():
             item = QListWidgetItem(display)
             item.setIcon(make_icon(type_name, color=icon_color))
             item.setData(Qt.ItemDataRole.UserRole, type_name)
@@ -164,7 +164,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 所有内置选项卡均为单例：重复打开 → 跳转到已存在的页。
     # report_view 也唯一：多个报告在其内部以「子标签」形式承载（每个报告一个子页）。
-    _SINGLETON_TYPES = frozenset({"manual_debug", "case_execute", "monitor", "report_view", "env_config"})
+    _SINGLETON_TYPES = frozenset({
+        "manual_debug", "case_execute", "monitor", "execution_progress",
+        "report_view", "env_config",
+    })
 
     def new_tab(self, type_name: str, params: dict[str, object] | None = None) -> None:
         view = self._registry.get(type_name)
@@ -313,7 +316,10 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 env = None
 
-        session = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # session_id 加随机后缀，避免连续快速运行按秒冲突覆盖报告
+        import secrets
+
+        session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
         cfg = EngineConfig(
             ports=(PortConfig(name=port),),
             cases=tuple(cases),
@@ -381,13 +387,32 @@ class MainWindow(QMainWindow):
     # 进度事件处理（主线程，经信号投递）
     # ------------------------------------------------------------------
     def _on_progress(self, ev: object) -> None:
+        # 终止事件：生成报告 + 打开报告选项卡
         if isinstance(ev, tuple) and ev and ev[0] == "done":
             _, report_path, passed, failed = ev  # type: ignore[misc]
             self._set_engine_status("FINISHED", self._tokens["success"])
+            # 转发完成事件给执行进度选项卡（若有）
+            self._forward_progress(ev)
             QMessageBox.information(
                 self, "执行完成",
                 f"通过 {passed} / 失败 {failed}\n报告: {report_path}",
             )
             # 自动打开报告选项卡
             self.new_tab("report_view", {"report_path": report_path})
+            return
+        # 中间进度事件：首次事件时自动弹出执行进度选项卡，并转发
+        self._forward_progress(ev)
+
+    def _forward_progress(self, ev: object) -> None:
+        """把进度事件转发给执行进度选项卡（自动弹出/复用，单例）."""
+        # 首次中间事件 → 确保选项卡存在
+        if not isinstance(ev, tuple):
+            self.new_tab("execution_progress")
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, QWidget) and w.property("tab_type") == "execution_progress":
+                handler = getattr(w, "on_event", None)
+                if callable(handler):
+                    handler(ev)
+                return
 
