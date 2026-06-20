@@ -525,16 +525,32 @@ def _build_qss(t: dict[str, str]) -> str:
 LIGHT_QSS = _build_qss(LIGHT_TOKENS)
 DARK_QSS = _build_qss(DARK_TOKENS)
 
+# ===========================================================================
+# 全局主题状态（运行时单一事实源）
+# ===========================================================================
+# 各视图调 get_tokens()（无参）取当前主题令牌；set_theme() 切换并重应用 QSS。
+# 这样主题切换不需逐视图传参，也不依赖 QApplication 单例的反查。
+_THEME_DARK: bool = False
 
-def apply_theme(app: object, dark: bool = False) -> None:
-    """应用主题到 QApplication."""
-    app.setStyleSheet(DARK_QSS if dark else LIGHT_QSS)  # type: ignore[attr-defined]
+
+def current_theme_is_dark() -> bool:
+    """当前是否深色主题."""
+    return _THEME_DARK
 
 
-def get_tokens(dark: bool = False) -> dict[str, str]:
-    """获取当前主题的语义令牌字典.
+def get_tokens(dark: bool | None = None) -> dict[str, str]:
+    """获取主题的语义令牌字典.
 
+    dark=None（默认）取当前全局主题；显式传 bool 取指定主题。
     供视图内联配色使用（如 TX/RX 方向色、状态点颜色）。返回语义令牌，
     调用方应引用语义键（``t['data.tx']`` / ``t['success']`` 等），不直接读原始值。
     """
-    return DARK_TOKENS if dark else LIGHT_TOKENS
+    use_dark = _THEME_DARK if dark is None else dark
+    return DARK_TOKENS if use_dark else LIGHT_TOKENS
+
+
+def apply_theme(app: object, dark: bool = False) -> None:
+    """应用主题到 QApplication，并更新全局主题状态."""
+    global _THEME_DARK  # noqa: PLW0603
+    _THEME_DARK = dark
+    app.setStyleSheet(DARK_QSS if dark else LIGHT_QSS)  # type: ignore[attr-defined]

@@ -62,7 +62,11 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self._app_config = app_config or load_app_config_file(Path("atprobe.yaml"))
-        self._tokens = get_tokens(dark=False)
+        # 主题状态（与 app.py 启动时加载的偏好一致）
+        from atprobe.gui.theme import current_theme_is_dark
+
+        self._dark = current_theme_is_dark()
+        self._tokens = get_tokens(dark=self._dark)
         self._registry: TabTypeRegistry = default_registry()
         self._port_manager = PortManager()
         self._engine: Engine | None = None
@@ -73,6 +77,7 @@ class MainWindow(QMainWindow):
         self._init_sidebar()
         self._init_tabs()
         self._init_statusbar()
+        self._init_menubar()
         self.progress.connect(self._on_progress)
 
     # ------------------------------------------------------------------
@@ -158,6 +163,35 @@ class MainWindow(QMainWindow):
     def _set_engine_status(self, state: str, color: str) -> None:
         """更新状态栏的引擎状态（带语义色圆点）。"""
         self._status_engine.setText(f'● <span style="color:{color}">引擎 {state}</span>')
+
+    def _init_menubar(self) -> None:
+        """构造菜单栏：视图（主题切换）."""
+        from PySide6.QtGui import QAction
+
+        view_menu = self.menuBar().addMenu("视图(&V)")
+        self._theme_action = QAction("切换深色主题", self)
+        self._theme_action.setCheckable(True)
+        self._theme_action.setChecked(self._dark)
+        self._theme_action.toggled.connect(self._toggle_theme)
+        view_menu.addAction(self._theme_action)
+
+    def _toggle_theme(self, dark: bool) -> None:
+        """切换浅/深主题：重应用 QSS + 记忆偏好（§2.2）."""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+
+        from atprobe.gui.theme import apply_theme
+
+        self._dark = dark
+        apply_theme(QApplication.instance(), dark=dark)  # type: ignore[arg-type]
+        self._theme_action.setText("切换深色主题" if not dark else "切换浅色主题")
+        # 刷新状态点颜色（内联令牌随主题变）
+        self._tokens = get_tokens(dark=dark)
+        self._set_engine_status(
+            "RUNNING" if self._engine is not None else "IDLE",
+            self._tokens["accent"] if self._engine is not None else self._tokens["neutral"],
+        )
+        QSettings("ATProbe", "ATProbe").setValue("theme/dark", dark)
 
     # ------------------------------------------------------------------
     # 选项卡管理（§2.3）
