@@ -1,0 +1,111 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# 包管理器锁文件二选一：保留 uv.lock / poetry.lock，忽略 pip freeze 产物
+pip freeze.txt
+requirements*.txt.local
+
+# ============================================================
+# 测试 / 类型检查 / Lint 缓存
+# ============================================================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.tox/
+.nox/
+cache/
+
+# ============================================================
+# 项目运行时产物（报告 / 日志 / 会话目录）
+# ============================================================
+# HTML 报告与用例执行会话目录（程序生成，勿提交）
+reports/
+logs/
+logs/**
+*.session.json
+
+# 运行时配置（含本地真实串口/FTP 等环境信息，按需在根目录覆盖）
+atprobe.yaml
+env.yaml
+# 但 examples/ 下的同名样例文件保留
+!examples/**
+!examples/**/atprobe.yaml
+!examples/**/env.yaml
+
+# 临时/调试产物
+_*.bat
+_*.txt
+_smoke*.py
+tmp/
+tmp_*
+*.tmp
+*.bak
+*.swp
+*~
+
+# Windows 重定向产生的误生成文件
+nul
+
+# ============================================================
+# IDE / 编辑器
+# ============================================================
+.idea/
+.vscode/
+*.code-workspace
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================
+# 操作系统
+# ============================================================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Linux
+*~
+.directory
+.Trash-*

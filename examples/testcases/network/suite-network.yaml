@@ -1,0 +1,7 @@
+name: 网络注册测试套件
+description: 网络注册相关用例集合
+tags: [network, regression]
+
+cases:
+  - network-basic_register.yaml
+  - network-pdp_activate.yaml

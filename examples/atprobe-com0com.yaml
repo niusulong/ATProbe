@@ -1,0 +1,31 @@
+# ATProbe 配置：com0com 虚拟串口对（COM20 <-> COM21）
+# 用途：无开发板时，配合 tools/vsim/at_responder.py 守 COM21，ATProbe 连 COM20 跑真实字节流。
+# COM20/COM21 由 com0com 虚拟串口驱动创建（见 tools/vsim/README.md）。
+#
+# 用法：
+#   终端A（守 COM21）：uv run python tools/vsim/at_responder.py COM21
+#   终端B（连 COM20）：uv run atprobe run examples/testcases/network/network-basic_register.yaml --config examples/atprobe-com0com.yaml
+#   或：uv run atprobe run <用例> --port COM20:115200:8N1
+
+ports:
+  - COM20:115200:8N1
+
+default:
+  step_timeout: 5
+  baud: 115200
+  log_level: progress
+
+cases_dir: ./examples/testcases
+report_dir: ./reports
+env_config: ./examples/env.yaml
+
+console:
+  color: true
+  command_truncate: 40
+
+log:
+  dir: ./logs
+  keep: 0
+
+pressure:
+  pass_rate_threshold: 95

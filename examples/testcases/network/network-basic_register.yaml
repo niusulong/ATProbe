@@ -1,0 +1,28 @@
+name: 网络注册-基础验证
+description: 验证 AT 基础响应与网络注册状态
+tags: [network, smoke, p0]
+port: COM3
+
+setup:
+  - command: AT
+    assert: { contains: "OK" }
+    retry: { count: 3, interval: 1000 }
+
+steps:
+  - command: AT+CSQ
+    extract:
+      rssi: '\+CSQ:\s*(\d+)'
+    assert:
+      - { name: 命令成功, contains: "OK" }
+      - { name: 信号合格, var: rssi, op: ge, value: 10 }
+
+  - command: AT+CEREG?
+    extract:
+      stat: 'CEREG:\s*\d,(\d)'
+    when: 'rssi >= 5'
+    assert:
+      - { name: 命令成功, contains: "+CEREG:" }
+
+teardown:
+  - command: AT
+    assert: { contains: "OK" }

@@ -1,0 +1,123 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atprobe"
+version = "0.1.0"
+description = "串口 AT 命令自动化测试工具 (Serial AT Command Automation Testing Tool)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ATProbe" }]
+keywords = ["serial", "at-command", "embedded", "testing", "automation"]
+
+# 运行时依赖（见 TSD §3.1）
+dependencies = [
+    "pyserial>=3.5",
+    "pydantic>=2.5",
+    "ruamel.yaml>=0.18",
+    "typer>=0.9",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "mypy>=1.8",
+    "ruff>=0.4",
+    "types-PyYAML",
+]
+
+[project.scripts]
+atprobe = "atprobe.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atprobe"]
+
+# ---------- uv ----------
+[tool.uv]
+package = true
+
+# ---------- ruff ----------
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "UP",            # pyupgrade
+    "B",             # bugbear
+    "C4",            # comprehensions
+    "SIM",           # simplify
+    "RUF",           # ruff-specific
+]
+ignore = [
+    "E501",   # line length 由 formatter 控制
+    # 中文注释/字符串中的全角标点（，：等）误报，本项目文档以中文为主
+    "RUF001", "RUF002", "RUF003",
+    "RUF100", # unused noqa（与选择性忽略冲突）
+    "B008",   # 函数默认值中调用（Typer/FastAPI 惯用法）
+    "B017",   # pytest.raises(BaseException) 在测试中有意使用
+    "SIM102", # 嵌套 if 合并（可读性优先）
+    "SIM105", # contextlib.suppress（显式 try/except 更清晰）
+    "SIM101", # 多 isinstance 合并
+    "SIM108", # 三元替换 if-else（可读性优先）
+    "SIM117", # 嵌套 with 合并（可读性优先）
+    "UP037",  # 引号注解（兼容性）
+    "UP042",  # class metaclass（Python 3.9 兼容）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]   # 测试中允许 assert False 等
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------- mypy ----------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+# pyserial 为可选依赖，跨平台类型推断不一致，type:ignore 的使用必要性随环境变化
+warn_unused_ignores = false
+packages = ["atprobe"]
+
+[[tool.mypy.overrides]]
+module = ["serial.*", "PySide6.*"]
+ignore_missing_imports = true
+
+# GUI 层与 PySide6 类型存根交互深（重载较多），放宽未注解检查；其余仍 strict
+[[tool.mypy.overrides]]
+module = ["atprobe.gui.*"]
+disallow_untyped_defs = false
+
+# ---------- pytest ----------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+markers = [
+    "e2e: end-to-end tests requiring real or virtual serial hardware",
+]
+
+[tool.coverage.run]
+source = ["atprobe"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+]
