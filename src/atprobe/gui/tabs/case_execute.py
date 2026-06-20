@@ -51,12 +51,19 @@ class CaseExecuteWidget(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # 顶部：目录加载 + 搜索
+        # 顶部：目录加载 + 标签筛选 + 搜索
         top = QHBoxLayout()
         top.setSpacing(8)
         load_btn = QPushButton("加载目录")
         load_btn.clicked.connect(self._load_dir)
         top.addWidget(load_btn)
+        top.addWidget(QLabel("标签:"))
+        self.tag_combo = QComboBox()
+        self.tag_combo.setEditable(True)
+        self.tag_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.tag_combo.setMaximumWidth(120)
+        self.tag_combo.currentTextChanged.connect(self._on_tag_change)
+        top.addWidget(self.tag_combo)
         top.addWidget(QLabel("搜索:"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("按用例名/文件过滤")
@@ -85,6 +92,10 @@ class CaseExecuteWidget(QWidget):
         self.threshold_spin.setRange(0, 100)
         self.threshold_spin.setValue(95)
         param.addWidget(self.threshold_spin)
+        # 生成报告开关
+        self.report_check = QCheckBox("生成报告")
+        self.report_check.setChecked(True)
+        param.addWidget(self.report_check)
         param.addStretch()
         layout.addLayout(param)
 
@@ -101,6 +112,13 @@ class CaseExecuteWidget(QWidget):
         stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         stop_btn.clicked.connect(self._stop)
         btn_row.addWidget(stop_btn)
+        dry_btn = QPushButton("预演")
+        dry_btn.setToolTip("只解析用例 + 检查端口，不实际执行")
+        dry_btn.clicked.connect(self._dry_run)
+        btn_row.addWidget(dry_btn)
+        clear_btn = QPushButton("清空结果")
+        clear_btn.clicked.connect(self._clear_results)
+        btn_row.addWidget(clear_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -138,12 +156,33 @@ class CaseExecuteWidget(QWidget):
             except CaseParseError:
                 continue
             self._cases.append((c.name, c.tags, str(f)))
+        self._refresh_tag_combo()
         self._populate("")
 
+    def _refresh_tag_combo(self) -> None:
+        """聚合所有用例标签，填入标签筛选下拉（保留当前选择/首项「全部」）."""
+        all_tags: set[str] = set()
+        for _name, tags, _file in self._cases:
+            all_tags.update(tags)
+        cur = self.tag_combo.currentText()
+        self.tag_combo.blockSignals(True)
+        self.tag_combo.clear()
+        self.tag_combo.addItem("（全部）")
+        for t in sorted(all_tags):
+            self.tag_combo.addItem(t)
+        # 恢复之前的选择
+        idx = self.tag_combo.findText(cur)
+        self.tag_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.tag_combo.blockSignals(False)
+
     def _populate(self, filter_text: str) -> None:
+        tag_filter = self.tag_combo.currentText().strip()
+        all_tags = tag_filter in ("", "（全部）")
         self.table.setRowCount(0)
         for name, tags, file in self._cases:
             if filter_text and filter_text not in name and filter_text not in file:
+                continue
+            if not all_tags and tag_filter not in tags:
                 continue
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -157,20 +196,63 @@ class CaseExecuteWidget(QWidget):
     def _filter(self) -> None:
         self._populate(self.search_edit.text().strip())
 
-    def _run(self) -> None:
-        selected = []
+    def _on_tag_change(self, _text: str) -> None:
+        self._populate(self.search_edit.text().strip())
+
+    def _selected_files(self) -> list[str]:
+        """收集勾选用例的文件路径。注意：表格只显示筛选后的用例，需按文件匹配回 _cases."""
+        shown_files = [self.table.item(row, 3).text() for row in range(self.table.rowCount())  # type: ignore[union-attr]
+                       if self.table.item(row, 3) is not None]
+        selected: list[str] = []
         for row in range(self.table.rowCount()):
             chk = self.table.cellWidget(row, 0)
             if isinstance(chk, QCheckBox) and chk.isChecked():
-                selected.append(self._cases[row][2])  # file path
+                selected.append(shown_files[row])
+        return selected
+
+    def _run(self) -> None:
+        selected = self._selected_files()
         if not selected:
             return
         port = self.ports_combo.currentText()
         if not port:
             return
         if hasattr(self._main, "run_cases"):
-            self._main.run_cases(selected, port, self.threshold_spin.value())
+            self._main.run_cases(
+                selected, port, self.threshold_spin.value(),
+                no_report=not self.report_check.isChecked(),
+            )
+
+    def _dry_run(self) -> None:
+        selected = self._selected_files()
+        if not selected:
+            return
+        port = self.ports_combo.currentText()
+        if not port:
+            return
+        if hasattr(self._main, "run_cases"):
+            self._main.run_cases(selected, port, self.threshold_spin.value(), dry_run=True)
 
     def _stop(self) -> None:
-        if hasattr(self._main, "stop_engine"):
+        # 优先用带对话框的停止（中断当前 / 停止全部）；兜底直接停止全部
+        stop_dialog = getattr(self._main, "stop_engine_dialog", None)
+        if callable(stop_dialog):
+            stop_dialog()
+        elif hasattr(self._main, "stop_engine"):
             self._main.stop_engine()
+
+    def _clear_results(self) -> None:
+        """清空执行进度选项卡的结果（若已打开）."""
+        from typing import Any
+
+        main: Any = self._main
+        tabs = getattr(main, "tabs", None)
+        if tabs is None:
+            return
+        for i in range(tabs.count()):
+            w = tabs.widget(i)
+            if hasattr(w, "property") and w.property("tab_type") == "execution_progress":
+                clear = getattr(w, "clear", None)
+                if callable(clear):
+                    clear()
+                break

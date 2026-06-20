@@ -295,11 +295,39 @@ class MainWindow(QMainWindow):
         finally:
             super().closeEvent(event)  # type: ignore[arg-type]
 
-    def run_cases(self, case_files: list[str], port: str, threshold: int) -> None:
-        """用例执行：驱动 M3 引擎（在引擎线程，§10.2）."""
-        from atprobe.domain.case.parser import parse_case_file
+    def run_cases(
+        self, case_files: list[str], port: str, threshold: int,
+        *, dry_run: bool = False, no_report: bool = False,
+    ) -> None:
+        """用例执行：驱动 M3 引擎（在引擎线程，§10.2）.
 
-        cases = [parse_case_file(f) for f in case_files]
+        dry_run=True 时只解析用例、检查端口，不实际执行（M5 §3.6 等价）。
+        no_report=True 时不生成 HTML 报告。
+        """
+        from atprobe.domain.case.parser import CaseParseError, parse_case_file
+
+        cases: list[object] = []
+        for f in case_files:
+            try:
+                cases.append(parse_case_file(f))
+            except CaseParseError as exc:
+                QMessageBox.critical(self, "用例解析错误", str(exc))
+                return
+
+        # dry-run：只解析 + 端口可用性检查，不执行
+        if dry_run:
+            try:
+                self._port_manager.open(PortConfig(name=port))
+                open_ok = True
+            except Exception:  # noqa: BLE001
+                open_ok = False
+            status = "可用" if open_ok or self._port_manager.is_connected(port) else "不可用"
+            QMessageBox.information(
+                self, "预演 (Dry Run)",
+                f"将执行用例：{len(cases)} 个\n端口 {port}：{status}\n（未实际执行）",
+            )
+            return
+
         # 确保端口已连接
         if not self._port_manager.is_connected(port):
             try:
@@ -322,7 +350,7 @@ class MainWindow(QMainWindow):
         session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
         cfg = EngineConfig(
             ports=(PortConfig(name=port),),
-            cases=tuple(cases),
+            cases=tuple(cases),  # type: ignore[arg-type]
             step_timeout_default=self._app_config.step_timeout,
             pressure_pass_threshold=float(threshold),
             env_config=env,
@@ -336,6 +364,9 @@ class MainWindow(QMainWindow):
         def _run() -> None:
             assert self._engine is not None
             result = self._engine.start(cfg, handler=lambda ev: self.progress.emit(ev))
+            if no_report:
+                self.progress.emit(("done_noreport", "", result.summary.passed, result.summary.failed))
+                return
             # 生成报告
             rdir = Path(self._app_config.report_dir) / session / "report.html"
             HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
@@ -347,6 +378,21 @@ class MainWindow(QMainWindow):
     def stop_engine(self) -> None:
         if self._engine is not None:
             self._engine.stop(mode=StopMode.ALL)
+
+    def stop_engine_dialog(self) -> None:
+        """停止引擎：弹「中断当前用例 / 停止全部」对话框（M3 §7.2，REQ-M6 §5.5）."""
+        if self._engine is None:
+            return
+        choice = QMessageBox.question(
+            self, "停止执行",
+            "选择停止范围：\n  「是」= 停止全部\n  「否」= 仅中断当前用例，继续后续\n  「取消」= 不停止",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return
+        mode = StopMode.ALL if choice == QMessageBox.StandardButton.Yes else StopMode.CURRENT
+        self._engine.stop(mode=mode)
 
     def subscribe_monitor(self, port: str, sink: Any) -> None:
         """订阅端口原始字节流（M6 §6.2 实时监控，TX+RX 双向）.
@@ -387,18 +433,21 @@ class MainWindow(QMainWindow):
     # 进度事件处理（主线程，经信号投递）
     # ------------------------------------------------------------------
     def _on_progress(self, ev: object) -> None:
-        # 终止事件：生成报告 + 打开报告选项卡
-        if isinstance(ev, tuple) and ev and ev[0] == "done":
-            _, report_path, passed, failed = ev  # type: ignore[misc]
+        # 终止事件：done（生成报告）/ done_noreport（不生成报告）
+        if isinstance(ev, tuple) and ev and ev[0] in ("done", "done_noreport"):
+            tag, report_path, passed, failed = ev  # type: ignore[misc]
             self._set_engine_status("FINISHED", self._tokens["success"])
             # 转发完成事件给执行进度选项卡（若有）
             self._forward_progress(ev)
-            QMessageBox.information(
-                self, "执行完成",
-                f"通过 {passed} / 失败 {failed}\n报告: {report_path}",
-            )
-            # 自动打开报告选项卡
-            self.new_tab("report_view", {"report_path": report_path})
+            if tag == "done_noreport":
+                QMessageBox.information(self, "执行完成", f"通过 {passed} / 失败 {failed}\n（未生成报告）")
+            else:
+                QMessageBox.information(
+                    self, "执行完成",
+                    f"通过 {passed} / 失败 {failed}\n报告: {report_path}",
+                )
+                # 自动打开报告选项卡
+                self.new_tab("report_view", {"report_path": report_path})
             return
         # 中间进度事件：首次事件时自动弹出执行进度选项卡，并转发
         self._forward_progress(ev)
