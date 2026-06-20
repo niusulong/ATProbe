@@ -156,6 +156,72 @@ class TestEnvConfigTab:
         assert widget._group_widgets["ftp"]["host"].text() == "1.2.3.4"  # noqa: SLF001
 
 
+class TestCaseExecuteExtras:
+    """B2：标签筛选、dry-run、报告开关、_selected_files 正确性."""
+
+    def test_tag_filter_and_dry_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.tabs.case_execute import CaseExecuteWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 弹窗打桩（dry-run 会弹 information）
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+
+        # 写两个用例，一个带 network 标签，一个带 sms 标签
+        (tmp_path / "net.yaml").write_text(
+            "name: 网络用例\ntags: [network]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "sms.yaml").write_text(
+            "name: 短信用例\ntags: [sms]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+
+        run_calls: list[dict] = []
+
+        class _Main:
+            def __init__(self):
+                self.tabs = _qw.QTabWidget()
+
+            def available_ports(self):
+                return ["COM3"]
+
+            def run_cases(self, files, port, threshold, *, dry_run=False, no_report=False):
+                run_calls.append({"files": list(files), "dry_run": dry_run, "no_report": no_report})
+
+            def stop_engine_dialog(self):
+                pass
+
+        main = _Main()
+        widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), main)  # type: ignore[arg-type]
+        widget._load_path(tmp_path)  # noqa: SLF001
+
+        # 标签聚合：下拉应含 network、sms
+        tag_items = [widget.tag_combo.itemText(i) for i in range(widget.tag_combo.count())]
+        assert "network" in tag_items and "sms" in tag_items
+
+        # 默认（全部）两个用例都显示
+        assert widget.table.rowCount() == 2
+
+        # 选 network 标签 → 只显示网络用例
+        widget.tag_combo.setCurrentText("network")
+        assert widget.table.rowCount() == 1
+        assert widget.table.item(0, 1).text() == "网络用例"  # type: ignore[union-attr]
+
+        # 切回全部，dry-run：应调用 run_cases(dry_run=True)
+        widget.tag_combo.setCurrentIndex(0)
+        widget.ports_combo.setCurrentText("COM3")
+        widget._dry_run()  # noqa: SLF001
+        assert run_calls and run_calls[-1]["dry_run"] is True
+
+        # 关闭报告开关 → run_cases(no_report=True)
+        widget.report_check.setChecked(False)
+        widget._run()  # noqa: SLF001
+        assert run_calls[-1]["no_report"] is True
+
+
 class _FakeMain:
     """最小化的主窗口替身：模拟端口连接管理与发送，供 ManualDebugWidget 测试.
 
