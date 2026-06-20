@@ -74,8 +74,7 @@ class TestMainWindow:
         win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
 
         received: list[tuple[str, str, bytes]] = []
-        win.subscribe_monitor("COM9", lambda port, direction, data: received.append((port, direction, data)))
-        # 句柄为 (tx_handle, rx_handle)
+        win.subscribe_monitor(["COM9"], lambda port, direction, data: received.append((port, direction, data)))
         assert win._monitor_handle is not None  # noqa: SLF001
 
         # TX：经 write_command 写入 → TX 观察者应收到（含结束符）
@@ -93,6 +92,37 @@ class TestMainWindow:
         win._port_manager.write_command("COM9", "AT2")  # noqa: SLF001
         win._port_manager.emit_rx("COM9", b"more")  # noqa: SLF001
         assert received == []
+
+
+class TestMonitorMultiPort:
+    """B4：多端口监控合并显示 + 导出."""
+
+    def test_multi_port_merged(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """监控两个端口，数据都带 [COMx] 前缀合并到同一 sink."""
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.config import PortConfig
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        win = MainWindow()
+        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+        win._port_manager.open(PortConfig(name="COM3"))  # noqa: SLF001
+        win._port_manager.open(PortConfig(name="COM5"))  # noqa: SLF001
+
+        received: list[tuple[str, str, bytes]] = []
+        win.subscribe_monitor(["COM3", "COM5"], lambda p, d, data: received.append((p, d, data)))
+
+        win._port_manager.write_command("COM3", "AT")  # noqa: SLF001
+        win._port_manager.emit_rx("COM5", b"OK\r\n")  # noqa: SLF001
+        ports = sorted(p for p, _d, _data in received)
+        assert ports == ["COM3", "COM5"]
+
+        # 未在订阅列表的端口不收
+        received.clear()
+        win._port_manager.open(PortConfig(name="COM7"))  # noqa: SLF001
+        win._port_manager.write_command("COM7", "AT")  # noqa: SLF001
+        assert received == []
+
+        win.unsubscribe_monitor()
 
 
 class TestExecutionProgressTab:
