@@ -104,9 +104,12 @@ class MonitorWidget(QWidget):
                 self._main.unsubscribe_monitor()
 
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
-        text = data.decode("utf-8", errors="replace")
         if self.hex_check.isChecked():
             text = " ".join(f"{b:02X}" for b in data)
+        else:
+            text = data.decode("utf-8", errors="replace")
+        # 去掉末尾换行（TX/RX chunk 常带 \r\n，避免渲染出多余空行）
+        text = text.rstrip("\r\n")
         line = f"[{port}] {direction}> {text}"
         self._buffer.append(line)
 

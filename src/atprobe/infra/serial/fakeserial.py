@@ -63,6 +63,7 @@ class FakePortManager:
         self._urc_handlers: dict[str, list[URCHandler]] = field(default_factory=dict)  # type: ignore[assignment]
         self._urc_handlers = {}
         self._rx_observers: dict[str, list[Callable[[bytes], None]]] = {}
+        self._tx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._fail_open: set[str] = set()
         self._log_files: dict[str, Path | None] = {}
 
@@ -173,7 +174,7 @@ class FakePortManager:
                 hs.remove(handler)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
-    # 原始 RX 字节流订阅 + 流式写（手动调试/实时监控用，M6 §6.2）
+    # 原始 RX/TX 字节流订阅 + 流式写（手动调试/实时监控用，M6 §6.2）
     # ------------------------------------------------------------------
     def subscribe_rx(self, port: str, observer: Callable[[bytes], None]) -> object:
         self._rx_observers.setdefault(port, []).append(observer)
@@ -186,12 +187,29 @@ class FakePortManager:
             if observer in obs:  # type: ignore[operator]
                 obs.remove(observer)  # type: ignore[arg-type]
 
+    def subscribe_tx(self, port: str, observer: Callable[[bytes], None]) -> object:
+        self._tx_observers.setdefault(port, []).append(observer)
+        return (port, observer)
+
+    def unsubscribe_tx(self, handle: object) -> None:
+        if isinstance(handle, tuple) and len(handle) == 2:
+            port, observer = handle  # type: ignore[misc]
+            obs = self._tx_observers.get(port, [])  # type: ignore[arg-type]
+            if observer in obs:  # type: ignore[operator]
+                obs.remove(observer)  # type: ignore[arg-type]
+
     def write_command(self, port: str, command: str) -> None:
         """流式写：记录命令（与 send_command 同口径），供测试断言.
 
+        同时向 TX 观察者派发实际写入的字节（含结束符），模拟真实写线程行为。
         不会自动触发 RX 观察者；测试需用 emit_rx() 主动喂入回包。
         """
         self.sent.append((port, command))
+        # 配置里的结束符（默认 \r\n）
+        terminator = self._configs.get(port, PortConfig(name=port)).terminator.value.encode("ascii")
+        payload = command.encode("utf-8") + terminator
+        for obs in self._tx_observers.get(port, []):
+            obs(payload)
 
     def emit_rx(self, port: str, data: bytes) -> None:
         """测试辅助：向某端口的 RX 观察者投递字节（模拟模块回包）."""

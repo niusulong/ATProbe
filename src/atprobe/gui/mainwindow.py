@@ -343,27 +343,37 @@ class MainWindow(QMainWindow):
             self._engine.stop(mode=StopMode.ALL)
 
     def subscribe_monitor(self, port: str, sink: Any) -> None:
-        """订阅端口原始 RX 字节流（M6 §6.2 实时监控）.
+        """订阅端口原始字节流（M6 §6.2 实时监控，TX+RX 双向）.
 
-        sink 签名: ``sink(port, direction, data: bytes)``（与 monitor._on_data 一致）。
-        内部经 ``subscribe_rx`` 接到串口读线程，每读到 chunk 即回调（读线程上下文）。
+        sink 签名: ``sink(port, direction, data: bytes)``，direction 为 "TX"/"RX"。
+        内部同时订阅 TX（写侧）与 RX（读侧），经 PortManager.subscribe_tx/subscribe_rx
+        接到串口写/读线程，每次写入或读到 chunk 即回调。
         """
         self._monitor_sink = sink
         # 撤销上一次的订阅（切换监控端口）
         if self._monitor_handle is not None:
             self.unsubscribe_monitor()
-        # 适配 subscribe_rx 的 1-arg 观察者 → monitor 的 3-arg sink
         bound_port = port
 
-        def _observer(chunk: bytes) -> None:
+        def _tx_observer(chunk: bytes) -> None:
+            if self._monitor_sink is not None:
+                self._monitor_sink(bound_port, "TX", chunk)
+
+        def _rx_observer(chunk: bytes) -> None:
             if self._monitor_sink is not None:
                 self._monitor_sink(bound_port, "RX", chunk)
 
-        self._monitor_handle = self._port_manager.subscribe_rx(port, _observer)
+        # 同时订阅 TX 与 RX，句柄存为 (tx_handle, rx_handle)
+        tx_h = self._port_manager.subscribe_tx(port, _tx_observer)
+        rx_h = self._port_manager.subscribe_rx(port, _rx_observer)
+        self._monitor_handle = (tx_h, rx_h)
 
     def unsubscribe_monitor(self) -> None:
         if self._monitor_handle is not None:
-            self._port_manager.unsubscribe_rx(self._monitor_handle)
+            handle: tuple[object, object] = self._monitor_handle  # type: ignore[assignment]
+            tx_h, rx_h = handle
+            self._port_manager.unsubscribe_tx(tx_h)
+            self._port_manager.unsubscribe_rx(rx_h)
             self._monitor_handle = None
         self._monitor_sink = None
 
