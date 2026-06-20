@@ -4,7 +4,7 @@
 > 日期：2026-06-20
 > 状态：草稿
 > 范围：覆盖 M1-M7 全模块的全局技术选型与架构总览。模块内部实现细节留待 `DSD-{模块}-详细设计.md` 阶段
-> 依赖：PRD-总体需求 v1.3、REQ-M1 v1.6、REQ-M2 v1.4、REQ-M3 v0.2、REQ-M4 v0.2、REQ-M5 v0.1、REQ-M6 v0.2、REQ-M7 v0.1
+> 依赖：PRD-总体需求 v1.3、REQ-M1 v1.7、REQ-M2 v1.4、REQ-M3 v0.2、REQ-M4 v0.2、REQ-M5 v0.2、REQ-M6 v0.3、REQ-M7 v0.1
 
 ---
 
@@ -687,7 +687,7 @@ atprobe/
 │       │   └── junit.py            # JUnit XML（预留）
 │       ├── cli/                    # M5 CLI 入口
 │       │   ├── main.py             # Typer app
-│       │   ├── commands/           # run/list/version 子命令
+│       │   ├── commands/           # run/list/gui 子命令（version 是 --version/-V 标志）
 │       │   ├── options.py          # --port 复合表达式解析等
 │       │   └── rendering.py        # 进度事件 → 控制台行
 │       └── gui/                    # M6 GUI 入口
