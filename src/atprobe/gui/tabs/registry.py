@@ -36,6 +36,9 @@ class ITabView(Protocol):
         """图标标识（主题图标库中的键）."""
         ...
 
+    # is_sidebar_visible() 为可选：定义并返回 False 的选项卡（如执行进度自动弹出类）
+    # 不出现在侧栏；未定义的视为可见。registry.sidebar_items 经 getattr 安全访问。
+
 
 class TabTypeRegistry:
     """选项卡类型注册表（§2.3）."""
@@ -55,11 +58,22 @@ class TabTypeRegistry:
     def display_names(self) -> dict[str, str]:
         return {name: view.display_name for name, view in self._types.items()}
 
+    def sidebar_items(self) -> dict[str, str]:
+        """侧边栏可点击项（排除 is_sidebar_visible=False 的自动弹出类）."""
+        result: dict[str, str] = {}
+        for name, view in self._types.items():
+            visible = getattr(view, "is_sidebar_visible", None)
+            # 默认可见；仅显式返回 False 的（如执行进度自动弹出类）才排除
+            if not callable(visible) or visible():
+                result[name] = view.display_name
+        return result
+
 
 def default_registry() -> TabTypeRegistry:
     """构造默认注册表（注册第一阶段选项卡类型）."""
     from atprobe.gui.tabs.case_execute import CaseExecuteTab
     from atprobe.gui.tabs.env_config import EnvConfigTab
+    from atprobe.gui.tabs.execution_progress import ExecutionProgressTab
     from atprobe.gui.tabs.manual_debug import ManualDebugTab
     from atprobe.gui.tabs.monitor import MonitorTab
     from atprobe.gui.tabs.report_view import ReportViewTab
@@ -68,6 +82,7 @@ def default_registry() -> TabTypeRegistry:
     reg.register(ManualDebugTab())
     reg.register(CaseExecuteTab())
     reg.register(MonitorTab())
+    reg.register(ExecutionProgressTab())
     reg.register(ReportViewTab())
     reg.register(EnvConfigTab())
     return reg

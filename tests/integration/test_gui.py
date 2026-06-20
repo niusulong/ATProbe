@@ -24,9 +24,17 @@ class TestRegistry:
 
         reg = default_registry()
         types = reg.types()
-        # §2.3 第一阶段 5 类选项卡（execution_progress 由引擎弹出，不侧栏注册）
-        for t in ("manual_debug", "case_execute", "monitor", "report_view", "env_config"):
+        # §2.3 第一阶段选项卡（含执行进度，执行时自动弹出）
+        for t in ("manual_debug", "case_execute", "monitor", "execution_progress", "report_view", "env_config"):
             assert t in types, f"缺少选项卡类型 {t}"
+
+    def test_execution_progress_excluded_from_sidebar(self) -> None:
+        """执行进度选项卡不在侧栏显示（执行时自动弹出，§2.3）."""
+        from atprobe.gui.tabs.registry import default_registry
+
+        sidebar = default_registry().sidebar_items()
+        assert "execution_progress" not in sidebar
+        assert "manual_debug" in sidebar
 
     def test_display_names(self) -> None:
         from atprobe.gui.tabs.registry import default_registry
@@ -85,6 +93,49 @@ class TestMainWindow:
         win._port_manager.write_command("COM9", "AT2")  # noqa: SLF001
         win._port_manager.emit_rx("COM9", b"more")  # noqa: SLF001
         assert received == []
+
+
+class TestExecutionProgressTab:
+    def test_event_flow_renders(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """B1：执行进度选项卡消费 CaseStart/Step/CaseResult/Finished 事件，更新表格与进度条."""
+        from atprobe.domain.report.models import Summary
+        from atprobe.engine.interfaces import (
+            CaseResultEvent,
+            CaseStartEvent,
+            EngineFinishedEvent,
+            StepResultEvent,
+        )
+        from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ExecutionProgressWidget(TabBinding(type_name="execution_progress", params={}), object())  # type: ignore[arg-type]
+
+        # 2 个用例：用例1 PASS，用例2 FAIL
+        widget.on_event(CaseStartEvent(case_name="网络注册", case_index=1, total_cases=2, case_type="regular"))
+        assert widget.table.rowCount() == 1
+        assert widget._case_names[1] == "网络注册"  # noqa: SLF001
+
+        widget.on_event(StepResultEvent(
+            step_index=1, phase="steps", status="PASS", duration_ms=120,
+            port="COM3", command="AT+CSQ",
+        ))
+        assert "AT+CSQ" in widget.detail_label.text() and "✓" in widget.detail_label.text()
+
+        widget.on_event(CaseResultEvent(case_name="网络注册", status="PASS", duration_ms=500.0))
+        row0 = widget._find_row_by_name("网络注册")  # noqa: SLF001
+        assert row0 == 0
+        assert widget.table.item(row0, 2).text() == "PASS"  # type: ignore[union-attr]
+
+        widget.on_event(CaseStartEvent(case_name="PDP激活", case_index=2, total_cases=2, case_type="regular"))
+        widget.on_event(CaseResultEvent(case_name="PDP激活", status="FAIL", duration_ms=300.0, error_msg="超时"))
+        assert widget.table.rowCount() == 2
+
+        # 进度条应在第二个用例开始时推进
+        assert 0 < widget.progress_bar.value() <= 100
+
+        # 完成
+        widget.on_event(EngineFinishedEvent(summary=Summary(total_cases=2, passed=1, failed=1)))
+        assert widget.progress_bar.value() == 100
 
 
 class TestEnvConfigTab:
