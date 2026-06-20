@@ -15,8 +15,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings, Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -43,6 +45,10 @@ _FRAMES = ["8N1", "8N2", "8E1", "8O1", "7E1", "7O1"]
 _DEFAULT_QUICK_COMMANDS = ("AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?")
 _MAX_QUICK_COMMANDS = 32
 _SETTINGS_KEY = "manual_debug/quick_commands"
+_HISTORY_KEY = "manual_debug/history"
+_MAX_HISTORY = 50
+# 响应区环形缓冲行数上限（§10.3，超出自动丢弃旧行）
+_MAX_RESPONSE_LINES = 10000
 
 
 class ManualDebugTab(ITabView):
@@ -75,6 +81,8 @@ class ManualDebugWidget(QWidget):
         # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染
         self._rx_buffer = bytearray()
         self._init_ui()
+        # 载入历史指令（QSettings 持久化）
+        self._load_history()
         # RX 字节在串口读线程到达 → 信号切主线程 → 渲染
         self.rx_received.connect(self._on_rx_bytes)
 
@@ -132,10 +140,24 @@ class ManualDebugWidget(QWidget):
         send_layout.setContentsMargins(12, 8, 12, 12)
         send_layout.setSpacing(8)
 
-        self.send_edit = QLineEdit()
-        self.send_edit.setPlaceholderText("输入 AT 指令，回车发送")
-        self.send_edit.returnPressed.connect(self._send)
+        # 多行发送框：单行回车发送，多行（Shift+Enter 换行）点「发送」按行依次发送
+        self.send_edit = QPlainTextEdit()
+        self.send_edit.setPlaceholderText("输入 AT 指令，回车发送；Shift+Enter 换行可多行批量发送")
+        self.send_edit.setMaximumHeight(70)
+        # Ctrl+Enter / Enter 发送（Enter 在单行时发送，Shift+Enter 换行由默认行为处理）
+        send_sc = QShortcut(QKeySequence("Ctrl+Return"), self.send_edit)
+        send_sc.activated.connect(self._send)
         send_layout.addWidget(self.send_edit)
+
+        # 历史指令下拉（最近发送，可回选）
+        hist_row = QHBoxLayout()
+        hist_row.addWidget(self._caption_label("历史"))
+        self.history_combo = QComboBox()
+        self.history_combo.setMaximumWidth(220)
+        self.history_combo.currentTextChanged.connect(self._on_history_pick)
+        hist_row.addWidget(self.history_combo)
+        hist_row.addStretch()
+        send_layout.addLayout(hist_row)
 
         send_row = QHBoxLayout()
         send_btn = QPushButton("发送")
@@ -145,18 +167,19 @@ class ManualDebugWidget(QWidget):
         send_btn.clicked.connect(self._send)
         send_row.addWidget(send_btn)
         clear_btn = QPushButton("清空")
-        clear_btn.clicked.connect(lambda: self.send_edit.clear())
+        clear_btn.clicked.connect(self.send_edit.clear)
         send_row.addWidget(clear_btn)
         send_row.addStretch()
 
-        # 选项行（结束符）—— 手动调试按串口助手语义：发送即记录、收数据即流入
-        # （响应经 subscribe_rx 订阅在后台到达，无「超时」概念）
+        # 选项行（结束符 + HEX 显示）—— 串口助手语义：发送即记录、收数据即流入
         send_row.addWidget(self._caption_label("结束符"))
         self.term_combo = QComboBox()
         self.term_combo.addItems(["\\r\\n", "\\r"])
         self.term_combo.currentTextChanged.connect(self._on_term_change)
         self.term_combo.setMaximumWidth(80)
         send_row.addWidget(self.term_combo)
+        self.hex_check = QCheckBox("HEX显示")
+        send_row.addWidget(self.hex_check)
         send_layout.addLayout(send_row)
         layout.addWidget(send_group)
 
@@ -340,16 +363,18 @@ class ManualDebugWidget(QWidget):
         self._terminator = "\r\n" if "n" in text else "\r"
 
     def _send_quick(self, cmd: str) -> None:
-        self.send_edit.setText(cmd)
+        self.send_edit.setPlainText(cmd)
         self._send()
 
     def _send(self) -> None:
         port = self._current_port()
-        command = self.send_edit.text().strip()
         if not port:
             QMessageBox.warning(self, "提示", "请先选择端口")
             return
-        if not command:
+        # 多行按行依次发送（§4.4 多行发送）
+        raw = self.send_edit.toPlainText()
+        commands = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if not commands:
             return
         is_conn = getattr(self._main, "is_port_connected", None)
         if callable(is_conn) and not is_conn(port):
@@ -359,12 +384,32 @@ class ManualDebugWidget(QWidget):
         if not callable(send_manual):
             self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
             return
-        # TX 立即上屏（串口助手语义：发送即记录）
-        self._append_line("TX", command, self._tokens["data.tx"])
-        # 写字节到端口，不等待响应；模块的回包由 RX 订阅在后台流入渲染
-        ok = send_manual(port, command)
-        if not ok:
-            self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+        for command in commands:
+            # TX 立即上屏（串口助手语义：发送即记录）
+            self._append_line("TX", command, self._tokens["data.tx"])
+            ok = send_manual(port, command)
+            if not ok:
+                self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+        # 记录历史指令（去重，最多 50 条，持久化）
+        self._add_history(commands[-1])
+
+    def _on_history_pick(self, text: str) -> None:
+        """从历史下拉回选指令：填入发送框（不自动发送，让用户可改后发）."""
+        if text:
+            self.send_edit.setPlainText(text)
+
+    def _add_history(self, command: str) -> None:
+        """把指令加入历史下拉（去重、置顶、限 50 条），QSettings 持久化."""
+        items = [self.history_combo.itemText(i) for i in range(self.history_combo.count())]
+        if command in items:
+            items.remove(command)
+        items.insert(0, command)
+        items = items[:50]
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        self.history_combo.addItems(items)
+        self.history_combo.blockSignals(False)
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", items)
 
     # ------------------------------------------------------------------
     # RX 流式接收（读线程 → 信号 → 主线程渲染）
@@ -392,7 +437,16 @@ class ManualDebugWidget(QWidget):
         self.rx_received.emit(chunk)
 
     def _on_rx_bytes(self, chunk: bytes) -> None:
-        """主线程槽：按换行把 RX 字节拆成行渲染，未到换行的尾部留作缓冲."""
+        """主线程槽：按换行把 RX 字节拆成行渲染，未到换行的尾部留作缓冲.
+
+        HEX 开关打开时，每行以十六进制展示（M1 §7.2）。
+        """
+        if self.hex_check.isChecked():
+            hex_line = " ".join(f"{b:02X}" for b in chunk)
+            if hex_line:
+                self._append_line("RX", hex_line, self._tokens["data.rx"])
+            self._rx_buffer.clear()
+            return
         text = chunk.decode("utf-8", errors="replace")
         self._rx_buffer.extend(text.encode("utf-8"))
         data = self._rx_buffer.decode("utf-8", errors="replace")
@@ -403,6 +457,14 @@ class ManualDebugWidget(QWidget):
             if stripped:
                 self._append_line("RX", stripped, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
+
+    def _load_history(self) -> None:
+        """从 QSettings 载入历史指令下拉."""
+        raw = QSettings("ATProbe", "ATProbe").value(_HISTORY_KEY)
+        items = list(raw) if isinstance(raw, (list, tuple)) else []
+        items = [str(x).strip() for x in items if str(x).strip()]
+        if items:
+            self.history_combo.addItems(items)
 
     # ------------------------------------------------------------------
     # 快捷指令自定义 + 持久化
@@ -500,3 +562,11 @@ class ManualDebugWidget(QWidget):
             f'<span style="color:{color};">{safe}</span>'
             f'</div>'
         )
+        # 环形缓冲：超过行数上限丢弃旧行（§10.3，防止长会话撑爆内存）
+        doc = self.response_view.document()
+        if doc.blockCount() > _MAX_RESPONSE_LINES:
+            cursor = self.response_view.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor)
+            cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()

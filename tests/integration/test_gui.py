@@ -327,7 +327,7 @@ class TestManualDebugPortControl:
         main = _FakeMain()
         widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
 
-        widget.send_edit.setText("AT+CSQ")
+        widget.send_edit.setPlainText("AT+CSQ")
         widget._send()  # noqa: SLF001  端口未连接 → 不应发送
         assert main.last_command is None
         # 连接后再发送（_toggle_connect 会建立 RX 订阅）
@@ -405,4 +405,59 @@ class TestManualDebugQuickCommands:
         assert widget._quick_commands == ["ATI", "ATZ"]  # noqa: SLF001
         # 清理：恢复默认，避免污染其它测试
         QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+
+
+class TestManualDebugExtras:
+    """B3：历史指令、HEX 显示、多行发送."""
+
+    def test_multiline_send_and_history(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001  打开 COM1
+
+        # 多行：三行依次发送
+        widget.send_edit.setPlainText("AT\nATI\nAT+CSQ")
+        widget._send()  # noqa: SLF001
+        # last_command 捕获最后一次（AT+CSQ）
+        assert main.last_command == ("COM1", "AT+CSQ")
+        # TX 三行都应上屏
+        text = widget.response_view.toPlainText()
+        assert "TX> AT" in text and "TX> ATI" in text and "TX> AT+CSQ" in text
+
+        # 历史：最后一次指令入历史下拉并持久化
+        items = [widget.history_combo.itemText(i) for i in range(widget.history_combo.count())]
+        assert "AT+CSQ" in items
+        saved = QSettings("ATProbe", "ATProbe").value("manual_debug/history")
+        assert saved is not None and "AT+CSQ" in list(saved)
+        # 清理
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+
+    def test_hex_display(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+
+        widget.hex_check.setChecked(True)
+        main.emit_rx("COM1", b"OK\r\n")
+        text = widget.response_view.toPlainText()
+        # HEX 模式：显示 4F 4B（OK 的十六进制），不显示明文 OK 行
+        assert "4F 4B" in text
+        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
 
