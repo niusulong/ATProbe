@@ -93,7 +93,7 @@ class SerialConnection:
         self._urc_handlers: list[URCHandler] = []
         self._urc_lock = threading.Lock()
 
-        # 原始 RX 字节观察者（手动调试/实时监控的纯流式接收，§6.2）
+        # 原始 RX 字节观察者（手动调试/实时监控的纯流式接收，M6 §6.2）
         self._rx_observers: list[Callable[[bytes], None]] = []
         self._rx_observer_lock = threading.Lock()
 

@@ -831,7 +831,7 @@ GitHub Actions（或同等）三平台矩阵（Win/Linux/macOS）：
 
 1. **本 TSD 评审确认**：确认核心技术栈（Python + PySide6）、线程模型、分层架构、接口契约方向。
 2. **进入 DSD 阶段**：按模块产出详细设计文档（`DSD-M1-详细设计.md` 等），精确到类/方法/数据结构/算法。建议顺序：M1（基础层，其他都依赖）→ M2（领域模型）→ M3（引擎核心）→ M4（报告）→ M7（环境配置）→ M5（CLI）→ M6（GUI）。
-3. **搭建项目骨架**：按 §9.1 创建目录结构、pyproject.toml、CI，建立 FakeSerial 等测试基建，跑通最小 CLI（`atprobe version`）+ 最小用例执行闭环。
+3. **搭建项目骨架**：按 §9.1 创建目录结构、pyproject.toml、CI，建立 FakeSerial 等测试基建，跑通最小 CLI（`atprobe --version`）+ 最小用例执行闭环。
 4. **迭代实现**：按 DSD 逐模块实现，每模块配套单测 + 集成测，CI 门禁把关。
 
 ---

@@ -173,7 +173,7 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         return self._connections.get(port)
 
     # ------------------------------------------------------------------
-    # §6.2 原始 RX 字节流订阅（手动调试/实时监控的纯流式接收）
+    # §6.4/M6 §6.2 原始 RX 字节流订阅（手动调试/实时监控的纯流式接收）
     # ------------------------------------------------------------------
     def subscribe_rx(self, port: str, observer: Callable[[bytes], None]) -> object:
         """订阅端口原始 RX 字节流（每读到 chunk 即回调，读线程上下文）."""

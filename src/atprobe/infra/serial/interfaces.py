@@ -5,10 +5,13 @@
 
 按消费方需要拆分（ISP）：
     ICommandSender     发送命令并等待完整响应（直接输入，§3.1）
-    IDataStreamSender  发送数据流（§3.2，分块）—— 暂不在此（DataInput 由引擎组装）
     IConnectionManager 连接管理 / 端口枚举
     IURCSubscriber     URC 订阅（§6）
     IDataObserver      原始字节流监听（M6 §6.2 实时监控）
+
+注：数据流分块发送（§3.2）由 DataStreamSender 直接操作连接实现，未抽象为 Protocol。
+原始 RX 字节流订阅（手动调试/实时监控，M6 §6.2）经 SerialConnection.add_rx_observer
+提供；write_command（只写不等响应，供手动调试）为 SerialConnection/PortManager 的具体方法。
 
 所有阻塞操作接收 CancelToken（M1 §4.3 操作取消）。
 """

@@ -55,6 +55,29 @@ class TestMainWindow:
         win.new_tab("env_config")
         assert win.tabs.count() == initial + 2
 
+    def test_subscribe_monitor_wires_to_read_thread(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """A1 回归：subscribe_monitor 必须真正接到 subscribe_rx（修空壳 bug）."""
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.config import PortConfig
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        win = MainWindow()
+        # 注入 FakePortManager 并打开一个端口（subscribe_rx 需端口已打开）
+        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+        win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
+
+        received: list[tuple[str, str, bytes]] = []
+        win.subscribe_monitor("COM9", lambda port, direction, data: received.append((port, direction, data)))
+
+        # 模拟读线程投递一个 RX chunk → 应经适配器传到 sink
+        win._port_manager.emit_rx("COM9", b"OK\r\n")  # noqa: SLF001
+        assert received == [("COM9", "RX", b"OK\r\n")]
+
+        # 取消订阅后不再收到
+        win.unsubscribe_monitor()
+        win._port_manager.emit_rx("COM9", b"more")  # noqa: SLF001
+        assert len(received) == 1
+
 
 class TestEnvConfigTab:
     def test_edit_and_save(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -81,9 +81,22 @@ class MonitorWidget(QWidget):
 
     def _toggle(self, checked: bool) -> None:
         if checked:
-            self.subscribe_btn.setText("停止监控")
             port = self.port_combo.currentText()
-            if port and hasattr(self._main, "subscribe_monitor"):
+            if not port:
+                from PySide6.QtWidgets import QMessageBox
+
+                QMessageBox.warning(self, "提示", "请先选择监控端口")
+                self.subscribe_btn.setChecked(False)
+                return
+            # 端口未连接时自动打开（监控通常需要先建立连接）
+            is_conn = getattr(self._main, "is_port_connected", None)
+            if callable(is_conn) and not is_conn(port):
+                open_port = getattr(self._main, "open_port", None)
+                if callable(open_port) and not open_port(port):
+                    self.subscribe_btn.setChecked(False)
+                    return
+            self.subscribe_btn.setText("停止监控")
+            if hasattr(self._main, "subscribe_monitor"):
                 self._main.subscribe_monitor(port, self._on_data)
         else:
             self.subscribe_btn.setText("开始监控")
