@@ -26,13 +26,13 @@ uv sync --extra dev --extra gui
 ```bash
 uv run atprobe run examples/testcases/network/network-basic_register.yaml --port COM3:115200
 uv run atprobe list cases
-uv run atprobe version
+uv run atprobe --version     # 版本号是 --version / -V 标志，不是子命令
 ```
 
 ### GUI
 
 ```bash
-uv run python -m atprobe gui
+uv run atprobe gui           # 桌面端 GUI（PySide6）
 ```
 
 ## 文档

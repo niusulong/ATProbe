@@ -173,7 +173,7 @@ class FakePortManager:
                 hs.remove(handler)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
-    # 原始 RX 字节流订阅 + 流式写（手动调试/实时监控用，§6.2）
+    # 原始 RX 字节流订阅 + 流式写（手动调试/实时监控用，M6 §6.2）
     # ------------------------------------------------------------------
     def subscribe_rx(self, port: str, observer: Callable[[bytes], None]) -> object:
         self._rx_observers.setdefault(port, []).append(observer)

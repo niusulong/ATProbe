@@ -190,6 +190,11 @@ class Engine:
                 if r.status is StepStatus.FAIL:
                     setup_failed = True
                     break
+                # §4.2 连续断连安全阀：达到阈值则放弃用例
+                if self._hit_disconnect_safety(r.step_result, ctx, port_manager):
+                    setup_failed = True
+                    error_msg = "连续断连达到安全阀，放弃用例"
+                    break
 
             if setup_failed:
                 status = CaseStatus.SKIPPED
@@ -243,6 +248,11 @@ class Engine:
                     step_results.append(r.step_result)
                     ports_used.add(r.step_result.port)
                     self._emit_step(handler, r)
+                    # §4.2 连续断连安全阀：达到阈值则放弃用例
+                    if self._hit_disconnect_safety(r.step_result, ctx, port_manager):
+                        aborted = True
+                        error_msg = "连续断连达到安全阀，放弃用例"
+                        break
                     if r.status is StepStatus.FAIL and r.abort_case:
                         aborted = True
                         error_msg = r.step_result.error_msg
@@ -326,6 +336,30 @@ class Engine:
                 retry_count=sr.retry_count, poll_iterations=sr.poll_iterations,
             )
         )
+
+    def _hit_disconnect_safety(self, sr: StepResult, ctx: CaseContext, port_manager: Any) -> bool:
+        """§4.2 连续断连安全阀：维护 ctx.disconnect_streak，达阈值返回 True（应放弃用例）.
+
+        判定依据：步骤失败且错误含「断连/重连失败」（与 M1 send_command 的断连信号一致）。
+        阈值取该端口 PortConfig.reconnect_safety_threshold（默认 3）。成功步骤重置计数。
+        """
+        is_disconnect_err = (
+            sr.status is StepStatus.FAIL
+            and bool(sr.error_msg)
+            and ("断连" in sr.error_msg or "重连失败" in sr.error_msg)
+        )
+        if not is_disconnect_err:
+            if sr.status is not StepStatus.FAIL:
+                ctx.disconnect_streak = 0
+            return False
+        ctx.disconnect_streak += 1
+        threshold = 3  # 默认安全阀（REQ-M1 §4.2）
+        try:
+            cfg = port_manager.config_of(sr.port)  # type: ignore[union-attr]
+            threshold = getattr(cfg, "reconnect_safety_threshold", threshold)
+        except Exception:  # noqa: BLE001 - 无端口配置则用默认阈值
+            pass
+        return ctx.disconnect_streak >= threshold
 
     def _build_case_result(
         self, case: Case, idx: int, status: CaseStatus,

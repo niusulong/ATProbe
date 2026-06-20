@@ -1,8 +1,9 @@
 """进程内虚拟模组端口管理器（零驱动依赖的演示/联调模式）.
 
 当没有开发板、也没装虚拟串口对（com0com/socat）时，用本类作为引擎的 sender：
-直接在进程内把 ATProbe 发出的 AT 指令交给 ``at_responder.AtResponder`` 生成响应，
-不经过任何真实串口/驱动。引擎、提取器、断言、压测、报告全链路照常工作。
+直接在进程内把 ATProbe 发出的 AT 指令交给 ``atprobe.infra.serial.atresponder.AtResponder``
+生成响应，不经过任何真实串口/驱动。引擎、提取器、断言、压测、报告全链路照常工作。
+（注：``tools/vsim/at_responder.py`` 仅是同一应答状态机的 CLI 包装，库级事实源在 src/。）
 
 用法（CLI 通过 ``--vsim`` 自动注入）::
 

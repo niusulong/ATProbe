@@ -340,3 +340,37 @@ steps:
 """)
         result = _engine_with_fake(fake_port).start(_cfg([case1, case2]))
         assert result.summary.passed == 2
+
+
+class TestDisconnectSafety:
+    """§4.2 连续断连安全阀：同用例连续断连达到阈值（默认 3）则放弃用例."""
+
+    def test_safety_valve_aborts_case(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.infra.serial.interfaces import ResponseStatus
+
+        # 5 步都返回断连错误（error 含「断连」）→ 第 3 步触发安全阀放弃用例
+        for _ in range(5):
+            fake_port.script(
+                "COM3",
+                Response(text="", status=ResponseStatus.ERROR, error="端口断连"),
+                match="AT",
+                persistent=True,
+            )
+        case = parse_case("""
+name: disconnect-test
+port: COM3
+on_failure: continue
+steps:
+  - command: AT1
+  - command: AT2
+  - command: AT3
+  - command: AT4
+  - command: AT5
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        # 安全阀在第 3 次连续断连时触发，应放弃用例（status=FAIL，且未执行到第 5 步）
+        assert cr.status is CaseStatus.FAIL
+        assert "安全阀" in cr.error_msg
+        # 连续断连 3 次即放弃 → 执行的步骤数应 < 5
+        assert len(cr.step_results) < 5

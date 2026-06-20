@@ -2,11 +2,14 @@
 
 直接调用 M1（不经 M3 引擎、不产生用例结果）。支持：
     - 选择端口 + 波特率/帧格式 + 打开/关闭连接（状态徽标 + 按钮切换）
-    - 发送 AT 指令（可调结束符；超时为内部常量，不暴露）
+    - 发送 AT 指令（可调结束符；无超时参数——超时是「用例执行」判定响应完整性的概念）
     - 快捷指令：自定义增删，跨会话持久化（QSettings）
 
-线程模型：发送在后台线程执行（send_command 会阻塞等待响应），
-响应经 Qt 信号回到主线程渲染，避免界面冻结、TX 立即可见。
+数据模型（纯流式，串口助手语义）：
+    - 发送：调 MainWindow.send_manual → PortManager.write_command，只写字节不等响应，TX 立即上屏。
+    - 接收：端口打开时经 subscribe_rx 订阅原始 RX 字节流，读线程每收到 chunk 经
+      Qt 信号 rx_received 切回主线程按行渲染（_on_rx_bytes）。模块回什么实时显示什么，
+      不回则不显示——不引入「等待响应/超时」概念。
 """
 
 from __future__ import annotations
@@ -147,7 +150,7 @@ class ManualDebugWidget(QWidget):
         send_row.addStretch()
 
         # 选项行（结束符）—— 手动调试按串口助手语义：发送即记录、收数据即流入
-        # （响应经 subscribe_rx 订阅在后台到达，无需「等待响应」概念）
+        # （响应经 subscribe_rx 订阅在后台到达，无「超时」概念）
         send_row.addWidget(self._caption_label("结束符"))
         self.term_combo = QComboBox()
         self.term_combo.addItems(["\\r\\n", "\\r"])

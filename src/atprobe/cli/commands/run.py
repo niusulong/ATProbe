@@ -24,6 +24,7 @@ from atprobe.engine.interfaces import (
 )
 from atprobe.infra.config.appconfig import AppConfig, load_app_config_file, parse_port_expr
 from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
+from atprobe.infra.serial.config import PortConfig
 from atprobe.reporting.console import (
     format_case_result,
     format_case_start,
@@ -51,6 +52,9 @@ def run(
     ),
     vsim_rssi: int = typer.Option(23, "--vsim-rssi", help="虚拟模组 CSQ 信号 0..31（--vsim 时生效）"),
     vsim_cereg: int = typer.Option(1, "--vsim-cereg", help="虚拟模组 CEREG 状态 0..5（--vsim 时生效）"),
+    baud: int | None = typer.Option(
+        None, "--baud", help="覆盖所有端口的波特率（默认 115200 或配置文件 default.baud）"
+    ),
 ) -> None:
     """执行测试用例/套件/目录."""
     # 1. 加载配置
@@ -76,6 +80,12 @@ def run(
     if not ports:
         typer.secho("错误：端口列表为空", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
+
+    # --baud 覆盖所有端口波特率（REQ-M5 §3.2）
+    if baud is not None and not vsim:
+        from dataclasses import replace as _replace
+
+        ports = [_replace(p, baudrate=baud) for p in ports]
 
     # 3. 加载用例（展开目录）
     case_paths = _resolve_case_paths(paths, app_cfg)
@@ -121,6 +131,9 @@ def run(
             typer.echo(f"  - {c.name}  [{', '.join(c.tags)}]")
         typer.echo(f"端口：{', '.join(p.name for p in ports)}")
         typer.echo(f"用例数：{len(cases)}")
+        # 端口可用性检查（REQ-M5 §3.2/§3.6）：vsim 跳过（虚拟端口不枚举）
+        if not vsim:
+            _check_ports_available(ports)
         return
 
     # 7. 构造引擎配置并执行
@@ -222,3 +235,25 @@ def _resolve_case_paths(paths: list[Path], app_cfg: AppConfig) -> list[Path]:
         else:
             typer.secho(f"警告：路径不存在 {p}", fg=typer.colors.YELLOW, err=True)
     return result
+
+
+def _check_ports_available(ports: list[PortConfig]) -> None:
+    """dry-run 端口可用性检查：列出实际可枚举端口，提示哪些请求端口不存在/被占用（REQ-M5 §3.2）."""
+    try:
+        from atprobe.infra.serial.portmanager import PortManager
+
+        available = {p.name for p in PortManager().enumerate_ports()}
+    except Exception as exc:  # noqa: BLE001 - 枚举失败不阻断 dry-run，仅警告
+        typer.secho(f"（端口枚举失败，跳过可用性检查：{exc}）", fg=typer.colors.YELLOW)
+        return
+    if not available:
+        typer.secho("（系统未发现任何串口；执行时将尝试直接打开指定端口）", fg=typer.colors.YELLOW)
+        return
+    missing = [p.name for p in ports if p.name not in available]
+    if missing:
+        typer.secho(
+            f"警告：以下端口在系统中未发现：{', '.join(missing)}（可用：{', '.join(sorted(available))}）",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(f"端口可用性检查：通过（可用端口：{', '.join(sorted(available))}）")

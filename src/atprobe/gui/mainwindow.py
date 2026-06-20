@@ -45,8 +45,12 @@ class MainWindow(QMainWindow):
     """主窗口（§2.1）.
 
     对各选项卡视图暴露的共享接口（视图经 main_window 访问引擎/端口，§10.5）：
-        connected_ports() / send_manual() / run_cases() / stop_engine()
-        subscribe_monitor() / unsubscribe_monitor() / cases_dir() / env_config_path()
+        连接管理：available_ports() / connected_ports() / is_port_connected()
+                  open_port() / close_port()
+        手动调试：send_manual()（只写不等响应） / subscribe_rx() / unsubscribe_rx()
+        实时监控：subscribe_monitor() / unsubscribe_monitor()
+        用例执行：run_cases() / stop_engine()
+        其它：cases_dir() / env_config_path()
     """
 
     # 跨线程事件投递信号（引擎线程 → 主线程）
@@ -339,9 +343,28 @@ class MainWindow(QMainWindow):
             self._engine.stop(mode=StopMode.ALL)
 
     def subscribe_monitor(self, port: str, sink: Any) -> None:
+        """订阅端口原始 RX 字节流（M6 §6.2 实时监控）.
+
+        sink 签名: ``sink(port, direction, data: bytes)``（与 monitor._on_data 一致）。
+        内部经 ``subscribe_rx`` 接到串口读线程，每读到 chunk 即回调（读线程上下文）。
+        """
         self._monitor_sink = sink
+        # 撤销上一次的订阅（切换监控端口）
+        if self._monitor_handle is not None:
+            self.unsubscribe_monitor()
+        # 适配 subscribe_rx 的 1-arg 观察者 → monitor 的 3-arg sink
+        bound_port = port
+
+        def _observer(chunk: bytes) -> None:
+            if self._monitor_sink is not None:
+                self._monitor_sink(bound_port, "RX", chunk)
+
+        self._monitor_handle = self._port_manager.subscribe_rx(port, _observer)
 
     def unsubscribe_monitor(self) -> None:
+        if self._monitor_handle is not None:
+            self._port_manager.unsubscribe_rx(self._monitor_handle)
+            self._monitor_handle = None
         self._monitor_sink = None
 
     # ------------------------------------------------------------------
