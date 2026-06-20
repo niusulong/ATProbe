@@ -155,15 +155,22 @@ uv run atprobe gui    # 或开 GUI 手动调试
 |------|------|------|
 | `AT` | `OK` | 基础连通 |
 | `ATI` | 产品信息 + `OK` | 模组标识 |
+| `AT&V` | 产品信息 + `OK` | 别名到 ATI（产品信息） |
 | `AT+CSQ` / `AT+CSQ?` | `+CSQ: <rssi>,99` + `OK` | rssi 可配，默认 23 |
 | `AT+CEREG?` | `+CEREG: <n>,<stat>` + `OK` | stat 可配，默认 1=已注册 |
-| `AT+CEREG=<n>` | `OK`（置位上报开关 n） | 写指令 |
+| `AT+CEREG=<n>` | `OK`（置位上报开关 n，状态被记忆） | 写指令，影响后续 `AT+CEREG?` 的 n |
 | `AT+CPIN?` | `+CPIN: READY` + `OK` | SIM 就绪 |
 | `AT+CGDCONT?` | 多行 PDP 上下文 + `OK` | |
+| `AT+CGDCONT=` | `OK` | 写指令（占位） |
 | `AT+CGATT?` | `+CGATT: 1` + `OK` | 已附着 |
-| `AT+CMGF=` / `AT+CNMI=` / `AT+CFUN=` / `AT+CGACT=` | `OK` | 占位 |
+| `AT+CGATT=` | `OK` | 写指令（占位） |
+| `AT+CMGF=` | `OK`（cmgf 模式被记忆） | 写指令，状态持久（0=PDU/1=文本） |
+| `AT+CNMI=` / `AT+CFUN=` / `AT+CGACT=` | `OK` | 占位 |
 | `ATZ` / `ATE0` / `ATE1` / `AT&W` | `OK` | 常规 |
 | 其他未知 | `ERROR` | |
+
+> 应答状态机的单一事实源：`src/atprobe/infra/serial/atresponder.py`（`AtResponder._handlers`）。
+> `tools/vsim/at_responder.py` 仅是同一状态机的 CLI 包装。
 
 ---
 
