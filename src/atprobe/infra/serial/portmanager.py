@@ -191,6 +191,22 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if conn is not None:
             conn.remove_rx_observer(observer)  # type: ignore[arg-type]
 
+    def subscribe_tx(self, port: str, observer: Callable[[bytes], None]) -> object:
+        """订阅端口原始 TX 字节流（每次写入即回调，写线程上下文，M6 §6.2）."""
+        conn = self._connections.get(port)
+        if conn is None:
+            raise KeyError(f"端口 {port} 未打开")
+        conn.add_tx_observer(observer)
+        return (port, observer)
+
+    def unsubscribe_tx(self, handle: object) -> None:
+        if not isinstance(handle, tuple) or len(handle) != 2:
+            return
+        port, observer = handle  # type: ignore[misc]
+        conn = self._connections.get(port)  # type: ignore[arg-type]
+        if conn is not None:
+            conn.remove_tx_observer(observer)  # type: ignore[arg-type]
+
     def write_command(self, port: str, command: str) -> None:
         """写字符串命令（追加结束符），不等待响应——供手动调试/串口助手用."""
         conn = self._connections.get(port)

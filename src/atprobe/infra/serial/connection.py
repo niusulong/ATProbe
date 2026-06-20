@@ -96,6 +96,9 @@ class SerialConnection:
         # 原始 RX 字节观察者（手动调试/实时监控的纯流式接收，M6 §6.2）
         self._rx_observers: list[Callable[[bytes], None]] = []
         self._rx_observer_lock = threading.Lock()
+        # 原始 TX 字节观察者（监控页显示发送侧，M6 §6.2）
+        self._tx_observers: list[Callable[[bytes], None]] = []
+        self._tx_observer_lock = threading.Lock()
 
         # 重连
         self._reconnecting = threading.Lock()
@@ -111,6 +114,26 @@ class SerialConnection:
             if observer in self._rx_observers:
                 self._rx_observers.remove(observer)
 
+    def add_tx_observer(self, observer: Callable[[bytes], None]) -> None:
+        """订阅原始 TX 字节流（每次写入即回调，写线程上下文）."""
+        with self._tx_observer_lock:
+            if observer not in self._tx_observers:
+                self._tx_observers.append(observer)
+
+    def remove_tx_observer(self, observer: Callable[[bytes], None]) -> None:
+        with self._tx_observer_lock:
+            if observer in self._tx_observers:
+                self._tx_observers.remove(observer)
+
+    def _notify_tx_observers(self, chunk: bytes) -> None:
+        with self._tx_observer_lock:
+            observers = list(self._tx_observers)
+        for obs in observers:
+            try:
+                obs(chunk)
+            except Exception:  # noqa: BLE001 - 观察者错误不影响写线程
+                pass
+
     def write_command(self, command: str) -> None:
         """写字符串命令（自动追加结束符），不等待响应——供手动调试/串口助手用.
 
@@ -121,6 +144,7 @@ class SerialConnection:
         terminator = self.config.terminator.value.encode("ascii")
         payload = command.encode("utf-8") + terminator
         self._log_tx(payload)
+        self._notify_tx_observers(payload)
         try:
             self._serial.write(payload)  # type: ignore[union-attr]
             self._serial.flush()  # type: ignore[union-attr]
@@ -196,6 +220,7 @@ class SerialConnection:
         self._awaiting.set()
 
         self._log_tx(payload)
+        self._notify_tx_observers(payload)
         try:
             self._serial.write(payload)  # type: ignore[union-attr]
             self._serial.flush()  # type: ignore[union-attr]
