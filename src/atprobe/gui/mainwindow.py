@@ -394,38 +394,44 @@ class MainWindow(QMainWindow):
         mode = StopMode.ALL if choice == QMessageBox.StandardButton.Yes else StopMode.CURRENT
         self._engine.stop(mode=mode)
 
-    def subscribe_monitor(self, port: str, sink: Any) -> None:
-        """订阅端口原始字节流（M6 §6.2 实时监控，TX+RX 双向）.
+    def subscribe_monitor(self, ports: list[str], sink: Any) -> None:
+        """订阅多端口原始字节流（M6 §6.2 实时监控，TX+RX 双向）.
 
         sink 签名: ``sink(port, direction, data: bytes)``，direction 为 "TX"/"RX"。
-        内部同时订阅 TX（写侧）与 RX（读侧），经 PortManager.subscribe_tx/subscribe_rx
-        接到串口写/读线程，每次写入或读到 chunk 即回调。
+        对每个端口同时订阅 TX（写侧）与 RX（读侧），每次写入或读到 chunk 即回调。
+        ports 为空或端口未打开时静默跳过该端口。
         """
         self._monitor_sink = sink
-        # 撤销上一次的订阅（切换监控端口）
+        # 撤销上一次的订阅（切换监控端口集）
         if self._monitor_handle is not None:
             self.unsubscribe_monitor()
-        bound_port = port
+        handles: list[object] = []
 
-        def _tx_observer(chunk: bytes) -> None:
-            if self._monitor_sink is not None:
-                self._monitor_sink(bound_port, "TX", chunk)
+        for port in ports:
+            if not self._port_manager.is_connected(port):
+                continue
+            bound_port = port
 
-        def _rx_observer(chunk: bytes) -> None:
-            if self._monitor_sink is not None:
-                self._monitor_sink(bound_port, "RX", chunk)
+            def _tx_observer(chunk: bytes, bp: str = bound_port) -> None:
+                if self._monitor_sink is not None:
+                    self._monitor_sink(bp, "TX", chunk)
 
-        # 同时订阅 TX 与 RX，句柄存为 (tx_handle, rx_handle)
-        tx_h = self._port_manager.subscribe_tx(port, _tx_observer)
-        rx_h = self._port_manager.subscribe_rx(port, _rx_observer)
-        self._monitor_handle = (tx_h, rx_h)
+            def _rx_observer(chunk: bytes, bp: str = bound_port) -> None:
+                if self._monitor_sink is not None:
+                    self._monitor_sink(bp, "RX", chunk)
+
+            handles.append(self._port_manager.subscribe_tx(port, _tx_observer))
+            handles.append(self._port_manager.subscribe_rx(port, _rx_observer))
+        self._monitor_handle = tuple(handles)
 
     def unsubscribe_monitor(self) -> None:
         if self._monitor_handle is not None:
-            handle: tuple[object, object] = self._monitor_handle  # type: ignore[assignment]
-            tx_h, rx_h = handle
-            self._port_manager.unsubscribe_tx(tx_h)
-            self._port_manager.unsubscribe_rx(rx_h)
+            handles: tuple[object, ...] = self._monitor_handle  # type: ignore[assignment]
+            for i, h in enumerate(handles):
+                if i % 2 == 0:
+                    self._port_manager.unsubscribe_tx(h)
+                else:
+                    self._port_manager.unsubscribe_rx(h)
             self._monitor_handle = None
         self._monitor_sink = None
 
