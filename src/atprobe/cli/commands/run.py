@@ -186,6 +186,10 @@ def run(
                         truncate=app_cfg.command_truncate, color=color, error_msg=ev.error_msg,
                     )
                 )
+                # debug 级额外打印原始响应文本（\r\n 转义为可见 <CR><LF>，便于核对字节格式）
+                if log_level == "debug" and ev.response:
+                    vis = ev.response.replace("\r", "<CR>").replace("\n", "<LF>")
+                    typer.echo(f"           resp: {vis}")
         elif isinstance(ev, PressureProgressEvent):
             typer.echo(
                 f"  进度: {ev.current_round}/{ev.total_rounds}轮 | 成功 {ev.success} | "
