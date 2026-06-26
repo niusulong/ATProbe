@@ -1,17 +1,17 @@
 """M1 串口原始日志记录（REQ-M1 §7）.
 
-记录串口所有收发的原始字节流，HEX + TEXT 双格式（§7.2），按「会话/端口/用例」三维度
-组织（§7.3）。读线程不直接写文件（避免 I/O 拖慢字节读取），由独立写入线程异步落盘
+记录串口所有收发的原始字节流，HEX 与 TEXT 分离到两个独立文件（§7.2），按「会话/端口/用例」
+三维度组织（§7.3）。读线程不直接写文件（避免 I/O 拖慢字节读取），由独立写入线程异步落盘
 （TSD §7.4）。
 
-格式（§7.2）::
+每用例每端口生成两个文件（§7.2 TEXT 与 HEX 分离）::
 
-    [2026-05-19 14:30:25.123] [TX] [TEXT] AT\r\n
-    [2026-05-19 14:30:25.123] [TX] [HEX]  41 54 0D 0A
-    [2026-05-19 14:30:25.456] [RX] [TEXT] OK\r\n
-    [2026-05-19 14:30:25.456] [RX] [HEX]  4F 4B 0D 0A
-
-每个用例每端口一个独立日志文件（§7.3）。
+    <case>.text.log  —— 文本格式：
+        [2026-05-19 14:30:25.123] [TX] AT\r\n
+        [2026-05-19 14:30:25.456] [RX] OK\r\n
+    <case>.hex.log   —— 十六进制格式：
+        [2026-05-19 14:30:25.123] [TX] 41 54 0D 0A
+        [2026-05-19 14:30:25.456] [RX] 4F 4B 0D 0A
 """
 
 from __future__ import annotations
@@ -84,11 +84,15 @@ class RawLogger:
         self._queue.put(_Record(direction=direction, data=data, timestamp=ts, file_path=file_path))
 
     def begin_case(self, log_dir: Path, session: str, port: str, case_name: str) -> Path:
-        """为某用例某端口准备日志文件路径（按 §7.3 目录组织）."""
+        """为某用例某端口准备日志文件路径（按 §7.3 目录组织）.
+
+        返回基础路径（stem，无后缀）；实际写入时派生 ``<stem>.text.log`` 和
+        ``<stem>.hex.log`` 两个独立文件（§7.2 TEXT 与 HEX 分离）。
+        """
         safe_case = _sanitize(case_name)
         case_dir = log_dir / session / port
         case_dir.mkdir(parents=True, exist_ok=True)
-        return case_dir / f"{safe_case}.log"
+        return case_dir / safe_case
 
     # ------------------------------------------------------------------
     # 后台线程
@@ -115,11 +119,15 @@ class RawLogger:
         try:
             text = rec.data.decode("utf-8", errors="replace")
             hexs = " ".join(f"{b:02X}" for b in rec.data)
-            with open(rec.file_path, "a", encoding="utf-8") as f:
-                f.write(f"[{rec.timestamp}] [{rec.direction}] [TEXT] {text}")
+            stem = rec.file_path  # begin_case 返回的基础路径（无后缀）
+            parent, name = stem.parent, stem.name
+            # TEXT 与 HEX 分离到两个独立文件（§7.2）
+            with open(parent / f"{name}.text.log", "a", encoding="utf-8") as f:
+                f.write(f"[{rec.timestamp}] [{rec.direction}] {text}")
                 if not text.endswith("\n"):
                     f.write("\n")
-                f.write(f"[{rec.timestamp}] [{rec.direction}] [HEX]  {hexs}\n")
+            with open(parent / f"{name}.hex.log", "a", encoding="utf-8") as f:
+                f.write(f"[{rec.timestamp}] [{rec.direction}] {hexs}\n")
         except OSError:
             # 日志失败不应影响测试主流程（吞掉，避免读线程崩）
             pass
