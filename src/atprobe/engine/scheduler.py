@@ -55,7 +55,9 @@ class Engine:
     ) -> None:
         # 默认用 PortManager 作为 sender；测试可注入 FakeSender
         self._sender_factory = sender_factory
+        # raw_logger 由外部注入时，生命周期由外部管理；为 None 时 start 时自动创建并管理
         self._raw_logger = raw_logger
+        self._owns_raw_logger = raw_logger is None  # 未注入 → start 时自建
         self._clock = clock
         self._sleep = sleep
 
@@ -86,6 +88,12 @@ class Engine:
         self._stop_flag.clear()
         self._stop_mode = None
 
+        # 原始日志记录器：未注入则自建（REQ-M1 §7，运行时自动落盘 TX/RX 字节流）
+        if self._owns_raw_logger and self._raw_logger is None:
+            self._raw_logger = RawLogger()
+        if self._raw_logger is not None:
+            self._raw_logger.start()
+
         sender, port_manager = self._resolve_sender(config)
         cancel = CancelToken()
         self._cancel_token = cancel
@@ -100,6 +108,8 @@ class Engine:
             # 单端口失败不一定是致命；全部失败才是 ERROR（§7.5 场景C）
             if not any(port_manager.is_connected(p) for p in [pc.name for pc in config.ports]):  # type: ignore[union-attr]
                 self._state = EngineState.ERROR
+                if self._owns_raw_logger and self._raw_logger is not None:
+                    self._raw_logger.stop()
                 return self._error_result(config, f"端口打开失败：{exc}")
 
         default_port = config.ports[0].name if config.ports else ""
@@ -142,6 +152,9 @@ class Engine:
                 port_manager.close_all()  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001
                 pass
+            # 停止原始日志记录器，确保缓冲落盘（仅 Engine 自建的才停，外部注入的由外部管理）
+            if self._owns_raw_logger and self._raw_logger is not None:
+                self._raw_logger.stop()
 
         summary = aggregate(case_results)
         env_snap = self._env_snapshot(config)
