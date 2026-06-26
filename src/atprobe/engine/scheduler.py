@@ -334,6 +334,7 @@ class Engine:
                 duration_ms=sr.duration_ms, port=sr.port, command=sr.command,
                 extracted_vars=dict(sr.extracted_vars), error_msg=sr.error_msg,
                 retry_count=sr.retry_count, poll_iterations=sr.poll_iterations,
+                response=sr.response,
             )
         )
 
