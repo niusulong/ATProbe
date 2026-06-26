@@ -32,6 +32,7 @@ class StepResultEvent:
     error_msg: str = ""
     retry_count: int = 0
     poll_iterations: int = 0
+    response: str = ""  # 原始响应文本（debug 级日志展示用）
 
 
 @dataclass(frozen=True)
