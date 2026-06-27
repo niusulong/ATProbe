@@ -551,7 +551,7 @@ class ManualDebugWidget(QWidget):
         import html as _html
         from datetime import datetime
 
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         safe = _html.escape(text, quote=False)
         muted = self._tokens["text.secondary"]
         self.response_view.append(

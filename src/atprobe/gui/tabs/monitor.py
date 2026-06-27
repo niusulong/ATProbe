@@ -1,10 +1,10 @@
 """实时监控选项卡（M6 §6.2）—— 多端口 TX/RX 数据流监控.
 
 独立观察端口的原始收发字节流（与手动调试响应区同源）。支持：
-    - 多端口勾选：同时监控多个端口，合并显示加 [COMx] 前缀
+    - 多端口勾选：同时监控多个端口，**每个端口一个独立子标签页**（数据互不混淆）
     - 自动打开：未连接的勾选端口自动打开
-    - HEX/TEXT 切换
-    - 导出当前监控段为文件
+    - HEX/TEXT 切换（作用于当前子页）
+    - 清空/导出当前子页
     - 环形缓冲（行数上限，防长监控撑爆内存）
 """
 
@@ -20,12 +20,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from atprobe.gui.tabs.registry import ITabView, TabBinding
+from atprobe.gui.theme import MONO_FONT, get_tokens
 
 _MAX_LINES = 10000  # 环形缓冲上限（§10.3）
 
@@ -42,18 +44,81 @@ class MonitorTab(ITabView):
         return MonitorWidget(binding, main_window)
 
 
+class _PortSubView(QWidget):
+    """单个端口的监控子页（独立 QTextEdit + 环形 buffer）.
+
+    buffer 存 ``(direction, ts, text)`` 元组（direction ∈ {TX, RX}），flush 时批量
+    渲染为带方向色的 HTML（对齐 manual_debug 终端美学：方向标记加粗方向色、
+    时间戳弱化、内容方向色）。导出仍可从元组重建纯文本。
+    """
+
+    def __init__(self, port: str, tokens: dict[str, str]) -> None:
+        super().__init__()
+        self.port = port
+        self._tokens = tokens
+        self.buffer: deque[tuple[str, str, str]] = deque(maxlen=_MAX_LINES)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+        layout.addWidget(self.view)
+
+    def append(self, direction: str, ts: str, text: str) -> None:
+        self.buffer.append((direction, ts, text))
+
+    def _color_of(self, direction: str) -> str:
+        """方向 → 语义色（TX 蓝 / RX 深色文本，复用主题 data.* 令牌）."""
+        return self._tokens["data.tx"] if direction == "TX" else self._tokens["data.rx"]
+
+    def _format_line_html(self, direction: str, ts: str, text: str) -> str:
+        """单行 → 着色 HTML（时间戳弱化 + 方向标记加粗方向色 + 内容方向色）."""
+        import html as _html
+
+        safe = _html.escape(text, quote=False)
+        color = self._color_of(direction)
+        muted = self._tokens["text.secondary"]
+        return (
+            f'<div style="font-family:{MONO_FONT};font-size:12px;margin:1px 0;">'
+            f'<span style="color:{muted};font-size:11px;">{ts}</span> '
+            f'<b style="color:{color};">{_html.escape(direction)}&gt;</b> '
+            f'<span style="color:{color};">{safe}</span>'
+            f'</div>'
+        )
+
+    def flush(self) -> None:
+        """把 buffer 批量渲染为 HTML 写入 view 并滚到底."""
+        if not self.buffer:
+            return
+        html = "".join(self._format_line_html(d, ts, t) for d, ts, t in self.buffer)
+        self.buffer.clear()
+        self.view.append(html)
+        cursor = self.view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.view.setTextCursor(cursor)
+
+    def clear(self) -> None:
+        self.buffer.clear()
+        self.view.clear()
+
+    def to_plain_text(self) -> str:
+        """导出纯文本（从元组重建，格式与历史一致：[ts] dir> text）."""
+        self.flush()
+        return self.view.toPlainText()
+
+
 class MonitorWidget(QWidget):
-    """多端口数据流监控视图（§6.2）."""
+    """多端口数据流监控视图（§6.2，每端口独立子标签页）."""
 
     def __init__(self, binding: TabBinding, main_window: object) -> None:
         super().__init__()
         self._main = main_window
-        self._buffer: deque[str] = deque(maxlen=_MAX_LINES)
+        self._tokens = get_tokens()
         self._port_checks: list[QCheckBox] = []
+        self._sub_views: dict[str, _PortSubView] = {}  # port -> 子页
         self._init_ui()
-        # 定时刷新显示（节流，避免每字节刷新卡顿）
+        # 定时刷新显示（节流，避免每字节刷新卡顿）；单 timer 遍历所有子页 flush
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._flush)
+        self._timer.timeout.connect(self._flush_all)
         self._timer.start(200)
 
     def _init_ui(self) -> None:
@@ -77,7 +142,7 @@ class MonitorWidget(QWidget):
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
-        # 操作行：开始/停止 + HEX + 清空 + 导出
+        # 操作行：开始/停止 + HEX + 清空 + 导出（均作用于当前子页）
         op_row = QHBoxLayout()
         op_row.setSpacing(8)
         self.subscribe_btn = QPushButton("开始监控")
@@ -95,10 +160,14 @@ class MonitorWidget(QWidget):
         op_row.addStretch()
         layout.addLayout(op_row)
 
-        self.view = QTextEdit()
-        self.view.setReadOnly(True)
-        # 字体/底色由 theme.py 的 QTextEdit QSS 统一控制（MONO_FONT + bg.inset）
-        layout.addWidget(self.view, 1)
+        # 端口子标签页（每端口一个独立子页）
+        self._port_tabs = QTabWidget()
+        self._port_tabs.setTabsClosable(True)
+        self._port_tabs.tabCloseRequested.connect(self._on_close_sub_tab)
+        self._empty_hint = QLabel("（开始监控后，每个端口将显示为独立子页）")
+        self._empty_hint.setStyleSheet("color: gray; padding: 20px;")
+        self._port_tabs.addTab(self._empty_hint, "—")
+        layout.addWidget(self._port_tabs, 1)
 
     # ------------------------------------------------------------------
     # 端口勾选
@@ -127,6 +196,41 @@ class MonitorWidget(QWidget):
         return [cb.text() for cb in self._port_checks if cb.isChecked()]
 
     # ------------------------------------------------------------------
+    # 子页管理
+    # ------------------------------------------------------------------
+    def _ensure_sub_view(self, port: str) -> _PortSubView:
+        """获取/创建某端口的子页（首次数据到达或开始监控时创建）."""
+        sv = self._sub_views.get(port)
+        if sv is not None:
+            return sv
+        sv = _PortSubView(port, self._tokens)
+        self._sub_views[port] = sv
+        # 移除占位空提示页（首次创建子页时）
+        if self._port_tabs.indexOf(self._empty_hint) >= 0:
+            self._port_tabs.removeTab(self._port_tabs.indexOf(self._empty_hint))
+        self._port_tabs.addTab(sv, port)
+        return sv
+
+    def _on_close_sub_tab(self, idx: int) -> None:
+        """用户关闭某端口子页：移除子页（历史数据清除）。不影响监控订阅状态。"""
+        w = self._port_tabs.widget(idx)
+        if w is self._empty_hint:
+            return  # 占位页不允许关
+        port = getattr(w, "port", None)
+        self._port_tabs.removeTab(idx)
+        if port and port in self._sub_views:
+            del self._sub_views[port]
+        # 若无子页了，恢复占位提示
+        if not self._sub_views and self._port_tabs.indexOf(self._empty_hint) < 0:
+            self._port_tabs.addTab(self._empty_hint, "—")
+
+    def _current_sub_view(self) -> _PortSubView | None:
+        w = self._port_tabs.currentWidget()
+        if isinstance(w, _PortSubView):
+            return w
+        return None
+
+    # ------------------------------------------------------------------
     # 监控开/关
     # ------------------------------------------------------------------
     def _toggle(self, checked: bool) -> None:
@@ -146,6 +250,8 @@ class MonitorWidget(QWidget):
                     if not open_port(p):
                         # 打开失败则跳过该端口
                         continue
+                # 预创建子页（即使暂无数据也先显示空页）
+                self._ensure_sub_view(p)
             self.subscribe_btn.setText("停止监控")
             if hasattr(self._main, "subscribe_monitor"):
                 self._main.subscribe_monitor(self._selected_ports(), self._on_data)
@@ -155,38 +261,40 @@ class MonitorWidget(QWidget):
                 self._main.unsubscribe_monitor()
 
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
+        from datetime import datetime
+
         if self.hex_check.isChecked():
             text = " ".join(f"{b:02X}" for b in data)
         else:
             text = data.decode("utf-8", errors="replace")
         # 去掉末尾换行（TX/RX chunk 常带 \r\n，避免渲染出多余空行）
         text = text.rstrip("\r\n")
-        line = f"[{port}] {direction}> {text}"
-        self._buffer.append(line)
+        # 时间戳与 manual_debug 响应区一致（含年月日），便于跨天核对
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sv = self._ensure_sub_view(port)
+        sv.append(direction, ts, text)
 
-    def _flush(self) -> None:
-        if not self._buffer:
-            return
-        # 批量追加
-        text = "\n".join(self._buffer)
-        self._buffer.clear()
-        self.view.append(text)
-        # 滚到底
-        cursor = self.view.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.view.setTextCursor(cursor)
+    def _flush_all(self) -> None:
+        """遍历所有子页 flush 各自 buffer（单 timer）。"""
+        for sv in self._sub_views.values():
+            sv.flush()
 
     def _clear(self) -> None:
-        self._buffer.clear()
-        self.view.clear()
+        """清空当前子页（不影响其他端口）。"""
+        sv = self._current_sub_view()
+        if sv is not None:
+            sv.clear()
 
     def _export(self) -> None:
-        """导出当前监控区内容到文件（M1 §7.3 日志格式）."""
-        text = self.view.toPlainText()
+        """导出当前子页内容到文件（M1 §7.3 日志格式）。"""
+        sv = self._current_sub_view()
+        if sv is None:
+            return
+        text = sv.to_plain_text()  # 内部已 flush，确保导出最新内容
         if not text:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出监控日志", "atprobe-monitor.log", "Text (*.log *.txt)"
+            self, f"导出 {sv.port} 监控日志", f"atprobe-monitor-{sv.port}.log", "Text (*.log *.txt)"
         )
         if path:
             from pathlib import Path
