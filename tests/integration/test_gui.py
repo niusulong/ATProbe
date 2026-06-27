@@ -535,7 +535,7 @@ class TestManualDebugStripped:
 
 
 class TestCommandLibraryPanel:
-    """命令库侧栏面板：加载渲染 + 双击发送信号。"""
+    """命令库侧栏面板：加载渲染 + 单击发送信号。"""
 
     def test_loads_and_renders_tree(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """面板从内置示例加载 → 渲染出项目/功能/命令三层。"""
@@ -548,24 +548,24 @@ class TestCommandLibraryPanel:
         first = panel.tree.topLevelItem(0)
         assert first is not None and first.childCount() > 0
 
-    def test_double_click_command_emits_signal(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """双击命令叶子 → emit send_requested(命令字符串)。"""
+    def test_click_command_emits_signal(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """单击命令叶子 → emit send_requested(命令字符串)。"""
         from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
         panel = CommandLibraryPanel()
         received: list[str] = []
         panel.send_requested.connect(lambda cmd: received.append(cmd))
 
-        # 找第一个命令叶子并双击
+        # 找第一个命令叶子并单击
         first_proj = panel.tree.topLevelItem(0)
         first_grp = first_proj.child(0)
         first_cmd = first_grp.child(0)
-        panel._on_double_click(first_cmd, 0)  # noqa: SLF001
+        panel._on_click(first_cmd, 0)  # noqa: SLF001
         assert len(received) == 1
         assert received[0] == first_cmd.text(0)
 
-    def test_double_click_project_does_not_emit(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """双击项目/功能节点 → 不 emit 信号。"""
+    def test_click_project_does_not_emit(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """单击项目/功能节点 → 不 emit 信号。"""
         from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
         panel = CommandLibraryPanel()
@@ -573,7 +573,7 @@ class TestCommandLibraryPanel:
         panel.send_requested.connect(lambda cmd: received.append(cmd))
 
         proj_item = panel.tree.topLevelItem(0)
-        panel._on_double_click(proj_item, 0)  # noqa: SLF001
+        panel._on_click(proj_item, 0)  # noqa: SLF001
         assert received == []
 
     def test_builtin_missing_falls_back_to_default(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -594,7 +594,7 @@ class TestCommandLibraryPanel:
 
 
 class TestManualDebugEmbeddedPanel:
-    """手动调试页内嵌命令库面板：双击命令 → 页内 send_command。"""
+    """手动调试页内嵌命令库面板：单击命令 → 页内 send_command。"""
 
     def test_panel_embedded_in_manual_debug(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """手动调试页含内嵌命令库面板（QSplitter 左侧）。"""
@@ -607,8 +607,8 @@ class TestManualDebugEmbeddedPanel:
         assert hasattr(widget, "_cmd_panel")
         assert isinstance(widget._cmd_panel, CommandLibraryPanel)
 
-    def test_double_click_command_sends_in_page(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """双击面板命令 → 经 send_requested → 页内 send_command → send_manual 被调用。"""
+    def test_click_command_sends_in_page(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """单击面板命令 → 经 send_requested → 页内 send_command → send_manual 被调用。"""
         import PySide6.QtWidgets as _qw
 
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
@@ -620,12 +620,12 @@ class TestManualDebugEmbeddedPanel:
         widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
         widget._toggle_connect()  # noqa: SLF001  打开 COM1
 
-        # 双击面板第一个命令叶子
+        # 单击面板第一个命令叶子
         panel = widget._cmd_panel  # noqa: SLF001
         first_proj = panel.tree.topLevelItem(0)
         first_grp = first_proj.child(0)
         first_cmd = first_grp.child(0)
-        panel._on_double_click(first_cmd, 0)  # noqa: SLF001
+        panel._on_click(first_cmd, 0)  # noqa: SLF001
 
         # 经 send_requested → send_command → send_manual，last_command 应被设置
         assert main.last_command is not None
