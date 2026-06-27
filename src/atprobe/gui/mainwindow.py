@@ -273,6 +273,25 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "发送错误", f"发送失败：{exc}")
             return False
 
+    def send_file(self, port: str, data: bytes) -> bool:
+        """手动调试：写原始字节到端口（不加结束符），供文件/二进制数据发送.
+
+        返回 True 表示写入成功；未连接返回 False。
+        小文件（≤4KB）走本同步路径；大文件由 worker 直接持连接发送。
+        """
+        if not self._port_manager.is_connected(port):
+            return False
+        try:
+            self._port_manager.write_bytes(port, data)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "发送错误", f"文件发送失败：{exc}")
+            return False
+
+    def get_connection(self, port: str) -> Any:
+        """手动调试：取端口底层连接（供大文件 worker 直接持有发送）。"""
+        return self._port_manager.get_connection(port)
+
     def subscribe_rx(self, port: str, observer: Any) -> object | None:
         """订阅端口原始 RX 字节流（手动调试/实时监控的纯流式接收）."""
         if not self._port_manager.is_connected(port):
