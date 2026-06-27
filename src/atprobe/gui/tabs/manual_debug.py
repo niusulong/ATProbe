@@ -4,9 +4,12 @@
     - 选择端口 + 波特率/帧格式 + 打开/关闭连接（状态徽标 + 按钮切换）
     - 发送 AT 指令（可调结束符；无超时参数——超时是「用例执行」判定响应完整性的概念）
     - 命令库：本页内嵌命令树侧栏（项目→功能→命令三层树，QSplitter 左侧），
-      双击命令直接发送到本页当前端口；增删改经「命令库管理」对话框。
+      单击命令直接发送到本页当前端口；增删改经「命令库管理」对话框。
+    - 文件发送：把整个文件作为原始字节（不加结束符）写入端口。
+      小文件（≤4KB）同步瞬发；大文件后台分块（块 1024/间隔 5ms）、
+      进度可取消、TX 原始数据流式逐块上屏（同 RX 渲染）。
 
-布局：左侧 = 命令库侧栏（CommandLibraryPanel），右侧 = 端口/发送/响应三卡片。
+布局：左侧 = 命令库侧栏（CommandLibraryPanel），右侧 = 端口/文件发送/发送/响应四卡片。
 
 数据模型（纯流式，串口助手语义）：
     - 发送：调 MainWindow.send_manual → PortManager.write_command，只写字节不等响应，TX 立即上屏。
@@ -16,6 +19,8 @@
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
@@ -27,6 +32,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTextEdit,
@@ -38,6 +44,12 @@ from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+if TYPE_CHECKING:
+    from PySide6.QtCore import QThread
+
+    from atprobe.gui.widgets.file_send import FileSendWorker
+    from atprobe.infra.serial.interfaces import CancelToken
 
 # 常见波特率（可编辑输入自定义值）
 _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
@@ -144,7 +156,51 @@ class ManualDebugWidget(QWidget):
         layout.addWidget(port_group)
         self._refresh_ports()
 
-        # ===== 卡片 2: 发送区 =====
+        # ===== 卡片 2: 文件发送（原始字节，不加结束符）=====
+        file_group = QGroupBox("文件发送")
+        file_layout = QVBoxLayout(file_group)
+        file_layout.setContentsMargins(12, 8, 12, 12)
+        file_layout.setSpacing(8)
+
+        file_row = QHBoxLayout()
+        self.file_btn = QPushButton("选择文件…")
+        self.file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.file_btn.clicked.connect(self._choose_file)
+        file_row.addWidget(self.file_btn)
+
+        self.file_label = QLabel("未选择文件")
+        self.file_label.setObjectName("caption")
+        file_row.addWidget(self.file_label, 1)
+
+        self.file_send_btn = QPushButton("发送")
+        self.file_send_btn.setObjectName("primary")
+        self.file_send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.file_send_btn.setIcon(self._action_icon("send"))
+        self.file_send_btn.setEnabled(False)
+        self.file_send_btn.clicked.connect(self._send_file)
+        file_row.addWidget(self.file_send_btn)
+
+        self.file_cancel_btn = QPushButton("取消")
+        self.file_cancel_btn.setObjectName("danger")
+        self.file_cancel_btn.setVisible(False)
+        self.file_cancel_btn.clicked.connect(self._cancel_file_send)
+        file_row.addWidget(self.file_cancel_btn)
+        file_layout.addLayout(file_row)
+
+        # 进度行：仅发送中显示
+        self.file_progress = QProgressBar()
+        self.file_progress.setVisible(False)
+        file_layout.addWidget(self.file_progress)
+        layout.addWidget(file_group)
+
+        # 文件发送状态
+        self._file_path: str | None = None
+        self._file_worker: FileSendWorker | None = None  # 发送中持有
+        self._file_thread: QThread | None = None
+        self._file_cancel_token: CancelToken | None = None
+        self._file_result: tuple[bool, str] | None = None  # worker 完成结果缓存
+
+        # ===== 卡片 3: 发送区 =====
         send_group = QGroupBox("发送")
         send_layout = QVBoxLayout(send_group)
         send_layout.setContentsMargins(12, 8, 12, 12)
@@ -160,12 +216,12 @@ class ManualDebugWidget(QWidget):
         send_layout.addWidget(self.send_edit)
 
         send_row = QHBoxLayout()
-        send_btn = QPushButton("发送")
-        send_btn.setObjectName("primary")
-        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setIcon(self._action_icon("send"))
-        send_btn.clicked.connect(self._send)
-        send_row.addWidget(send_btn)
+        self.send_btn = QPushButton("发送")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_btn.setIcon(self._action_icon("send"))
+        self.send_btn.clicked.connect(self._send)
+        send_row.addWidget(self.send_btn)
         clear_btn = QPushButton("清空")
         clear_btn.clicked.connect(self.send_edit.clear)
         send_row.addWidget(clear_btn)
@@ -367,6 +423,179 @@ class ManualDebugWidget(QWidget):
             self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
 
     # ------------------------------------------------------------------
+    # 文件发送（原始字节，不加结束符）
+    # ------------------------------------------------------------------
+    def _choose_file(self) -> None:
+        """选择文件：弹出对话框，记录路径并更新标签。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(self, "选择要发送的文件")
+        if not path:
+            return
+        self._file_path = path
+        self._update_file_label()
+        self._sync_file_send_state()
+
+    def _update_file_label(self) -> None:
+        """根据当前 _file_path 更新文件名 + 字节数标签。"""
+        from pathlib import Path
+
+        if not self._file_path:
+            self.file_label.setText("未选择文件")
+            return
+        try:
+            size = Path(self._file_path).stat().st_size
+        except OSError:
+            size = 0
+        name = Path(self._file_path).name
+        self.file_label.setText(f"{name} ({size:,} 字节)")
+
+    def _sync_file_send_state(self) -> None:
+        """根据文件选择/连接状态/发送中，刷新发送按钮可用性。"""
+        port = self._current_port()
+        sending = self._file_worker is not None
+        is_conn = getattr(self._main, "is_port_connected", None)
+        connected = bool(callable(is_conn) and is_conn(port))
+        self.file_send_btn.setEnabled(
+            bool(self._file_path) and connected and not sending
+        )
+
+    def _send_file(self) -> None:
+        """发送文件：读取 → 按大小路由小文件同步 / 大文件后台。"""
+        from pathlib import Path
+
+        if not self._file_path:
+            QMessageBox.warning(self, "提示", "请先选择文件")
+            return
+        port = self._current_port()
+        if not port:
+            QMessageBox.warning(self, "提示", "请先选择端口")
+            return
+        is_conn = getattr(self._main, "is_port_connected", None)
+        if callable(is_conn) and not is_conn(port):
+            QMessageBox.warning(self, "提示", f"端口 {port} 未连接，请先「打开端口」")
+            return
+        try:
+            data = Path(self._file_path).read_bytes()
+        except OSError as exc:
+            QMessageBox.critical(self, "读取错误", f"无法读取文件：{exc}")
+            return
+        if not data:
+            return
+
+        from atprobe.infra.serial.config import DataStreamSpec
+
+        if len(data) <= DataStreamSpec.chunk_threshold:
+            self._send_file_small(port, data)
+        else:
+            self._send_file_large(port, data)
+
+    def _send_file_small(self, port: str, data: bytes) -> None:
+        """小文件同步发送（主线程单次 write_bytes）。"""
+        send_file = getattr(self._main, "send_file", None)
+        if not callable(send_file):
+            self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
+            return
+        # TX 原始数据流式上屏（复用 RX 渲染逻辑，方向 TX）
+        self._render_tx_bytes(data)
+        if not send_file(port, data):
+            self._append_line("RX", "[错误] 文件发送失败（端口未连接）", self._tokens["danger"])
+
+    def _send_file_large(self, port: str, data: bytes) -> None:
+        """大文件后台分块发送（worker 线程，进度可取消）。"""
+        from PySide6.QtCore import QThread
+
+        from atprobe.gui.widgets.file_send import FileSendWorker
+        from atprobe.infra.serial.interfaces import CancelToken
+
+        get_conn = getattr(self._main, "get_connection", None)
+        conn = get_conn(port) if callable(get_conn) else None
+        if conn is None:
+            self._append_line("RX", "[错误] 端口连接不可用", self._tokens["danger"])
+            return
+
+        self._file_cancel_token = CancelToken()
+        self._file_worker = FileSendWorker(conn, data, cancel_token=self._file_cancel_token)
+        # 重置结果缓存：worker.finished 时先记录，再让线程退出
+        self._file_result = None
+        self._file_worker.chunk_sent.connect(self._on_file_chunk_sent)
+        self._file_worker.progress.connect(self._on_file_progress)
+        self._file_worker.finished.connect(self._capture_file_result)
+
+        self._file_thread = QThread()
+        self._file_worker.moveToThread(self._file_thread)
+        self._file_thread.started.connect(self._file_worker.run)
+        # worker 完成后让线程事件循环退出（否则线程会一直挂着等事件）
+        self._file_worker.finished.connect(self._file_thread.quit)
+        # 线程真正退出后再做 UI 清理（此时 .wait() 必然返回，无死锁）
+        self._file_thread.finished.connect(self._on_file_thread_done)
+        self._file_thread.start()
+
+        self._enter_file_sending()
+
+    def _capture_file_result(self, ok: bool, msg: str) -> None:
+        """worker 完成回调（主线程，Queued）：先记录结果，线程随后退出。"""
+        self._file_result = (ok, msg)
+
+    def _on_file_thread_done(self) -> None:
+        """QThread 真正退出后（主线程）：用缓存结果做 UI 上屏与清理。"""
+        from pathlib import Path
+
+        ok, msg = self._file_result if self._file_result is not None else (False, "未知结果")
+        if ok:
+            self._append_line("TX", f"📄 {msg}", self._tokens["data.tx"])
+        else:
+            name = Path(self._file_path).name if self._file_path else "文件"
+            if "已取消" in msg:
+                self._append_line("TX", f"📄 {name} {msg}", self._tokens["data.tx"])
+            else:
+                self._append_line("RX", f"[错误] {name} {msg}", self._tokens["danger"])
+        # 线程已退出，清理引用（无需再 quit/wait）
+        self._file_worker = None
+        self._file_thread = None
+        self._file_cancel_token = None
+        self._file_result = None
+        self._exit_file_sending()
+
+    def _enter_file_sending(self) -> None:
+        """进入文件发送中状态：显示进度/取消，禁用相关控件（互斥）。"""
+        self.file_progress.setVisible(True)
+        self.file_progress.setValue(0)
+        self.file_cancel_btn.setVisible(True)
+        self.file_send_btn.setEnabled(False)
+        self.file_btn.setEnabled(False)
+        # 互斥：禁用文本发送框与文本发送
+        self.send_edit.setEnabled(False)
+
+    def _exit_file_sending(self) -> None:
+        """退出文件发送中状态：恢复控件可用性（worker/线程由调用方清理）。"""
+        self.file_progress.setVisible(False)
+        self.file_cancel_btn.setVisible(False)
+        self.file_btn.setEnabled(True)
+        self.send_edit.setEnabled(True)
+        self._sync_file_send_state()
+
+    def _on_file_chunk_sent(self, chunk: bytes) -> None:
+        """worker 每块发出 → 流式上屏 TX（复用渲染）。"""
+        self._render_tx_bytes(chunk)
+
+    def _on_file_progress(self, pct: int) -> None:
+        self.file_progress.setValue(pct)
+
+    def _cancel_file_send(self) -> None:
+        """取消文件发送：触发 CancelToken。"""
+        if self._file_cancel_token is not None:
+            self._file_cancel_token.cancel()
+
+    def _cleanup_file_send(self) -> None:
+        """析构前清理：取消进行中的文件发送并等待线程退出。"""
+        if self._file_cancel_token is not None:
+            self._file_cancel_token.cancel()
+        if self._file_thread is not None and self._file_thread.isRunning():
+            self._file_thread.quit()
+            self._file_thread.wait(2000)
+
+    # ------------------------------------------------------------------
     # RX 流式接收（读线程 → 信号 → 主线程渲染）
     # ------------------------------------------------------------------
     def _attach_rx(self, port: str) -> None:
@@ -412,6 +641,23 @@ class ManualDebugWidget(QWidget):
             if stripped:
                 self._append_line("RX", stripped, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
+
+    def _render_tx_bytes(self, chunk: bytes) -> None:
+        """渲染 TX 原始字节（文件/数据流发送）—— 复用 _on_rx_bytes 的切分逻辑.
+
+        HEX 开关打开时按十六进制展示；否则按 UTF-8 文本拆行。
+        方向标 TX、用 data.tx 色。TX 块边界即显示边界（不跨块缓冲，简化）。
+        """
+        if self.hex_check.isChecked():
+            hex_line = " ".join(f"{b:02X}" for b in chunk)
+            if hex_line:
+                self._append_line("TX", hex_line, self._tokens["data.tx"])
+            return
+        text = chunk.decode("utf-8", errors="replace")
+        for line in text.split("\n"):
+            stripped = line.rstrip("\r")
+            if stripped:
+                self._append_line("TX", stripped, self._tokens["data.tx"])
 
     # ------------------------------------------------------------------
     # 日志保存 + 响应区渲染
@@ -461,3 +707,9 @@ class ManualDebugWidget(QWidget):
             cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor)
             cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor)
             cursor.removeSelectedText()
+
+    def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        """页面关闭：撤销 RX 订阅 + 取消进行中的文件发送，避免悬挂线程。"""
+        self._detach_rx()
+        self._cleanup_file_send()
+        super().closeEvent(event)
