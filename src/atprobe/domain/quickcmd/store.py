@@ -90,13 +90,12 @@ def load_library(path: Path) -> CommandLibrary:
                 raise QuickCmdStoreError(
                     f"项目 {name!r} 第 {j + 1} 个功能组缺少 'name' 或为空"
                 )
-            lib.add_group(name, gname)
+            grp = lib.add_group(name, gname)
             cmds_raw = grp_raw.get("commands", []) or []
             if not isinstance(cmds_raw, list):
                 raise QuickCmdStoreError(
                     f"功能组 {name!r}/{gname!r} 的 'commands' 必须是列表"
                 )
-            grp = lib.find_group(name, gname)
             for c in cmds_raw:
                 # 强制转 str，兼容用户手写整数等
                 grp.commands.append(str(c))
@@ -142,7 +141,7 @@ def default_library() -> CommandLibrary:
     归入「通用/基础」组，供首次加载无文件时回落。
     """
     lib = CommandLibrary.empty()
-    proj = lib.add_project("通用")
+    lib.add_project("通用")
     grp = lib.add_group("通用", "基础")
     for cmd in ("AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?"):
         grp.commands.append(cmd)
