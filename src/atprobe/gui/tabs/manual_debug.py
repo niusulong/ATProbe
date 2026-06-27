@@ -3,8 +3,10 @@
 直接调用 M1（不经 M3 引擎、不产生用例结果）。支持：
     - 选择端口 + 波特率/帧格式 + 打开/关闭连接（状态徽标 + 按钮切换）
     - 发送 AT 指令（可调结束符；无超时参数——超时是「用例执行」判定响应完整性的概念）
-    - 命令库：经主窗口右侧「命令库」停靠面板管理（项目→功能→命令三层树），
+    - 命令库：本页内嵌命令树侧栏（项目→功能→命令三层树，QSplitter 左侧），
       双击命令直接发送到本页当前端口；增删改经「命令库管理」对话框。
+
+布局：左侧 = 命令库侧栏（CommandLibraryPanel），右侧 = 端口/发送/响应三卡片。
 
 数据模型（纯流式，串口助手语义）：
     - 发送：调 MainWindow.send_manual → PortManager.write_command，只写字节不等响应，TX 立即上屏。
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import get_tokens
+from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
 # 常见波特率（可编辑输入自定义值）
 _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
@@ -83,8 +87,21 @@ class ManualDebugWidget(QWidget):
     # UI 构造
     # ------------------------------------------------------------------
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+
+        # 左右分栏：左 = 命令库侧栏，右 = 端口/发送/响应
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # 左侧：命令库侧栏（双击命令 → 发送到本页当前端口）
+        self._cmd_panel = CommandLibraryPanel()
+        self._cmd_panel.send_requested.connect(self.send_command)
+        splitter.addWidget(self._cmd_panel)
+
+        # 右侧：原有端口/发送/响应三卡片容器
+        right = QWidget()
+        layout = QVBoxLayout(right)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
         # ===== 卡片 1: 端口（选择 + 配置 + 打开/关闭）=====
@@ -194,6 +211,13 @@ class ManualDebugWidget(QWidget):
         clear_resp_btn.clicked.connect(self.response_view.clear)  # type: ignore[attr-defined]
         resp_layout.addWidget(self.response_view, 1)
         layout.addWidget(resp_group, 1)
+
+        # 右侧容器装入分栏，设置初始宽度比例（命令库侧栏较窄）
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)  # 命令库侧栏
+        splitter.setStretchFactor(1, 3)  # 调试区
+        splitter.setSizes([260, 740])
+        outer.addWidget(splitter)
 
     # ------------------------------------------------------------------
     # 小工具
