@@ -248,6 +248,17 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             raise KeyError(f"端口 {port} 未打开")
         conn.write_command(command)
 
+    def write_bytes(self, port: str, data: bytes) -> None:
+        """写原始字节（不加结束符、不分块），供文件/二进制数据流发送用.
+
+        与 write_command 区别：原样写字节，不追加结束符；发送的原始字节同样
+        通知 TX 观察者（由 SerialConnection.write_bytes 负责，咽喉点一致性）。
+        """
+        conn = self._connections.get(port)
+        if conn is None:
+            raise KeyError(f"端口 {port} 未打开")
+        conn.write_bytes(data)
+
     # ------------------------------------------------------------------
     # §6 URC 订阅
     # ------------------------------------------------------------------
