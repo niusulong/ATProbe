@@ -93,7 +93,7 @@ class CommandLibraryPanel(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tree.itemDoubleClicked.connect(self._on_double_click)
+        self.tree.itemClicked.connect(self._on_click)
         layout.addWidget(self.tree, 1)
 
     # ------------------------------------------------------------------
@@ -146,8 +146,8 @@ class CommandLibraryPanel(QWidget):
     # ------------------------------------------------------------------
     # 交互
     # ------------------------------------------------------------------
-    def _on_double_click(self, item: QTreeWidgetItem, _column: int) -> None:
-        """双击：命令叶子 → emit send_requested；项目/功能节点 → 展开/折叠（默认）."""
+    def _on_click(self, item: QTreeWidgetItem, _column: int) -> None:
+        """单击：命令叶子 → emit send_requested；项目/功能节点 → 展开/折叠（默认）."""
         raw = item.data(0, _NODE_ROLE)
         if not isinstance(raw, str) or not raw.startswith("command:"):
             return  # 非命令叶子，交给 Qt 默认展开/折叠行为

@@ -405,6 +405,11 @@ def _build_qss(t: dict[str, str]) -> str:
     }}
     QTreeWidget::item, QTreeView::item {{ padding: 6px 4px; border: none; }}
     QTreeWidget::item:hover, QTreeView::item:hover {{ background: {t['accent.bg']}; }}
+    QTreeWidget::item:selected, QTreeView::item:selected {{
+        background: {t['accent.bg']};
+        color: {t['accent']};
+        font-weight: 600;
+    }}
     /* 分支线（连接父子的虚线）：低对比，不喧宾夺主 */
     QTreeView::branch {{
         background: transparent;
