@@ -31,6 +31,7 @@ from atprobe.engine.config import StopMode
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import TabBinding, TabTypeRegistry, default_registry
 from atprobe.gui.theme import get_tokens
+from atprobe.gui.widgets.command_library import CommandLibraryDock
 from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
 from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         连接管理：available_ports() / connected_ports() / is_port_connected()
                   open_port() / close_port()
         手动调试：send_manual()（只写不等响应） / subscribe_rx() / unsubscribe_rx()
+                  （手动调试页对外暴露 current_port()/send_command() 供命令库面板路由）
         实时监控：subscribe_monitor() / unsubscribe_monitor()
         用例执行：run_cases() / stop_engine()
         其它：cases_dir() / env_config_path()
@@ -78,6 +80,7 @@ class MainWindow(QMainWindow):
         self._init_tabs()
         self._init_statusbar()
         self._init_menubar()
+        self._init_command_dock()
         self.progress.connect(self._on_progress)
 
     # ------------------------------------------------------------------
@@ -127,6 +130,46 @@ class MainWindow(QMainWindow):
         """单击侧栏项即打开对应选项卡（更直观）。"""
         type_name = item.data(Qt.ItemDataRole.UserRole)
         self.new_tab(str(type_name))
+
+    def _init_command_dock(self) -> None:
+        """装配命令库停靠面板（主窗口右侧，跨页面常驻）.
+
+        面板双击命令 → send_requested(str) → _on_command_send 路由到手动调试页。
+        """
+        from PySide6.QtWidgets import QDockWidget
+
+        dock = QDockWidget("命令库", self)
+        dock.setObjectName("commandLibraryDock")
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self._command_dock = CommandLibraryDock(self)
+        dock.setWidget(self._command_dock)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._command_dock.send_requested.connect(self._on_command_send)
+
+    def _on_command_send(self, command: str) -> None:
+        """命令库面板双击 → 路由到手动调试页发送。
+
+        找不到手动调试页或端口未连接 → warning 提示。
+        """
+        widget = self._find_tab("manual_debug")
+        if widget is None:
+            QMessageBox.warning(self, "提示", "请先打开「手动调试」页")
+            return
+        # 类型已知：manual_debug 页暴露 current_port() / send_command()
+        port = widget.current_port()  # type: ignore[attr-defined]
+        is_conn = getattr(self, "is_port_connected", None)
+        if callable(is_conn) and not is_conn(port):
+            QMessageBox.warning(
+                self, "提示", f"端口 {port} 未连接，请先在手动调试页打开端口"
+            )
+            return
+        widget.send_command(command)  # type: ignore[attr-defined]
 
     def _init_tabs(self) -> None:
         self.tabs = QTabWidget()
