@@ -1,9 +1,10 @@
-"""命令库停靠面板 + 管理对话框（项目→功能→命令三层树）.
+"""命令库侧栏面板 + 管理对话框（项目→功能→命令三层树）.
 
-面板挂载于主窗口右侧，跨页面常驻；双击命令叶子经 send_requested(str) 信号
-通知主窗口路由到手动调试页发送。增删改经 LibraryManagerDialog 集中完成。
+面板作为普通 QWidget 嵌入手动调试页左侧（QSplitter），双击命令叶子经
+send_requested(str) 信号通知宿主页发送。增删改经 LibraryManagerDialog 集中完成，
+对话框顶部工具栏始终可见新增入口（项目/功能组/命令）。
 
-解耦：面板不认识手动调试页，只 emit send_requested；主窗口做胶水路由。
+解耦：面板不认识手动调试页，只 emit send_requested；宿主页连接该信号发送。
 """
 
 from __future__ import annotations
@@ -42,17 +43,16 @@ from atprobe.gui.theme import get_tokens
 _NODE_ROLE = Qt.ItemDataRole.UserRole
 
 
-class CommandLibraryDock(QWidget):
-    """命令库停靠面板内容（用 QDockWidget 包裹后挂主窗口右侧）。
+class CommandLibraryPanel(QWidget):
+    """命令库侧栏面板（嵌入手动调试页左侧）。
 
-    唯一对外出口：send_requested(str) —— 双击命令叶子时 emit。
+    唯一对外出口：send_requested(str) —— 双击命令叶子时 emit，宿主页连接后发送。
     """
 
     send_requested = Signal(str)
 
-    def __init__(self, main_window: object, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._main = main_window
         self._tokens = get_tokens(dark=False)
         self._path: Path = builtin_library_path()
         self._library: CommandLibrary = CommandLibrary.empty()
@@ -64,12 +64,13 @@ class CommandLibraryDock(QWidget):
     # ------------------------------------------------------------------
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         # 顶部工具栏：[管理] [刷新] [文件名]
         bar = QHBoxLayout()
         bar.setSpacing(6)
+        bar.setContentsMargins(4, 4, 4, 0)
         manage_btn = QPushButton("管理")
         manage_btn.setObjectName("primary")
         manage_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -86,7 +87,7 @@ class CommandLibraryDock(QWidget):
 
         # 命令树
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabel("命令库")
+        self.tree.setHeaderHidden(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
@@ -171,9 +172,9 @@ class CommandLibraryDock(QWidget):
 class LibraryManagerDialog(QDialog):
     """命令库管理对话框（模态）：左侧树 + 右侧表单，集中增删改。
 
-    左侧 QTreeWidget 选中任意层级节点 → 右侧表单切换为对应编辑区。
-    所有增删改先在内存 CommandLibrary 上操作（model 层校验重名）；
-    确定 → dump_library 原子写回；取消 → 丢弃改动。
+    顶部工具栏始终可见新增入口（项目/功能组/命令）——根据当前选中节点智能
+    判断新增目标所属；加载/另存为文件操作也在顶部。右侧表单仅展示当前选中
+    节点的编辑区（重命名/删除）。
     """
 
     def __init__(
@@ -181,7 +182,7 @@ class LibraryManagerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("命令库管理")
-        self.resize(720, 480)
+        self.resize(760, 500)
         self._tokens = get_tokens(dark=False)
         # 深拷贝一份工作副本（取消时丢弃改动，不影响外部 library）
         self._library = _clone_library(library)
@@ -192,9 +193,20 @@ class LibraryManagerDialog(QDialog):
     def _init_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        # 顶部：[加载文件…] [另存为…] [文件名]
+        # 顶部工具栏：[＋项目][＋功能组][＋命令][加载…][另存为…] [文件名]
         top = QHBoxLayout()
-        load_btn = QPushButton("加载文件…")
+        top.setSpacing(6)
+        self._add_project_btn = QPushButton("＋项目")
+        self._add_project_btn.clicked.connect(self._add_project_interactive)
+        top.addWidget(self._add_project_btn)
+        self._add_group_btn = QPushButton("＋功能组")
+        self._add_group_btn.clicked.connect(self._add_group_under_selection)
+        top.addWidget(self._add_group_btn)
+        self._add_cmd_btn = QPushButton("＋命令")
+        self._add_cmd_btn.clicked.connect(self._add_command_under_selection)
+        top.addWidget(self._add_cmd_btn)
+        top.addSpacing(12)
+        load_btn = QPushButton("加载…")
         load_btn.clicked.connect(self._on_load_file)
         top.addWidget(load_btn)
         save_as_btn = QPushButton("另存为…")
@@ -257,6 +269,32 @@ class LibraryManagerDialog(QDialog):
         self.tree.expandAll()
 
     # ------------------------------------------------------------------
+    # 当前选中节点定位（供顶部新增按钮判断目标所属）
+    # ------------------------------------------------------------------
+    def _current_selection(self) -> tuple[str, ...] | None:
+        """返回当前选中节点的元组标识（None 表示未选中）."""
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        node = items[0].data(0, _NODE_ROLE)
+        return node if isinstance(node, tuple) else None
+
+    def _selected_project(self) -> str | None:
+        """选中项目/功能组/命令时，返回所属项目名；否则 None."""
+        node = self._current_selection()
+        if node is None:
+            return None
+        # ("project", name) / ("group", proj, grp) / ("command", proj, grp, cmd)
+        return node[1] if len(node) >= 2 else None
+
+    def _selected_group(self) -> tuple[str, str] | None:
+        """选中功能组/命令时，返回 (项目, 功能组)；否则 None."""
+        node = self._current_selection()
+        if node is None or len(node) < 3:
+            return None
+        return (node[1], node[2])
+
+    # ------------------------------------------------------------------
     # 表单切换
     # ------------------------------------------------------------------
     def _clear_form(self) -> None:
@@ -269,11 +307,10 @@ class LibraryManagerDialog(QDialog):
                 w.deleteLater()
 
     def _on_tree_select(self) -> None:
-        items = self.tree.selectedItems()
-        node = items[0].data(0, _NODE_ROLE) if items else None
+        node = self._current_selection()
         self._clear_form()
         if node is None:
-            self._build_root_form()
+            self._build_hint_form("选中左侧节点编辑，或用顶部按钮新增。")
         elif node[0] == "project":
             self._build_project_form(node[1])
         elif node[0] == "group":
@@ -281,12 +318,10 @@ class LibraryManagerDialog(QDialog):
         elif node[0] == "command":
             self._build_command_form(node[1], node[2], node[3])
 
-    def _build_root_form(self) -> None:
-        hint = QLabel("选中左侧节点编辑，或在此新增项目。")
+    def _build_hint_form(self, text: str) -> None:
+        hint = QLabel(text)
+        hint.setObjectName("caption")
         self._form_layout.addWidget(hint)
-        add_btn = QPushButton("＋ 新增项目")
-        add_btn.clicked.connect(self._add_project_interactive)
-        self._form_layout.addWidget(add_btn)
         self._form_layout.addStretch()
 
     def _build_project_form(self, proj_name: str) -> None:
@@ -308,10 +343,6 @@ class LibraryManagerDialog(QDialog):
         wrap = QHBoxLayout()
         wrap.addWidget(del_btn)
         self._form_layout.addLayout(wrap)
-
-        add_grp_btn = QPushButton("＋ 新增功能组")
-        add_grp_btn.clicked.connect(lambda: self._add_group_interactive(proj_name))
-        self._form_layout.addWidget(add_grp_btn)
         self._form_layout.addStretch()
 
     def _build_group_form(self, proj_name: str, grp_name: str) -> None:
@@ -333,10 +364,6 @@ class LibraryManagerDialog(QDialog):
         wrap = QHBoxLayout()
         wrap.addWidget(del_btn)
         self._form_layout.addLayout(wrap)
-
-        add_cmd_btn = QPushButton("＋ 新增命令")
-        add_cmd_btn.clicked.connect(lambda: self._add_command_interactive(proj_name, grp_name))
-        self._form_layout.addWidget(add_cmd_btn)
         self._form_layout.addStretch()
 
     def _build_command_form(self, proj_name: str, grp_name: str, cmd: str) -> None:
@@ -374,6 +401,39 @@ class LibraryManagerDialog(QDialog):
             return
         self._refresh_tree()
 
+    def _add_group_under_selection(self) -> None:
+        """新增功能组到「当前选中项目」；未选项目则提示."""
+        proj = self._selected_project()
+        if proj is None:
+            QMessageBox.information(self, "新增功能组", "请先选中一个项目或其下节点。")
+            return
+        name, ok = QInputDialog.getText(self, "新增功能组", f"{proj} 下的功能组名:")
+        if not (ok and name.strip()):
+            return
+        try:
+            self._library.add_group(proj, name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法新增", str(exc))
+            return
+        self._refresh_tree()
+
+    def _add_command_under_selection(self) -> None:
+        """新增命令到「当前选中的功能组」；未选则提示."""
+        sel = self._selected_group()
+        if sel is None:
+            QMessageBox.information(self, "新增命令", "请先选中一个功能组或其下命令。")
+            return
+        proj, grp = sel
+        cmd, ok = QInputDialog.getText(self, "新增命令", f"{proj}/{grp} 的 AT 指令:")
+        if not (ok and cmd.strip()):
+            return
+        try:
+            self._library.add_command(proj, grp, cmd)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法新增", str(exc))
+            return
+        self._refresh_tree()
+
     def _rename_project(self, old: str, edit: QLineEdit) -> None:
         new = edit.text().strip()
         if not new:
@@ -387,17 +447,6 @@ class LibraryManagerDialog(QDialog):
 
     def _delete_project(self, name: str) -> None:
         self._library.remove_project(name)
-        self._refresh_tree()
-
-    def _add_group_interactive(self, proj_name: str) -> None:
-        name, ok = QInputDialog.getText(self, "新增功能组", f"{proj_name} 下的功能组名:")
-        if not (ok and name.strip()):
-            return
-        try:
-            self._library.add_group(proj_name, name)
-        except ValueError as exc:
-            QMessageBox.warning(self, "无法新增", str(exc))
-            return
         self._refresh_tree()
 
     def _rename_group(self, proj: str, old: str, edit: QLineEdit) -> None:
@@ -419,17 +468,6 @@ class LibraryManagerDialog(QDialog):
 
     def _delete_group(self, proj: str, name: str) -> None:
         self._library.remove_group(proj, name)
-        self._refresh_tree()
-
-    def _add_command_interactive(self, proj: str, grp: str) -> None:
-        cmd, ok = QInputDialog.getText(self, "新增命令", f"{proj}/{grp} 的 AT 指令:")
-        if not (ok and cmd.strip()):
-            return
-        try:
-            self._library.add_command(proj, grp, cmd)
-        except ValueError as exc:
-            QMessageBox.warning(self, "无法新增", str(exc))
-            return
         self._refresh_tree()
 
     def _edit_command(self, proj: str, grp: str, old: str, edit: QLineEdit) -> None:

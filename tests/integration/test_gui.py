@@ -534,119 +534,156 @@ class TestManualDebugStripped:
         assert "4F 4B" in widget.response_view.toPlainText()
 
 
-class TestCommandLibraryDock:
-    """命令库停靠面板：加载渲染 + 双击发送信号。"""
+class TestCommandLibraryPanel:
+    """命令库侧栏面板：加载渲染 + 双击发送信号。"""
 
     def test_loads_and_renders_tree(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """面板从内置示例加载 → 渲染出项目/功能/命令三层。"""
-        from atprobe.gui.widgets.command_library import CommandLibraryDock
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
-        dock = CommandLibraryDock(object())  # type: ignore[arg-type]
+        panel = CommandLibraryPanel()
         # 内置示例含 2 个顶层项目（N58 项目 + 通用）
-        assert dock.tree.topLevelItemCount() == 2
+        assert panel.tree.topLevelItemCount() == 2
         # 第一个项目下应有功能组（叶子为命令）
-        first = dock.tree.topLevelItem(0)
+        first = panel.tree.topLevelItem(0)
         assert first is not None and first.childCount() > 0
 
     def test_double_click_command_emits_signal(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """双击命令叶子 → emit send_requested(命令字符串)。"""
-        from atprobe.gui.widgets.command_library import CommandLibraryDock
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
-        dock = CommandLibraryDock(object())  # type: ignore[arg-type]
+        panel = CommandLibraryPanel()
         received: list[str] = []
-        dock.send_requested.connect(lambda cmd: received.append(cmd))
+        panel.send_requested.connect(lambda cmd: received.append(cmd))
 
         # 找第一个命令叶子并双击
-        first_proj = dock.tree.topLevelItem(0)
+        first_proj = panel.tree.topLevelItem(0)
         first_grp = first_proj.child(0)
         first_cmd = first_grp.child(0)
-        dock._on_double_click(first_cmd, 0)  # noqa: SLF001
+        panel._on_double_click(first_cmd, 0)  # noqa: SLF001
         assert len(received) == 1
         assert received[0] == first_cmd.text(0)
 
     def test_double_click_project_does_not_emit(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """双击项目/功能节点 → 不 emit 信号。"""
-        from atprobe.gui.widgets.command_library import CommandLibraryDock
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
-        dock = CommandLibraryDock(object())  # type: ignore[arg-type]
+        panel = CommandLibraryPanel()
         received: list[str] = []
-        dock.send_requested.connect(lambda cmd: received.append(cmd))
+        panel.send_requested.connect(lambda cmd: received.append(cmd))
 
-        proj_item = dock.tree.topLevelItem(0)
-        dock._on_double_click(proj_item, 0)  # noqa: SLF001
+        proj_item = panel.tree.topLevelItem(0)
+        panel._on_double_click(proj_item, 0)  # noqa: SLF001
         assert received == []
 
     def test_builtin_missing_falls_back_to_default(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """内置示例文件缺失时，reload_library 回落到内存默认库（迁移 5 条指令）."""
         from atprobe.gui.widgets import command_library as cl_mod
-        from atprobe.gui.widgets.command_library import CommandLibraryDock
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
         # 让 builtin_library_path 指向一个不存在的路径，模拟打包后缺失数据文件
         fake_path = tmp_path / "quick_commands.yaml"
         monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: fake_path)
 
-        dock = CommandLibraryDock(object())  # type: ignore[arg-type]
+        panel = CommandLibraryPanel()
         # 回退后应含 default_library 的项目（通用/基础，含 AT 等）
         all_cmds = [
-            c for p in dock._library.projects for g in p.groups for c in g.commands  # noqa: SLF001
+            c for p in panel._library.projects for g in p.groups for c in g.commands  # noqa: SLF001
         ]
         assert "AT" in all_cmds and "AT+CSQ" in all_cmds
 
 
-class TestMainWindowCommandRouting:
-    """主窗口：命令库面板 send_requested → 路由到手动调试页 send_command。"""
+class TestManualDebugEmbeddedPanel:
+    """手动调试页内嵌命令库面板：双击命令 → 页内 send_command。"""
 
-    def test_routes_to_manual_debug(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """面板 emit → 手动调试页打开且端口连接 → send_manual 被调用。"""
+    def test_panel_embedded_in_manual_debug(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """手动调试页含内嵌命令库面板（QSplitter 左侧）。"""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        assert hasattr(widget, "_cmd_panel")
+        assert isinstance(widget._cmd_panel, CommandLibraryPanel)
+
+    def test_double_click_command_sends_in_page(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """双击面板命令 → 经 send_requested → 页内 send_command → send_manual 被调用。"""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.gui.mainwindow import MainWindow
-        from atprobe.infra.serial.config import PortConfig
-        from atprobe.infra.serial.fakeserial import FakePortManager
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
 
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
 
-        win = MainWindow()
-        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
-        win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001  打开 COM1
 
-        # 打开手动调试页并选中 COM9
-        win.new_tab("manual_debug")
-        md_widget = win._find_tab("manual_debug")  # noqa: SLF001
-        assert md_widget is not None
-        # 选 COM9（FakePortManager.open 已打开，枚举中可见）
-        idx = md_widget.port_combo.findData("COM9")
-        if idx >= 0:
-            md_widget.port_combo.setCurrentIndex(idx)
-        # 端口已通过上面的 FakePortManager.open 打开，无需再 toggle（toggle 会因已连接而关闭）
-        assert win.is_port_connected("COM9") is True
+        # 双击面板第一个命令叶子
+        panel = widget._cmd_panel  # noqa: SLF001
+        first_proj = panel.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        first_cmd = first_grp.child(0)
+        panel._on_double_click(first_cmd, 0)  # noqa: SLF001
 
-        sent: list[tuple[str, str]] = []
-        original = win.send_manual
+        # 经 send_requested → send_command → send_manual，last_command 应被设置
+        assert main.last_command is not None
+        assert main.last_command[0] == "COM1"
+        assert main.last_command[1] == first_cmd.text(0)
 
-        def _capture(port: str, command: str) -> bool:
-            sent.append((port, command))
-            return original(port, command)
 
-        win.send_manual = _capture  # type: ignore[assignment]
+class TestLibraryManagerDialogToolbar:
+    """管理对话框顶部工具栏：新增入口始终可见 + 智能定位目标。"""
 
-        # 触发路由
-        win._on_command_send("AT+CSQ")  # noqa: SLF001
-        assert sent == [("COM9", "AT+CSQ")]
+    def test_toolbar_has_add_buttons(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """对话框顶部有 [＋项目][＋功能组][＋命令] 始终可见。"""
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
 
-    def test_no_manual_debug_warns(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """无手动调试页时 emit → warning，不发送。"""
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        assert dlg._add_project_btn.text() == "＋项目"  # noqa: SLF001
+        assert dlg._add_group_btn.text() == "＋功能组"  # noqa: SLF001
+        assert dlg._add_cmd_btn.text() == "＋命令"  # noqa: SLF001
+
+    def test_add_command_needs_group_selection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """未选功能组时点＋命令 → 提示需先选功能组（不弹 QInputDialog）。"""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
 
-        warned: list[str] = []
+        info_shown: list[str] = []
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: info_shown.append("info"))
+        input_called: list[bool] = []
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: input_called.append(True) or ("", False))
 
-        def _warn(_parent, title, text):  # noqa: ANN001
-            warned.append(text)
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        dlg.tree.clearSelection()  # 不选任何节点
+        dlg._add_command_under_selection()  # noqa: SLF001
+        assert info_shown and not input_called  # 提示了且没弹输入框
 
-        monkeypatch.setattr(_qw.QMessageBox, "warning", _warn)
-        win = MainWindow()
-        win._on_command_send("AT")  # noqa: SLF001
-        assert warned and "手动调试" in warned[0]
+    def test_add_command_under_selected_group(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """选中功能组后点＋命令 → 弹输入框 → 命令加入该功能组。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGMM", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        first_proj = dlg.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        first_grp.setSelected(True)
+        before = first_grp.childCount()
+        dlg._add_command_under_selection()  # noqa: SLF001
+        new_proj = dlg.tree.topLevelItem(0)
+        new_grp = new_proj.child(0)
+        assert new_grp.childCount() == before + 1
+        assert any(new_grp.child(i).text(0) == "AT+CGMM" for i in range(new_grp.childCount()))
 
