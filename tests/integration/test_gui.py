@@ -339,6 +339,11 @@ class _FakeMain:
         self.last_command: tuple[str, str] | None = None
         self.sent_event = threading.Event()
         self._rx_observers: dict[str, list] = {}
+        # 文件发送（小文件同步路径）
+        self.last_bytes: tuple[str, bytes] | None = None
+        self.file_sent_event = threading.Event()
+        # 大文件 worker 用的连接替身（None 表示不支持后台路径）
+        self._fake_connection = None
 
     def available_ports(self) -> list[str]:
         return ["COM1", "COM2"]
@@ -362,6 +367,18 @@ class _FakeMain:
         self.last_command = (port, command)
         self.sent_event.set()
         return True
+
+    def send_file(self, port: str, data: bytes) -> bool:
+        """小文件同步写：记录写入字节并触发事件（供测试同步）。"""
+        if port not in self._connected:
+            return False
+        self.last_bytes = (port, data)
+        self.file_sent_event.set()
+        return True
+
+    def get_connection(self, port: str):
+        """大文件 worker 持有的连接替身（测试可预置）。"""
+        return self._fake_connection
 
     def subscribe_rx(self, port: str, observer) -> object:
         self._rx_observers.setdefault(port, []).append(observer)
@@ -532,6 +549,29 @@ class TestManualDebugStripped:
         widget.hex_check.setChecked(True)
         main.emit_rx("COM1", b"OK\r\n")
         assert "4F 4B" in widget.response_view.toPlainText()
+
+
+class TestManualDebugFileSendRouting:
+    """MainWindow.send_file / get_connection 路由测试（通过 _FakeMain 验证契约）。"""
+
+    def test_send_file_requires_connection(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+
+        # 未连接 → send_file 判定未连接
+        assert main.is_port_connected("COM1") is False
+        assert main.send_file("COM1", b"abc") is False
+
+    def test_send_file_writes_when_connected(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        assert main.send_file("COM1", b"\x01\x02") is True
+        assert main.last_bytes == ("COM1", b"\x01\x02")
+
+    def test_get_connection_returns_fake(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+        sentinel = object()
+        main._fake_connection = sentinel  # noqa: SLF001
+        assert main.get_connection("COM1") is sentinel
 
 
 class TestCommandLibraryPanel:
