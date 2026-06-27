@@ -64,3 +64,26 @@ class TestWriteBytesNotifiesTx:
 
         with pytest.raises(SendError):
             conn.write_bytes(b"x")
+
+
+class TestPortManagerWriteBytes:
+    def test_portmanager_write_bytes_delegates_to_connection(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.infra.serial.portmanager import PortManager
+
+        conn = _make_connection(monkeypatch)
+        written: list[bytes] = []
+        monkeypatch.setattr(conn, "write_bytes", lambda data: written.append(data))
+
+        pm = PortManager()
+        monkeypatch.setattr(pm, "_connections", {"COM9": conn})
+
+        pm.write_bytes("COM9", b"\xaa\xbb")
+
+        assert written == [b"\xaa\xbb"]
+
+    def test_portmanager_write_bytes_unopened_port_raises(self) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.infra.serial.portmanager import PortManager
+
+        pm = PortManager()
+        with pytest.raises(KeyError):
+            pm.write_bytes("COM9", b"data")
