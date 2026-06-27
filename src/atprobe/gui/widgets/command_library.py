@@ -99,12 +99,21 @@ class CommandLibraryDock(QWidget):
     # 加载与渲染
     # ------------------------------------------------------------------
     def reload_library(self) -> None:
-        """从当前 path 重新加载命令库并重建树。"""
+        """从当前 path 重新加载命令库并重建树。
+
+        内置示例文件缺失或为空时，回落到内存默认库（store.default_library），
+        保证开箱即用而非空树。
+        """
+        from atprobe.domain.quickcmd import default_library
+
         try:
             self._library = load_library(self._path)
         except QuickCmdStoreError as exc:
             QMessageBox.critical(self, "加载失败", str(exc))
             return
+        # 内置示例文件缺失/为空 → 内存默认库兜底（迁移的 5 条指令）
+        if not self._library.projects and self._path == builtin_library_path():
+            self._library = default_library()
         self._file_label.setText(self._path.name)
         self.refresh_tree()
 
@@ -425,8 +434,8 @@ class LibraryManagerDialog(QDialog):
 
     def _edit_command(self, proj: str, grp: str, old: str, edit: QLineEdit) -> None:
         new = edit.text().strip()
-        if not new:
-            return
+        if not new or new == old:
+            return  # 空或未改动 → 无操作（避免 add+remove 重排序）
         try:
             self._library.add_command(proj, grp, new)
         except ValueError as exc:
