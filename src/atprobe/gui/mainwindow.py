@@ -493,15 +493,32 @@ class MainWindow(QMainWindow):
         self._forward_progress(ev)
 
     def _forward_progress(self, ev: object) -> None:
-        """把进度事件转发给执行进度选项卡（自动弹出/复用，单例）."""
-        # 首次中间事件 → 确保选项卡存在
+        """把进度事件转发给执行进度选项卡（自动弹出/复用，单例）.
+
+        仅在选项卡不存在时创建（首次事件自动弹出，符合用户启动执行后查看进度的预期）；
+        已存在则只转发事件、不抢焦点——避免执行过程中用户切到其他页面（如实时监控）
+        被反复弹回执行进度页。
+        """
+        w = self._find_tab("execution_progress")
+        if w is not None:
+            handler = getattr(w, "on_event", None)
+            if callable(handler):
+                handler(ev)
+            return
+        # 不存在 → 首次事件创建（创建即激活，这是"开始执行后弹出进度"的合理行为）
         if not isinstance(ev, tuple):
             self.new_tab("execution_progress")
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if isinstance(w, QWidget) and w.property("tab_type") == "execution_progress":
+            w = self._find_tab("execution_progress")
+            if w is not None:
                 handler = getattr(w, "on_event", None)
                 if callable(handler):
                     handler(ev)
-                return
+
+    def _find_tab(self, type_name: str) -> QWidget | None:
+        """按 tab_type 属性查找已存在的选项卡 widget（单例去重用）."""
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, QWidget) and w.property("tab_type") == type_name:
+                return w
+        return None
 
