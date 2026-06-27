@@ -478,6 +478,7 @@ class TestManualDebugStripped:
     def test_current_port_and_send_command(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """current_port() 返回选中端口；send_command() 发送并 TX 上屏。"""
         import PySide6.QtWidgets as _qw
+
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
@@ -493,6 +494,7 @@ class TestManualDebugStripped:
     def test_send_command_requires_connection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """send_command 端口未连接时不发送。"""
         import PySide6.QtWidgets as _qw
+
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
@@ -505,6 +507,7 @@ class TestManualDebugStripped:
     def test_multiline_send_preserved(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """多行发送功能保留（经 send_edit + _send，非 send_command）。"""
         import PySide6.QtWidgets as _qw
+
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
@@ -580,6 +583,7 @@ class TestMainWindowCommandRouting:
     def test_routes_to_manual_debug(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """面板 emit → 手动调试页打开且端口连接 → send_manual 被调用。"""
         import PySide6.QtWidgets as _qw
+
         from atprobe.gui.mainwindow import MainWindow
         from atprobe.infra.serial.config import PortConfig
         from atprobe.infra.serial.fakeserial import FakePortManager
@@ -617,6 +621,7 @@ class TestMainWindowCommandRouting:
     def test_no_manual_debug_warns(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """无手动调试页时 emit → warning，不发送。"""
         import PySide6.QtWidgets as _qw
+
         from atprobe.gui.mainwindow import MainWindow
 
         warned: list[str] = []

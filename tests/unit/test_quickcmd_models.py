@@ -5,9 +5,7 @@ from __future__ import annotations
 import pytest
 
 from atprobe.domain.quickcmd.models import (
-    CommandGroup,
     CommandLibrary,
-    CommandProject,
 )
 
 

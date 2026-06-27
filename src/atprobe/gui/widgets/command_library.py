@@ -253,8 +253,11 @@ class LibraryManagerDialog(QDialog):
     def _clear_form(self) -> None:
         while self._form_layout.count():
             it = self._form_layout.takeAt(0)
-            if it is not None and it.widget() is not None:
-                it.widget().deleteLater()
+            if it is None:
+                continue
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
 
     def _on_tree_select(self) -> None:
         items = self.tree.selectedItems()
@@ -482,7 +485,7 @@ def _clone_library(library: CommandLibrary) -> CommandLibrary:
     """深拷贝命令库（对话框编辑用工作副本，取消时不影响外部）."""
     new = CommandLibrary.empty()
     for p in library.projects:
-        proj = new.add_project(p.name)
+        new.add_project(p.name)
         for g in p.groups:
             grp = new.add_group(p.name, g.name)
             grp.commands = list(g.commands)
