@@ -1,0 +1,20 @@
+# ATProbe 命令库示例（项目→功能→命令三层）
+# 用途：手动调试页命令库默认加载源；可手动编辑、git 跟踪、团队共享。
+# 结构：projects[].groups[].commands[] —— 与树层级一一对应。
+projects:
+  - name: N58 项目
+    groups:
+      - name: 网络
+        commands:
+          - AT+CSQ
+          - AT+CEREG?
+      - name: SIM 卡
+        commands:
+          - AT+CPIN?
+          - AT+CGDCONT?
+  - name: 通用
+    groups:
+      - name: 基础
+        commands:
+          - AT
+          - ATI
