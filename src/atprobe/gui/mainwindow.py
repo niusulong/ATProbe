@@ -250,8 +250,13 @@ class MainWindow(QMainWindow):
         return Path(self._app_config.cases_dir)
 
     def env_config_path(self) -> str | None:
+        # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
+        # 确保环境配置页默认打开就有内容可编辑，而非空白页。
         p = Path(self._app_config.env_config)
-        return str(p) if p.exists() else None
+        if p.exists():
+            return str(p)
+        builtin = Path(__file__).resolve().parents[3] / "examples" / "env.yaml"
+        return str(builtin) if builtin.exists() else None
 
     def send_manual(self, port: str, command: str) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.

@@ -208,9 +208,44 @@ class TestEnvConfigTab:
 
 
 class TestCaseExecuteExtras:
-    """B2：标签筛选、dry-run、报告开关、_selected_files 正确性."""
+    """B2：目录层级树、标签筛选、dry-run、报告开关、_selected_files 正确性."""
 
-    def test_tag_filter_and_dry_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    @staticmethod
+    def _count_leaves(widget) -> int:  # noqa: ANN001
+        """递归统计树中用例叶子数."""
+        count = 0
+
+        def walk(item) -> None:  # noqa: ANN001
+            nonlocal count
+            if item.childCount() == 0:
+                count += 1
+                return
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(widget.tree.topLevelItemCount()):
+            walk(widget.tree.topLevelItem(i))
+        return count
+
+    @staticmethod
+    def _first_leaf_name(widget) -> str | None:  # noqa: ANN001
+        """取树中第一个用例叶子的用例名（第 0 列文本）."""
+        def walk(item):  # noqa: ANN001
+            if item.childCount() == 0:
+                return item.text(0)
+            for i in range(item.childCount()):
+                r = walk(item.child(i))
+                if r is not None:
+                    return r
+            return None
+
+        for i in range(widget.tree.topLevelItemCount()):
+            r = walk(widget.tree.topLevelItem(i))
+            if r is not None:
+                return r
+        return None
+
+    def test_tree_tag_filter_and_dry_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         import PySide6.QtWidgets as _qw
 
         from atprobe.gui.tabs.case_execute import CaseExecuteWidget
@@ -220,13 +255,18 @@ class TestCaseExecuteExtras:
         monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
         monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
 
-        # 写两个用例，一个带 network 标签，一个带 sms 标签
+        # 写用例：根目录下两个 + tcp/ 子目录一个，验证目录层级 + 标签筛选
         (tmp_path / "net.yaml").write_text(
             "name: 网络用例\ntags: [network]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
             encoding="utf-8",
         )
         (tmp_path / "sms.yaml").write_text(
             "name: 短信用例\ntags: [sms]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tcp").mkdir()
+        (tmp_path / "tcp" / "t1.yaml").write_text(
+            "name: TCP用例\ntags: [tcp]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
             encoding="utf-8",
         )
 
@@ -249,23 +289,36 @@ class TestCaseExecuteExtras:
         widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), main)  # type: ignore[arg-type]
         widget._load_path(tmp_path)  # noqa: SLF001
 
-        # 标签聚合：下拉应含 network、sms
+        # 标签聚合：下拉应含 network、sms、tcp
         tag_items = [widget.tag_combo.itemText(i) for i in range(widget.tag_combo.count())]
-        assert "network" in tag_items and "sms" in tag_items
+        assert "network" in tag_items and "sms" in tag_items and "tcp" in tag_items
 
-        # 默认（全部）两个用例都显示
-        assert widget.table.rowCount() == 2
+        # 默认（全部）三个用例都显示为叶子
+        assert self._count_leaves(widget) == 3
 
         # 选 network 标签 → 只显示网络用例
         widget.tag_combo.setCurrentText("network")
-        assert widget.table.rowCount() == 1
-        assert widget.table.item(0, 1).text() == "网络用例"  # type: ignore[union-attr]
+        assert self._count_leaves(widget) == 1
+        assert self._first_leaf_name(widget) == "网络用例"
 
-        # 切回全部，dry-run：应调用 run_cases(dry_run=True)
+        # 切回全部
         widget.tag_combo.setCurrentIndex(0)
+        assert self._count_leaves(widget) == 3
+
+        # 默认全选：_selected_files 应返回全部 3 个文件
+        assert len(widget._selected_files()) == 3  # noqa: SLF001
+
+        # 全不选 → 0 个；再全选 → 3 个
+        widget._set_all_checked(False)  # noqa: SLF001
+        assert widget._selected_files() == []  # noqa: SLF001
+        widget._set_all_checked(True)  # noqa: SLF001
+        assert len(widget._selected_files()) == 3  # noqa: SLF001
+
+        # dry-run：应调用 run_cases(dry_run=True)
         widget.ports_combo.setCurrentText("COM3")
         widget._dry_run()  # noqa: SLF001
         assert run_calls and run_calls[-1]["dry_run"] is True
+        assert len(run_calls[-1]["files"]) == 3
 
         # 关闭报告开关 → run_cases(no_report=True)
         widget.report_check.setChecked(False)
