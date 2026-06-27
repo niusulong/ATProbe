@@ -3,7 +3,8 @@
 直接调用 M1（不经 M3 引擎、不产生用例结果）。支持：
     - 选择端口 + 波特率/帧格式 + 打开/关闭连接（状态徽标 + 按钮切换）
     - 发送 AT 指令（可调结束符；无超时参数——超时是「用例执行」判定响应完整性的概念）
-    - 快捷指令：自定义增删，跨会话持久化（QSettings）
+    - 命令库：经主窗口右侧「命令库」停靠面板管理（项目→功能→命令三层树），
+      双击命令直接发送到本页当前端口；增删改经「命令库管理」对话框。
 
 数据模型（纯流式，串口助手语义）：
     - 发送：调 MainWindow.send_manual → PortManager.write_command，只写字节不等响应，TX 立即上屏。
@@ -14,7 +15,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -22,8 +23,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -41,12 +40,6 @@ _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "
 # 常见帧格式（3 字符紧凑写法）
 _FRAMES = ["8N1", "8N2", "8E1", "8O1", "7E1", "7O1"]
 
-# 出厂默认快捷指令（用户自定义为空时回落）
-_DEFAULT_QUICK_COMMANDS = ("AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?")
-_MAX_QUICK_COMMANDS = 32
-_SETTINGS_KEY = "manual_debug/quick_commands"
-_HISTORY_KEY = "manual_debug/history"
-_MAX_HISTORY = 50
 # 响应区环形缓冲行数上限（§10.3，超出自动丢弃旧行）
 _MAX_RESPONSE_LINES = 10000
 
@@ -64,7 +57,11 @@ class ManualDebugTab(ITabView):
 
 
 class ManualDebugWidget(QWidget):
-    """手动调试视图（§4.3 布局）—— 卡片化分组，呼应 HTML 报告的视觉语言."""
+    """手动调试视图（§4.3 布局）—— 卡片化分组，呼应 HTML 报告的视觉语言.
+
+    对外暴露 current_port()/send_command() 供主窗口右侧「命令库」停靠面板
+    双击命令时路由发送。
+    """
 
     # 读线程收到原始 RX 字节 → 经此信号切回主线程渲染（线程安全）
     rx_received = Signal(bytes)
@@ -74,15 +71,11 @@ class ManualDebugWidget(QWidget):
         self._main = main_window
         self._tokens = get_tokens(dark=False)
         self._terminator = "\r\n"
-        # 快捷指令列表（可能来自 QSettings 自定义，或默认值）
-        self._quick_commands: list[str] = self._load_quick_commands()
         # 当前订阅句柄（端口打开后建立，关闭时撤销）
         self._rx_handle: object | None = None
         # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染
         self._rx_buffer = bytearray()
         self._init_ui()
-        # 载入历史指令（QSettings 持久化）
-        self._load_history()
         # RX 字节在串口读线程到达 → 信号切主线程 → 渲染
         self.rx_received.connect(self._on_rx_bytes)
 
@@ -149,16 +142,6 @@ class ManualDebugWidget(QWidget):
         send_sc.activated.connect(self._send)
         send_layout.addWidget(self.send_edit)
 
-        # 历史指令下拉（最近发送，可回选）
-        hist_row = QHBoxLayout()
-        hist_row.addWidget(self._caption_label("历史"))
-        self.history_combo = QComboBox()
-        self.history_combo.setMaximumWidth(220)
-        self.history_combo.currentTextChanged.connect(self._on_history_pick)
-        hist_row.addWidget(self.history_combo)
-        hist_row.addStretch()
-        send_layout.addLayout(hist_row)
-
         send_row = QHBoxLayout()
         send_btn = QPushButton("发送")
         send_btn.setObjectName("primary")
@@ -212,61 +195,6 @@ class ManualDebugWidget(QWidget):
         resp_layout.addWidget(self.response_view, 1)
         layout.addWidget(resp_group, 1)
 
-        # ===== 卡片 4: 快捷指令（可自定义）=====
-        layout.addWidget(self._build_quick_group())
-
-    def _build_quick_group(self) -> QWidget:
-        """快捷指令卡片：指令按钮流 + 输入框 + 添加/恢复默认."""
-        quick_group = QGroupBox("快捷指令（可自定义，右键删除）")
-        quick_layout = QVBoxLayout(quick_group)
-        quick_layout.setContentsMargins(12, 8, 12, 12)
-        quick_layout.setSpacing(8)
-
-        # 指令按钮流容器（每次重建）
-        self.quick_btn_row = QHBoxLayout()
-        self.quick_btn_row.setSpacing(6)
-        self.quick_btn_row.addStretch()
-        self._populate_quick_buttons()
-        quick_layout.addLayout(self.quick_btn_row)
-
-        # 输入 + 添加 + 恢复默认
-        edit_row = QHBoxLayout()
-        edit_row.setSpacing(6)
-        self.quick_edit = QLineEdit()
-        self.quick_edit.setPlaceholderText("输入指令，点「添加」加入快捷列表")
-        edit_row.addWidget(self.quick_edit, 1)
-        add_btn = QPushButton("添加")
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setIcon(self._action_icon("add"))
-        add_btn.clicked.connect(self._add_quick_from_edit)
-        edit_row.addWidget(add_btn)
-        reset_btn = QPushButton("恢复默认")
-        reset_btn.clicked.connect(self._reset_quick)
-        edit_row.addWidget(reset_btn)
-        quick_layout.addLayout(edit_row)
-        return quick_group
-
-    def _populate_quick_buttons(self) -> None:
-        """清空并按 self._quick_commands 重建快捷指令按钮流."""
-        # 清空旧行（保留尾部 stretch item）
-        while self.quick_btn_row.count() > 1:
-            item = self.quick_btn_row.takeAt(0)
-            if item is None:
-                continue
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        for cmd in self._quick_commands:
-            btn = QPushButton(cmd)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # 左键 → 填入并发送；右键 → 删除菜单
-            btn.clicked.connect(lambda _checked=False, c=cmd: self._send_quick(c))
-            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            btn.customContextMenuRequested.connect(
-                lambda _pos, c=cmd: self._show_quick_menu(c)
-            )
-            self.quick_btn_row.insertWidget(self.quick_btn_row.count() - 1, btn)
-
     # ------------------------------------------------------------------
     # 小工具
     # ------------------------------------------------------------------
@@ -301,6 +229,10 @@ class ManualDebugWidget(QWidget):
         if ports:
             self.port_combo.setCurrentIndex(select_idx)
         self._sync_connect_state()
+
+    def current_port(self) -> str:
+        """返回当前选中端口的真实名（供命令库面板路由发送目标）."""
+        return self._current_port()
 
     def _current_port(self) -> str:
         """取当前选中端口的真实名（data，去掉徽标前缀）."""
@@ -362,10 +294,6 @@ class ManualDebugWidget(QWidget):
     def _on_term_change(self, text: str) -> None:
         self._terminator = "\r\n" if "n" in text else "\r"
 
-    def _send_quick(self, cmd: str) -> None:
-        self.send_edit.setPlainText(cmd)
-        self._send()
-
     def _send(self) -> None:
         port = self._current_port()
         if not port:
@@ -390,26 +318,29 @@ class ManualDebugWidget(QWidget):
             ok = send_manual(port, command)
             if not ok:
                 self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
-        # 记录历史指令（去重，最多 50 条，持久化）
-        self._add_history(commands[-1])
 
-    def _on_history_pick(self, text: str) -> None:
-        """从历史下拉回选指令：填入发送框（不自动发送，让用户可改后发）."""
-        if text:
-            self.send_edit.setPlainText(text)
+    def send_command(self, command: str) -> None:
+        """发送单条命令（命令库面板双击调用）：TX 上屏 + 调 send_manual。
 
-    def _add_history(self, command: str) -> None:
-        """把指令加入历史下拉（去重、置顶、限 50 条），QSettings 持久化."""
-        items = [self.history_combo.itemText(i) for i in range(self.history_combo.count())]
-        if command in items:
-            items.remove(command)
-        items.insert(0, command)
-        items = items[:50]
-        self.history_combo.blockSignals(True)
-        self.history_combo.clear()
-        self.history_combo.addItems(items)
-        self.history_combo.blockSignals(False)
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", items)
+        与处理多行的 _send 分离：不修改发送框内容，不引入副作用。
+        用发送区当前全局结束符 self._terminator。
+        """
+        port = self._current_port()
+        if not port:
+            QMessageBox.warning(self, "提示", "请先选择端口")
+            return
+        is_conn = getattr(self._main, "is_port_connected", None)
+        if callable(is_conn) and not is_conn(port):
+            QMessageBox.warning(self, "提示", f"端口 {port} 未连接，请先「打开端口」")
+            return
+        send_manual = getattr(self._main, "send_manual", None)
+        if not callable(send_manual):
+            self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
+            return
+        # TX 立即上屏（串口助手语义：发送即记录）
+        self._append_line("TX", command, self._tokens["data.tx"])
+        if not send_manual(port, command):
+            self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
 
     # ------------------------------------------------------------------
     # RX 流式接收（读线程 → 信号 → 主线程渲染）
@@ -457,70 +388,6 @@ class ManualDebugWidget(QWidget):
             if stripped:
                 self._append_line("RX", stripped, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
-
-    def _load_history(self) -> None:
-        """从 QSettings 载入历史指令下拉."""
-        raw = QSettings("ATProbe", "ATProbe").value(_HISTORY_KEY)
-        items = list(raw) if isinstance(raw, (list, tuple)) else []
-        items = [str(x).strip() for x in items if str(x).strip()]
-        if items:
-            self.history_combo.addItems(items)
-
-    # ------------------------------------------------------------------
-    # 快捷指令自定义 + 持久化
-    # ------------------------------------------------------------------
-    def _add_quick_from_edit(self) -> None:
-        cmd = self.quick_edit.text().strip()
-        if not cmd:
-            return
-        self._add_quick(cmd)
-        self.quick_edit.clear()
-
-    def _add_quick(self, cmd: str) -> None:
-        if cmd in self._quick_commands:
-            return
-        if len(self._quick_commands) >= _MAX_QUICK_COMMANDS:
-            QMessageBox.information(self, "提示", f"快捷指令已达上限（{_MAX_QUICK_COMMANDS} 条）")
-            return
-        self._quick_commands.append(cmd)
-        self._save_quick_commands(self._quick_commands)
-        self._populate_quick_buttons()
-
-    def _remove_quick(self, cmd: str) -> None:
-        if cmd in self._quick_commands:
-            self._quick_commands.remove(cmd)
-            self._save_quick_commands(self._quick_commands)
-            self._populate_quick_buttons()
-
-    def _reset_quick(self) -> None:
-        self._quick_commands = list(_DEFAULT_QUICK_COMMANDS)
-        self._save_quick_commands(self._quick_commands)
-        self._populate_quick_buttons()
-
-    def _show_quick_menu(self, cmd: str) -> None:
-        menu = QMenu(self)
-        act_del = menu.addAction("删除「" + cmd + "」")
-        chosen = menu.exec(self.cursor().pos())
-        if chosen is act_del:
-            self._remove_quick(cmd)
-
-    def _load_quick_commands(self) -> list[str]:
-        """从 QSettings 读取自定义快捷指令；无则回落默认五条."""
-        s = QSettings("ATProbe", "ATProbe")
-        raw = s.value(_SETTINGS_KEY)
-        if raw is None:
-            return list(_DEFAULT_QUICK_COMMANDS)
-        # QSettings 可能返回 list / QStringList / str
-        if isinstance(raw, (list, tuple)):
-            cmds = [str(x).strip() for x in raw if str(x).strip()]
-        else:
-            cmds = [str(raw).strip()] if str(raw).strip() else []
-        return cmds if cmds else list(_DEFAULT_QUICK_COMMANDS)
-
-    def _save_quick_commands(self, cmds: list[str]) -> None:
-        s = QSettings("ATProbe", "ATProbe")
-        s.setValue(_SETTINGS_KEY, cmds)
-        s.sync()
 
     # ------------------------------------------------------------------
     # 日志保存 + 响应区渲染
