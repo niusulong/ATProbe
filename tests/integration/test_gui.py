@@ -574,6 +574,121 @@ class TestManualDebugFileSendRouting:
         assert main.get_connection("COM1") is sentinel
 
 
+class TestManualDebugFileSendCard:
+    def test_file_send_card_exists(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        assert hasattr(widget, "file_btn")  # 选择文件按钮
+        assert hasattr(widget, "file_send_btn")  # 发送按钮
+        assert hasattr(widget, "file_progress")  # 进度条
+        assert hasattr(widget, "file_cancel_btn")  # 取消按钮
+
+    def test_small_file_sends_synchronously(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 写一个小文件（< 4KB 阈值）
+        f = tmp_path / "small.bin"
+        f.write_bytes(b"\x01\x02\x03\x04")
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001 —— 模拟已选文件
+        widget._update_file_label()
+
+        widget._send_file()  # noqa: SLF001
+
+        assert main.file_sent_event.is_set()
+        assert main.last_bytes == ("COM1", b"\x01\x02\x03\x04")
+        # TX 原始数据应上屏（响应区含 TX 标记）
+        text = widget.response_view.toPlainText()
+        assert "TX" in text
+
+    def test_file_send_requires_connection(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: None)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        f = tmp_path / "x.bin"
+        f.write_bytes(b"abc")
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001
+
+        widget._send_file()  # noqa: SLF001 —— 未连接 → 弹窗、不发
+
+        assert main.last_bytes is None
+
+
+class TestManualDebugFileSendLarge:
+    def test_large_file_uses_worker(self, qtbot, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 大文件（> 4KB）
+        f = tmp_path / "big.bin"
+        f.write_bytes(b"x" * 5000)
+
+        # 让 _FakeMain.get_connection 返回一个记录写入的替身
+        class _Conn:
+            def __init__(self) -> None:
+                self.written: list[bytes] = []
+
+            def write_bytes(self, d: bytes) -> None:
+                self.written.append(d)
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        main._fake_connection = _Conn()  # noqa: SLF001
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001
+        widget._update_file_label()
+
+        # 桩掉 time.sleep 避免 worker 真实等待
+        monkeypatch.setattr("atprobe.gui.widgets.file_send.time.sleep", lambda _s: None)
+
+        widget._send_file()  # noqa: SLF001
+
+        # 大文件 → worker 创建并启动（需事件循环驱动 started→run→finished）
+        assert widget._file_worker is not None  # noqa: SLF001
+        # 驱动事件循环，等待 worker 完成、线程退出、引用清理
+        qtbot.waitUntil(lambda: widget._file_worker is None, timeout=5000)  # noqa: SLF001
+        # 替身记录了分块写入（5000 字节按 1024 分块 = 5 块）
+        assert len(main._fake_connection.written) >= 1  # noqa: SLF001
+        assert b"".join(main._fake_connection.written) == b"x" * 5000  # noqa: SLF001
+
+    def test_file_send_disables_text_send(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        # 进入发送中 → 文本发送框禁用、取消按钮可见
+        widget._enter_file_sending()  # noqa: SLF001
+        assert widget.send_edit.isEnabled() is False
+        assert widget.file_send_btn.isEnabled() is False
+        # isVisible() 对未 show() 的控件恒为 False，用 not isHidden() 验证可见策略
+        assert widget.file_cancel_btn.isHidden() is False
+
+        # 退出 → 恢复
+        widget._exit_file_sending()  # noqa: SLF001
+        assert widget.send_edit.isEnabled() is True
+
+
 class TestCommandLibraryPanel:
     """命令库侧栏面板：加载渲染 + 单击发送信号。"""
 
