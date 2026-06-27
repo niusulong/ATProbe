@@ -576,6 +576,22 @@ class TestCommandLibraryDock:
         dock._on_double_click(proj_item, 0)  # noqa: SLF001
         assert received == []
 
+    def test_builtin_missing_falls_back_to_default(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """内置示例文件缺失时，reload_library 回落到内存默认库（迁移 5 条指令）."""
+        from atprobe.gui.widgets import command_library as cl_mod
+        from atprobe.gui.widgets.command_library import CommandLibraryDock
+
+        # 让 builtin_library_path 指向一个不存在的路径，模拟打包后缺失数据文件
+        fake_path = tmp_path / "quick_commands.yaml"
+        monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: fake_path)
+
+        dock = CommandLibraryDock(object())  # type: ignore[arg-type]
+        # 回退后应含 default_library 的项目（通用/基础，含 AT 等）
+        all_cmds = [
+            c for p in dock._library.projects for g in p.groups for c in g.commands  # noqa: SLF001
+        ]
+        assert "AT" in all_cmds and "AT+CSQ" in all_cmds
+
 
 class TestMainWindowCommandRouting:
     """主窗口：命令库面板 send_requested → 路由到手动调试页 send_command。"""
