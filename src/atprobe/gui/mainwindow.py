@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         self._status_engine.setText(f'● <span style="color:{color}">引擎 {state}</span>')
 
     def _init_menubar(self) -> None:
-        """构造菜单栏：视图（主题切换）."""
+        """构造菜单栏：视图（主题切换）+ 帮助（检查更新/关于）."""
         from PySide6.QtGui import QAction
 
         view_menu = self.menuBar().addMenu("视图(&V)")
@@ -181,6 +181,15 @@ class MainWindow(QMainWindow):
         self._theme_action.setChecked(self._dark)
         self._theme_action.toggled.connect(self._toggle_theme)
         view_menu.addAction(self._theme_action)
+
+        help_menu = self.menuBar().addMenu("帮助(&H)")
+        check_action = QAction("检查更新...", self)
+        check_action.triggered.connect(lambda: self._on_check_update(manual=True))
+        help_menu.addAction(check_action)
+        help_menu.addSeparator()
+        about_action = QAction("关于 ATProbe", self)
+        about_action.triggered.connect(self._on_about)
+        help_menu.addAction(about_action)
 
     def _toggle_theme(self, dark: bool) -> None:
         """切换浅/深主题：重应用 QSS + 记忆偏好（§2.2）."""
@@ -199,6 +208,36 @@ class MainWindow(QMainWindow):
             self._tokens["accent"] if self._engine is not None else self._tokens["neutral"],
         )
         QSettings("ATProbe", "ATProbe").setValue("theme/dark", dark)
+
+    def _on_about(self) -> None:
+        """关于对话框：显示版本号与项目地址."""
+        import sys as _sys
+
+        from PySide6.QtWidgets import QMessageBox
+
+        from atprobe.infra.version import current_version
+
+        QMessageBox.about(
+            self,
+            "关于 ATProbe",
+            (
+                f"<h3>ATProbe</h3>"
+                f"<p>版本：{current_version()}</p>"
+                f"<p>串口 AT 命令自动化测试工具</p>"
+                f"<p>项目地址：<a href='https://github.com/niusulong/ATProbe'>"
+                f"github.com/niusulong/ATProbe</a></p>"
+                f"<p>Python {_sys.version.split()[0]} · MIT License</p>"
+            ),
+        )
+
+    def _on_check_update(self, manual: bool = True) -> None:
+        """检查更新（菜单手动触发）。完整实现见 _check_update。"""
+        self._check_update(manual=manual)
+
+    def _check_update(self, manual: bool = True) -> None:
+        """检查更新（Task 11 完整实现；此处先占位，避免菜单触发时崩溃）。"""
+        # 占位：Task 11 将实现后台线程检查 + 信号投递 + 对话框
+        return
 
     # ------------------------------------------------------------------
     # 选项卡管理（§2.3）
