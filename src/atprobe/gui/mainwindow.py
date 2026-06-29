@@ -35,7 +35,7 @@ from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
 from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
-from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig
+from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig, Terminator
 from atprobe.infra.serial.exceptions import PortOpenError
 from atprobe.infra.serial.interfaces import CancelToken
 from atprobe.infra.serial.portmanager import PortManager
@@ -474,16 +474,22 @@ class MainWindow(QMainWindow):
         except FileNotFoundError:
             return None
 
-    def send_manual(self, port: str, command: str) -> bool:
+    def send_manual(
+        self, port: str, command: str, *, terminator: Terminator | None = None
+    ) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
 
         响应须经 ``subscribe_rx`` 订阅后在视图侧自行接收渲染。
         返回 True 表示写入成功；未连接返回 False。
+
+        Args:
+            terminator: 逐命令覆盖的结束符；None 时用连接级 PortConfig.terminator。
+                手动调试页结束符下拉的选择经此透传（修：UI 选择原本被忽略）。
         """
         if not self._port_manager.is_connected(port):
             return False
         try:
-            self._port_manager.write_command(port, command)
+            self._port_manager.write_command(port, command, terminator=terminator)
             return True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "发送错误", f"发送失败：{exc}")

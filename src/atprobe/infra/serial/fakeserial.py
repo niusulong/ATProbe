@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import PortConfig, Terminator
 from atprobe.infra.serial.exceptions import OperationCancelled
 from atprobe.infra.serial.interfaces import (
     CancelToken,
@@ -198,16 +198,20 @@ class FakePortManager:
             if observer in obs:  # type: ignore[operator]
                 obs.remove(observer)  # type: ignore[arg-type]
 
-    def write_command(self, port: str, command: str) -> None:
+    def write_command(self, port: str, command: str, *, terminator: Terminator | None = None) -> None:
         """流式写：记录命令（与 send_command 同口径），供测试断言.
 
         同时向 TX 观察者派发实际写入的字节（含结束符），模拟真实写线程行为。
         不会自动触发 RX 观察者；测试需用 emit_rx() 主动喂入回包。
         """
         self.sent.append((port, command))
-        # 配置里的结束符（默认 \r\n）
-        terminator = self._configs.get(port, PortConfig(name=port)).terminator.value.encode("ascii")
-        payload = command.encode("utf-8") + terminator
+        # 逐命令覆盖优先；否则用配置里的结束符（默认 \r\n）
+        if terminator is not None:
+            term_bytes = terminator.value.encode("ascii")
+        else:
+            cfg = self._configs.get(port, PortConfig(name=port))
+            term_bytes = cfg.terminator.value.encode("ascii")
+        payload = command.encode("utf-8") + term_bytes
         for obs in self._tx_observers.get(port, []):
             obs(payload)
 

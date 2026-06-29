@@ -44,6 +44,7 @@ from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
+from atprobe.infra.serial.config import Terminator
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QThread
@@ -86,7 +87,7 @@ class ManualDebugWidget(QWidget):
         super().__init__()
         self._main = main_window
         self._tokens = get_tokens(dark=False)
-        self._terminator = "\r\n"
+        self._terminator = Terminator.CRLF
         # 当前订阅句柄（端口打开后建立，关闭时撤销）
         self._rx_handle: object | None = None
         # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染
@@ -372,7 +373,7 @@ class ManualDebugWidget(QWidget):
     # 发送
     # ------------------------------------------------------------------
     def _on_term_change(self, text: str) -> None:
-        self._terminator = "\r\n" if "n" in text else "\r"
+        self._terminator = Terminator.CRLF if "n" in text else Terminator.CR
 
     def _send(self) -> None:
         port = self._current_port()
@@ -394,8 +395,8 @@ class ManualDebugWidget(QWidget):
             return
         for command in commands:
             # TX 立即上屏（串口助手语义：发送即记录）
-            self._append_line("TX", command, self._tokens["data.tx"])
-            ok = send_manual(port, command)
+            self._render_tx_command(command)
+            ok = send_manual(port, command, terminator=self._terminator)
             if not ok:
                 self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
 
@@ -418,8 +419,8 @@ class ManualDebugWidget(QWidget):
             self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
             return
         # TX 立即上屏（串口助手语义：发送即记录）
-        self._append_line("TX", command, self._tokens["data.tx"])
-        if not send_manual(port, command):
+        self._render_tx_command(command)
+        if not send_manual(port, command, terminator=self._terminator):
             self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
 
     # ------------------------------------------------------------------
@@ -641,6 +642,20 @@ class ManualDebugWidget(QWidget):
             if stripped:
                 self._append_line("RX", stripped, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
+
+    def _render_tx_command(self, command: str) -> None:
+        """渲染命令型 TX（手动发送/命令库双击）上屏。
+
+        HEX 模式下显示「命令正文 + 结束符」的完整字节，让用户直观确认结束符配置生效
+        —— N58 不回显 <LF>（手册 §3.2 结束符约定为 <CR>），RX 侧无法区分 \\r/\\r\\n，
+        故在 TX 侧显示完整字节作为判据。非 HEX 模式仅显示命令文本。
+        """
+        if self.hex_check.isChecked():
+            payload = command.encode("utf-8") + self._terminator.value.encode("ascii")
+            hex_line = " ".join(f"{b:02X}" for b in payload)
+            self._append_line("TX", hex_line, self._tokens["data.tx"])
+        else:
+            self._append_line("TX", command, self._tokens["data.tx"])
 
     def _render_tx_bytes(self, chunk: bytes) -> None:
         """渲染 TX 原始字节（文件/数据流发送）—— 复用 _on_rx_bytes 的切分逻辑.

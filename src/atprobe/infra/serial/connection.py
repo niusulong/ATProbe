@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import PortConfig, Terminator
 from atprobe.infra.serial.exceptions import (
     PortOpenError,
     SendError,
@@ -134,15 +134,21 @@ class SerialConnection:
             except Exception:  # noqa: BLE001 - 观察者错误不影响写线程
                 pass
 
-    def write_command(self, command: str) -> None:
+    def write_command(self, command: str, *, terminator: Terminator | None = None) -> None:
         """写字符串命令（自动追加结束符），不等待响应——供手动调试/串口助手用.
 
         与 send_command 区别：本方法立即返回，响应须经 rx_observer 自行接收。
+
+        Args:
+            command: 命令文本（不含结束符）。
+            terminator: 逐命令覆盖的结束符；None 时回退到连接级 PortConfig.terminator。
+                手动调试页结束符下拉即经此参数透传（连接级配置固定，逐命令可变）。
         """
         if not self._connected or self._serial is None:
             raise SendError(self.config.name, "端口未连接")
-        terminator = self.config.terminator.value.encode("ascii")
-        payload = command.encode("utf-8") + terminator
+        term = self.config.terminator if terminator is None else terminator
+        terminator_bytes = term.value.encode("ascii")
+        payload = command.encode("utf-8") + terminator_bytes
         self._log_tx(payload)
         self._notify_tx_observers(payload)
         try:

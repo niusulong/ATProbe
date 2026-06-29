@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import PortConfig, Terminator
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.exceptions import (
     PortOpenError,
@@ -241,12 +241,16 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if conn is not None:
             conn.remove_tx_observer(observer)  # type: ignore[arg-type]
 
-    def write_command(self, port: str, command: str) -> None:
-        """写字符串命令（追加结束符），不等待响应——供手动调试/串口助手用."""
+    def write_command(self, port: str, command: str, *, terminator: Terminator | None = None) -> None:
+        """写字符串命令（追加结束符），不等待响应——供手动调试/串口助手用.
+
+        Args:
+            terminator: 逐命令覆盖的结束符；None 时用连接级 PortConfig.terminator。
+        """
         conn = self._connections.get(port)
         if conn is None:
             raise KeyError(f"端口 {port} 未打开")
-        conn.write_command(command)
+        conn.write_command(command, terminator=terminator)
 
     def write_bytes(self, port: str, data: bytes) -> None:
         """写原始字节（不加结束符、不分块），供文件/二进制数据流发送用.
