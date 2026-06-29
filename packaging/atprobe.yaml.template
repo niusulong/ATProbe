@@ -1,0 +1,27 @@
+# ATProbe 用户配置（便携版）
+# 解压后把本文件改名为 atprobe.yaml，放在 ATProbe.exe 同级目录即可生效。
+# 所有相对路径以 exe 所在目录为基准。
+# 命令行参数覆盖配置文件，配置文件覆盖内置默认值。
+
+ports:                          # 默认端口列表（--port 未指定时使用）。先从设备管理器查你的 COM 号
+  - COM5:115200:8N1
+
+default:
+  step_timeout: 5               # 步骤级默认超时（秒）
+  baud: 115200                  # 默认波特率
+  log_level: progress           # progress / debug
+
+cases_dir: ./examples/testcases # 用例目录（相对 exe 同级）
+report_dir: ./reports           # HTML 报告输出目录
+env_config: ./examples/env.yaml # 测试环境配置文件（M7）
+
+console:
+  color: true                   # 默认启用颜色；非终端环境自动忽略
+  command_truncate: 40          # 控制台命令显示截断长度
+
+log:
+  dir: ./logs                   # 原始日志根目录
+  keep: 0                       # 日志保留份数，0=不自动清理（手动删）
+
+pressure:                       # 压测默认值
+  pass_rate_threshold: 95       # 压测用例 PASS 阈值（成功率%）
