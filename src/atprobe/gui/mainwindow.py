@@ -252,11 +252,17 @@ class MainWindow(QMainWindow):
     def env_config_path(self) -> str | None:
         # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
         # 确保环境配置页默认打开就有内容可编辑，而非空白页。
+        # 经 resources.builtin_resource 定位，开发态/打包态皆可用。
         p = Path(self._app_config.env_config)
         if p.exists():
             return str(p)
-        builtin = Path(__file__).resolve().parents[3] / "examples" / "env.yaml"
-        return str(builtin) if builtin.exists() else None
+        from atprobe.infra.resources import builtin_resource
+
+        try:
+            builtin = builtin_resource("env.yaml")
+            return str(builtin)
+        except FileNotFoundError:
+            return None
 
     def send_manual(self, port: str, command: str) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
