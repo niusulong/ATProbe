@@ -232,6 +232,25 @@ class TestMonitorLineRendering:
         text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
         assert "41 54" in text and "4F 4B" in text  # HEX 完整显示
 
+    def test_text_mode_escapes_line_endings(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """文本模式下，行末换行符转义成可见的 \\r\\n 文本.
+
+        N58 真实回包 b'AT\\r\\r\\n+CSQ: 12,99\\r\\nOK\\r\\n'（回显行只有 \\r，
+        响应行完整 \\r\\n）。转义后用户能直观看到每行的换行构成。
+        """
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget._on_data("COM5", "RX", b"AT\r\r\n+CSQ: 12,99\r\nOK\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        # 响应行末应出现可见的 \r\n 文本（转义后的反斜杠+r+反斜杠+n）
+        assert r"\r\n" in text, f"响应行末应转义显示 \\r\\n: {text!r}"
+        # 回显行 AT 后应能看到 \r（N58 吞掉 LF，回显只有 CR）
+        assert "AT\\r" in text, f"回显行 AT 后应转义显示 \\r: {text!r}"
+
 
 class TestExecutionProgressTab:
     def test_event_flow_renders(self, qapp) -> None:  # type: ignore[no-untyped-def]
@@ -608,6 +627,24 @@ class TestManualDebugPortControl:
         # 关闭端口 → 撤销订阅
         widget._toggle_connect()  # noqa: SLF001
         assert widget._rx_handle is None  # noqa: SLF001
+
+    def test_rx_text_mode_escapes_line_endings(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """文本模式下，RX 行末换行符转义成可见 \\r\\n 文本（与监控页一致）.
+
+        N58 真实回包 b'AT\\r\\r\\n+CSQ: 12,99\\r\\nOK\\r\\n'。
+        """
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+
+        main.emit_rx("COM1", b"AT\r\r\n+CSQ: 12,99\r\nOK\r\n")
+        text = widget.response_view.toPlainText()
+        assert r"\r\n" in text, f"响应行末应转义显示 \\r\\n: {text!r}"
+        assert "AT\\r" in text, f"回显行 AT 后应转义显示 \\r: {text!r}"
 
 
 class TestManualDebugStripped:
