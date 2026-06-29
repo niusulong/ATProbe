@@ -30,7 +30,9 @@ def _root(
 from atprobe.cli.commands import list as list_cmd  # noqa: E402
 from atprobe.cli.commands import run as run_cmd  # noqa: E402
 from atprobe.cli.commands.gui import gui_cmd  # noqa: E402
+from atprobe.cli.commands.update import update as update_cmd  # noqa: E402
 
 app.command()(run_cmd.run)
 app.command(name="list")(list_cmd.list_cmd)
 app.command(name="gui")(gui_cmd)
+app.command(name="update")(update_cmd)
