@@ -32,6 +32,9 @@ dev = [
     "ruff>=0.4",
     "types-PyYAML",
 ]
+packaging = [
+    "pyinstaller>=6.0",
+]
 
 [project.scripts]
 atprobe = "atprobe.cli.main:app"
