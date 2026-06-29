@@ -175,6 +175,64 @@ class TestMonitorMultiPort:
         win.unsubscribe_monitor()
 
 
+class TestMonitorLineRendering:
+    """监控页 RX/TX 按行切分渲染（多行 chunk 应渲染成多行，非黏成一行）."""
+
+    def test_multiline_rx_renders_as_separate_lines(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """回归：RX chunk = AT\\r\\n\\r\\nOK\\r\\n 应渲染为两行（AT / OK），非 'AT OK'.
+
+        bug：_on_data 把整个 chunk 当一行 append，中间 \\r\\n 既未切分也未转 <br>，
+        导致文本模式 'AT OK' 黏成一行（\\r 回车不换行、\\n 被当空格）。
+        """
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        # 模拟模块回包：AT 回显 + 空行 + OK
+        widget._on_data("COM5", "RX", b"AT\r\n\r\nOK\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        # AT 和 OK 应在不同行（不能黏成 'AT OK'）
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        joined = " ".join(lines)
+        assert "AT OK" not in joined, f"AT 和 OK 不应黏成一行: {text!r}"
+        # 两者各自独立成行
+        assert any("AT" in ln for ln in lines)
+        assert any("OK" in ln for ln in lines)
+
+    def test_rx_partial_chunk_accumulated_across_calls(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """跨 chunk 的不完整行应累积，凑齐换行后再渲染（与 manual_debug 同语义）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        # 分两次到达：先 'AT'（无换行），再 '\r\nOK\r\n'
+        widget._on_data("COM5", "RX", b"AT")  # noqa: SLF001
+        widget._on_data("COM5", "RX", b"\r\nOK\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        joined = " ".join(lines)
+        assert "AT OK" not in joined, f"跨 chunk 也应正确切行: {text!r}"
+        assert any("AT" in ln for ln in lines)
+        assert any("OK" in ln for ln in lines)
+
+    def test_hex_mode_not_split(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """HEX 模式按原始字节显示，不按行切分（与 manual_debug HEX 语义一致）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget.hex_check.setChecked(True)
+        widget._on_data("COM5", "RX", b"AT\r\nOK\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        assert "41 54" in text and "4F 4B" in text  # HEX 完整显示
+
+
 class TestExecutionProgressTab:
     def test_event_flow_renders(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """B1：执行进度选项卡消费 CaseStart/Step/CaseResult/Finished 事件，更新表格与进度条."""
