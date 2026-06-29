@@ -19,6 +19,7 @@ from atprobe.infra.update import (
     UpdateError,
 )
 from atprobe.infra.update.checker import fetch_latest, is_newer
+from atprobe.infra.update.config import DEFAULT_CONFIG
 from atprobe.infra.update.downloader import download
 from atprobe.infra.update.installer import apply_update
 from atprobe.infra.version import current_version
@@ -66,7 +67,7 @@ def update(
         result = download(
             info.zip_url,
             dest,
-            filename=f"ATProbe-{info.version}-win64.zip",
+            filename=DEFAULT_CONFIG.asset_name_for(info.version),
             expected_size=info.zip_size,
             progress_cb=_print_progress,
         )

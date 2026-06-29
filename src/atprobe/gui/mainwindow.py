@@ -94,7 +94,6 @@ class MainWindow(QMainWindow):
         self.update_download_progress.connect(self._on_download_progress)
         self.update_download_done.connect(self._on_download_done)
         self._update_in_progress = False
-        self._pending_release: object = None  # ReleaseInfo，下载期间持有
 
     # ------------------------------------------------------------------
     # 外壳初始化
@@ -289,6 +288,8 @@ class MainWindow(QMainWindow):
 
     def _show_update_dialog(self, info: object) -> None:
         """有新版时弹升级对话框（版本号 + changelog + 立即更新/稍后）。"""
+        import html as _html
+
         from PySide6.QtWidgets import (
             QDialog,
             QDialogButtonBox,
@@ -308,7 +309,9 @@ class MainWindow(QMainWindow):
         ))
         notes = QTextEdit()
         notes.setReadOnly(True)
-        notes.setHtml(f"<pre>{info.release_notes}</pre>")  # type: ignore[attr-defined]
+        # HTML 转义 changelog，避免含 <,>,& 的 release body 破坏渲染
+        safe_notes = _html.escape(str(getattr(info, "release_notes", "")))
+        notes.setHtml(f"<pre>{safe_notes}</pre>")
         layout.addWidget(QLabel("更新内容："))
         layout.addWidget(notes, 1)
         size_mb = getattr(info, "zip_size", 0) / (1024 * 1024)
@@ -329,7 +332,6 @@ class MainWindow(QMainWindow):
 
         dlg.accept()  # type: ignore[attr-defined]
         self._update_in_progress = True
-        self._pending_release = info
 
         self._progress_dlg = QProgressDialog(
             f"正在更新到 {info.version}...", "取消", 0, 100, self  # type: ignore[attr-defined]

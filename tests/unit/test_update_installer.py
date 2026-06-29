@@ -78,6 +78,18 @@ def test_updater_script_contains_key_commands(tmp_path: Path) -> None:
     assert "start" in script  # 重启
     assert "chcp 65001" in script  # UTF-8 编码
     assert "mshta" in script  # 失败弹框
+    # 防回归：PID 等待用 findstr 精确前缀匹配（非 find 子串匹配，避免 PID 123 误命中 1234）
+    assert "findstr" in script
+    # 防回归：等待循环的 inc/compare 必须在 ( ) 块外（无 enabledelayedexpansion 时
+    # 块内 %tries% 解析期展开恒为 0，30 秒超时永不触发）。检查 "set /a tries+=1"
+    # 所在行不以 4 空格缩进出现在 ( 块内。
+    wait_lines = [ln for ln in script.splitlines() if "set /a tries" in ln]
+    assert wait_lines, "缺少等待循环计数"
+    for ln in wait_lines:
+        # 行首不应带 "(" 上下文缩进标志：tries 增量须是顶层 goto 循环体
+        assert not ln.startswith("    set /a tries+=1"), (
+            "tries 增量不能放在 ( ) 块内（会触发解析期展开 bug）"
+        )
 
 
 def test_updater_script_paths_quoted(tmp_path: Path) -> None:

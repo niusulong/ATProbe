@@ -133,15 +133,17 @@ set "EXE_BAK={exe_bak}"
 set "PID={pid}"
 
 REM 1. 等待主程序退出（轮询，最长约 30 秒）
+REM 注意：inc/compare 不能放在 ( ) 块内（无 enabledelayedexpansion 时 %tries%
+REM 在解析期展开，永远是 0），故用 goto 循环把判断放在块外。
 set /a tries=0
 :wait
-tasklist /fi "pid eq %PID%" 2>nul | find "%PID%" >nul
-if not errorlevel 1 (
-    set /a tries+=1
-    if %tries% GEQ 30 goto rollback
-    timeout /t 1 /nobreak >nul
-    goto wait
-)
+tasklist /fi "pid eq %PID%" /nh 2>nul | findstr /b /c:"%PID% " >nul
+if errorlevel 1 goto waited
+set /a tries+=1
+if %tries% GEQ 30 goto rollback
+timeout /t 1 /nobreak >nul
+goto wait
+:waited
 
 REM 2. 备份旧版
 if exist "%BACKUP%" rmdir /s /q "%BACKUP%"
