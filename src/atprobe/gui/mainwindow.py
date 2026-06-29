@@ -204,10 +204,9 @@ class MainWindow(QMainWindow):
     # 选项卡管理（§2.3）
     # ------------------------------------------------------------------
     # 所有内置选项卡均为单例：重复打开 → 跳转到已存在的页。
-    # report_view 也唯一：多个报告在其内部以「子标签」形式承载（每个报告一个子页）。
     _SINGLETON_TYPES = frozenset({
         "manual_debug", "case_execute", "monitor", "execution_progress",
-        "report_view", "env_config",
+        "env_config",
     })
 
     def new_tab(self, type_name: str, params: dict[str, object] | None = None) -> None:
@@ -218,11 +217,6 @@ class MainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if isinstance(widget, QWidget) and widget.property("tab_type") == type_name:
-                # report_view 已存在且带 report_path 参数 → 向其追加一个报告子标签
-                if type_name == "report_view" and params and params.get("report_path"):
-                    open_report = getattr(widget, "open_report", None)
-                    if callable(open_report):
-                        open_report(str(params["report_path"]))
                 self.tabs.setCurrentIndex(i)
                 return
         binding = TabBinding(type_name=type_name, params=params or {})
@@ -523,8 +517,14 @@ class MainWindow(QMainWindow):
                     self, "执行完成",
                     f"通过 {passed} / 失败 {failed}\n报告: {report_path}",
                 )
-                # 自动打开报告选项卡
-                self.new_tab("report_view", {"report_path": report_path})
+                # 用系统默认浏览器打开报告（HTML 纯静态，浏览器渲染效果最佳；
+                # 不再用内嵌 WebEngine 以避免引入 ~200MB 的 Chromium 体积）
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+
+                QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(str(Path(report_path).resolve()))
+                )
             return
         # 中间进度事件：首次事件时自动弹出执行进度选项卡，并转发
         self._forward_progress(ev)
