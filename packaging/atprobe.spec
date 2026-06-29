@@ -30,11 +30,38 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# Qt6 / PySide6 全量收集（plugins、translations、QML）—— 打包铁律
+# Qt6 / PySide6 收集。collect_all 拿 Qt plugins（platforms/styles 等运行时铁律），
+# 但会顺带拉入大量未用的大块二进制（WebEngine/Chromium ~270MB、Qml/Quick/3D 等）。
+# 策略：先 collect_all，再从 datas/binaries 里剔除明确未用的大块，保留 plugins。
+_EXCLUDE_BIN_PATTERNS = (
+    # WebEngine（Chromium，~270MB；report_view.py 已 try/except 降级为"浏览器打开"）
+    "QtWebEngine", "qtwebengine", "WebEngineCore", "webengine",
+    # QtQml/Quick（无 QML 代码）
+    "Qt6Qml", "Qt6Quick", "Qt6Quick3D", "Qt6QuickControls2", "Qt6QuickTemplates2",
+    "Qt6QuickWidgets", "Qt6ShaderTools", "Qt6Pdf", "Qt6Designer",
+    "/qml/", "\\qml\\", "qmlls", "qmlscene",
+    # 其他未用大块
+    "Qt6Charts", "Qt6DataVis", "Qt63D", "Qt6Bluetooth", "Qt6Multimedia",
+    "Qt6SerialPort", "Qt6WebSockets", "Qt6Location", "Qt6Sensors", "Qt6Nfc",
+    "Qt6RemoteObjects", "Qt6Scxml", "Qt6TextToSpeech", "Qt6VirtualKeyboard",
+    "Qt6SpatialAudio", "Qt6Quick3D",
+    "avcodec", "avformat", "avutil", "swscale", "swresample",  # QtMultimedia FFmpeg
+    "opengl32sw",  # 软件渲染兜底（有硬件 OpenGL 足够）
+)
+# 仍需保留的 Qt 模块（Core/Gui/Widgets/Svg/Network?）—— 只保留代码实际用的
+_KEEP_HINTS = ("Qt6Core", "Qt6Gui", "Qt6Widgets", "Qt6Svg", "Qt6OpenGL",
+               "Qt6Network", "Qt6DBus", "Qt6PrintSupport", "Qt6Concurrent",
+               "Qt6Test")  # 这些体积小，保留以防隐式依赖
+
+# 过滤掉未用的大块二进制（按文件名匹配）；匹配 collect_all 收集到的 dest 路径名
+def _excluded(name: str) -> bool:
+    n = name.replace("\\", "/").lower()
+    return any(p.lower() in n for p in _EXCLUDE_BIN_PATTERNS)
+
 for pkg in ("PySide6", "shiboken6"):
     d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
+    binaries += [item for item in b if not _excluded(item[1])]
+    datas += [item for item in d if not _excluded(item[1])]
     hiddenimports += h
 
 # 内置只读资源 → _internal/examples（resources.py 经此定位）
@@ -56,7 +83,59 @@ hiddenimports += collect_submodules("atprobe")
 
 pathex = [str(REPO_ROOT / "src")]
 hookspath = [str(SPEC_DIR / "hooks")]
-excludes = ["tkinter", "PyQt5", "PyQt6", "pytest", "_pytest"]
+
+# 排除未使用的模块以瘦身。
+# ATProbe 实际只用 QtCore/QtGui/QtWidgets/QtSvg + shiboken6（图标渲染用 QSvgRenderer）。
+# QtWebEngine（Chromium，~150-200MB）仅用于 GUI 内嵌 HTML 报告查看，代码已 try/except 降级
+# （report_view.py 排除后显示"用浏览器打开报告"），故整体排除以换取最大体积收益。
+excludes = [
+    # 非 Qt
+    "tkinter", "PyQt5", "PyQt6", "pytest", "_pytest",
+    # PySide6 未用大块（按代码证据，src/atprobe 仅用 QtCore/QtGui/QtWidgets/QtSvg）
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineQuick",
+    "PySide6.QtWebChannel",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuick3D",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtQuickControls2",
+    "PySide6.QtQuickTemplates2",
+    "PySide6.QtNetwork",
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
+    "PySide6.QtSql",
+    "PySide6.QtCharts",
+    "PySide6.QtDataVisualization",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtTest",
+    "PySide6.QtSvgWidgets",
+    "PySide6.Qt3DAnimation",
+    "PySide6.Qt3DCore",
+    "PySide6.Qt3DExtras",
+    "PySide6.Qt3DInput",
+    "PySide6.Qt3DLogic",
+    "PySide6.Qt3DRender",
+    "PySide6.QtBluetooth",
+    "PySide6.QtNfc",
+    "PySide6.QtPositioning",
+    "PySide6.QtLocation",
+    "PySide6.QtSensors",
+    "PySide6.QtSerialPort",
+    "PySide6.QtWebSockets",
+    "PySide6.QtDBus",
+    "PySide6.QtDesigner",
+    "PySide6.QtHelp",
+    "PySide6.QtRemoteObjects",
+    "PySide6.QtScxml",
+    "PySide6.QtTextToSpeech",
+    "PySide6.QtOpenGL",
+    "PySide6.QtPrintSupport",
+    "PySide6.QtConcurrent",
+    "PySide6.QtAxContainer",
+]
 
 # --- GUI exe：独立 Analysis（console=False）---
 gui_a = Analysis(
@@ -113,4 +192,13 @@ cli_exe = EXE(
 
 # COLLECT 把两个 exe + 共用运行时收集到一个目录（_internal 共享）
 # COLLECT name 由 build.py 在调用前替换 ATProbe-VERSION → ATProbe-<version>
-COLLECT(gui_exe, cli_exe, gui_a.binaries, gui_a.datas, name="ATProbe-VERSION")
+#
+# Analysis 阶段 Qt hook 会把 WebEngine/Qml/Quick 等大块二进制加回 a.binaries/a.datas
+# （即使前面 collect_all 过滤了，hook 仍按 import 图加入）。此处对 Analysis 产物再次
+# 清理：从 gui_a.binaries/gui_a.datas（COLLECT 实际用的）删除未用大块。
+_gui_bins = [(d, s, k) for (d, s, k) in gui_a.binaries if not _excluded(d)]
+_gui_datas = [(d, s, k) for (d, s, k) in gui_a.datas if not _excluded(d)]
+print(f"[spec] binaries: {len(gui_a.binaries)} -> {len(_gui_bins)}, "
+      f"datas: {len(gui_a.datas)} -> {len(_gui_datas)}")
+
+COLLECT(gui_exe, cli_exe, _gui_bins, _gui_datas, name="ATProbe-VERSION")
