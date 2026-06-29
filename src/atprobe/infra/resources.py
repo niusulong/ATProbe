@@ -60,3 +60,20 @@ def user_workspace() -> Path:
     调用方在其下拼 ``logs`` / 用户用例目录等。
     """
     return app_root()
+
+
+def resolve_workspace_path(raw: str) -> Path:
+    """把工作区相对路径锚定到 ``user_workspace()``；绝对路径原样返回。
+
+    解决打包态 CLI/GUI 从非 exe 目录启动时，工作区路径（report_dir/log_dir/
+    cases_dir/env_config 等）相对 ``os.getcwd()`` 解析导致写入错误位置的问题。
+
+    - 绝对路径（如用户在 atprobe.yaml 写 ``D:/foo/reports``）→ 原样返回
+    - 相对路径（如 ``./reports`` 或 ``reports``）→ ``user_workspace() / raw``
+
+    开发态 ``user_workspace()`` = 仓库根 = 当前 cwd，故行为与旧的 cwd 相对解析一致；
+    打包态 = exe 同级（便携式工作区），与 GUI 双击启动的 cwd 一致，
+    但 CLI 从别处调用时也能正确写入 exe 同级工作区。
+    """
+    p = Path(raw)
+    return p if p.is_absolute() else user_workspace() / p
