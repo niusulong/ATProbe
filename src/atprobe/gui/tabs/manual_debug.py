@@ -44,6 +44,7 @@ from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
+from atprobe.gui.widgets.text_render import split_lines_with_endings
 from atprobe.infra.serial.config import Terminator
 
 if TYPE_CHECKING:
@@ -625,6 +626,8 @@ class ManualDebugWidget(QWidget):
         """主线程槽：按换行把 RX 字节拆成行渲染，未到换行的尾部留作缓冲.
 
         HEX 开关打开时，每行以十六进制展示（M1 §7.2）。
+        文本模式下，每行末尾的换行符转义成可见的 \\r\\n 文本，让用户直观看到
+        每行的实际换行构成——N58 回显行只有 \\r（吞掉 LF），响应行是完整 \\r\\n。
         """
         if self.hex_check.isChecked():
             hex_line = " ".join(f"{b:02X}" for b in chunk)
@@ -635,12 +638,13 @@ class ManualDebugWidget(QWidget):
         text = chunk.decode("utf-8", errors="replace")
         self._rx_buffer.extend(text.encode("utf-8"))
         data = self._rx_buffer.decode("utf-8", errors="replace")
-        # 按换行切：完整的行立即渲染，最后一段（无换行）留作下次
+        # 按换行切：完整的行立即渲染（行末换行符转义），最后一段（无换行）留作下次
         parts = data.split("\n")
-        for line in parts[:-1]:
-            stripped = line.rstrip("\r")
-            if stripped:
-                self._append_line("RX", stripped, self._tokens["data.rx"])
+        if len(parts) > 1:
+            # 前面 N-1 段都是完整行（以 \n 结尾），重组后交给切行函数转义
+            complete = "\n".join(parts[:-1]) + "\n"
+            for line in split_lines_with_endings(complete):
+                self._append_line("RX", line, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
 
     def _render_tx_command(self, command: str) -> None:
@@ -658,9 +662,9 @@ class ManualDebugWidget(QWidget):
             self._append_line("TX", command, self._tokens["data.tx"])
 
     def _render_tx_bytes(self, chunk: bytes) -> None:
-        """渲染 TX 原始字节（文件/数据流发送）—— 复用 _on_rx_bytes 的切分逻辑.
+        """渲染 TX 原始字节（文件/数据流发送）—— 复用 RX 的切分+转义逻辑.
 
-        HEX 开关打开时按十六进制展示；否则按 UTF-8 文本拆行。
+        HEX 开关打开时按十六进制展示；否则按 UTF-8 文本拆行，行末换行符转义。
         方向标 TX、用 data.tx 色。TX 块边界即显示边界（不跨块缓冲，简化）。
         """
         if self.hex_check.isChecked():
@@ -669,10 +673,8 @@ class ManualDebugWidget(QWidget):
                 self._append_line("TX", hex_line, self._tokens["data.tx"])
             return
         text = chunk.decode("utf-8", errors="replace")
-        for line in text.split("\n"):
-            stripped = line.rstrip("\r")
-            if stripped:
-                self._append_line("TX", stripped, self._tokens["data.tx"])
+        for line in split_lines_with_endings(text):
+            self._append_line("TX", line, self._tokens["data.tx"])
 
     # ------------------------------------------------------------------
     # 日志保存 + 响应区渲染
