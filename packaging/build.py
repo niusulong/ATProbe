@@ -94,6 +94,19 @@ def expose_user_assets(version: str) -> Path:
     return app_dir
 
 
+def write_version_file(version: str, app_dir: Path) -> None:
+    """把版本号写入 <app_dir>/_internal/VERSION（运行时 current_version 读它）。
+
+    同时同步仓库根 VERSION 文件，保持与 pyproject.toml 一致（防 drift）。
+    """
+    internal = app_dir / "_internal"
+    internal.mkdir(exist_ok=True)
+    (internal / "VERSION").write_text(version, encoding="utf-8")
+    # 同步仓库根 VERSION（开发态 current_version 读它）
+    (REPO_ROOT / "VERSION").write_text(version, encoding="utf-8")
+    print(f"[build] VERSION 文件已写入：{version}")
+
+
 def make_zip(app_dir: Path, version: str) -> Path:
     """压缩产物目录 → dist/ATProbe-<version>-win64.zip。"""
     zip_path = DIST / f"ATProbe-{version}-win64.zip"
@@ -112,6 +125,7 @@ def main() -> int:
     rendered = render_spec(version)
     run_pyinstaller(rendered)
     app_dir = expose_user_assets(version)
+    write_version_file(version, app_dir)  # 注入运行时版本（current_version 读它）
     zip_path = make_zip(app_dir, version)
 
     size_mb = zip_path.stat().st_size / (1024 * 1024)
