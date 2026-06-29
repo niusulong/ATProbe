@@ -73,3 +73,46 @@ def test_user_workspace_frozen_returns_exe_dir(tmp_path):
     with patch.object(resources.sys, "frozen", True, create=True), \
          patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
         assert resources.user_workspace() == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# resolve_workspace_path：工作区相对路径锚定到 app_root()
+# ---------------------------------------------------------------------------
+from pathlib import Path  # noqa: E402
+
+
+def test_resolve_workspace_path_relative_dev_anchors_to_repo_root():
+    """开发态：相对路径锚定到仓库根（= user_workspace）。"""
+    p = resources.resolve_workspace_path("./reports")
+    assert p == resources.user_workspace() / "reports"
+    # 开发态 user_workspace == 仓库根
+    assert p == runtime.app_root() / "reports"
+
+
+def test_resolve_workspace_path_strips_dot_slash():
+    """./ 前缀与无前缀等价。"""
+    a = resources.resolve_workspace_path("./logs")
+    b = resources.resolve_workspace_path("logs")
+    assert a == b
+
+
+def test_resolve_workspace_path_absolute_unchanged(tmp_path):
+    """绝对路径原样返回，不 join。"""
+    abs_path = str(tmp_path / "my_reports")
+    p = resources.resolve_workspace_path(abs_path)
+    assert p == Path(abs_path)
+
+
+def test_resolve_workspace_path_frozen_anchors_to_exe_dir(tmp_path):
+    """打包态：相对路径锚定到 exe 同级（便携式工作区）。"""
+    (tmp_path / "ATProbe.exe").write_text("")
+    with patch.object(resources.sys, "frozen", True, create=True), \
+         patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
+        p = resources.resolve_workspace_path("./reports")
+        assert p == tmp_path / "reports"
+
+
+def test_resolve_workspace_path_nested_relative():
+    """多层相对路径正确拼接（examples/testcases）。"""
+    p = resources.resolve_workspace_path("./examples/testcases")
+    assert p == resources.user_workspace() / "examples" / "testcases"
