@@ -1,4 +1,8 @@
-"""用例执行选项卡（M6 §5）—— 用例筛选与执行."""
+"""用例执行选项卡（M6 §5）—— 用例筛选与执行.
+
+用例以**目录层级树**展示（``QTreeWidget``）：目录节点带三态复选框（``ItemIsAutoTristate``
+自动级联），叶子节点 = 单个用例文件。支持全选/全不选、展开/折叠全部、标签筛选与搜索。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -15,13 +20,16 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from atprobe.gui.tabs.registry import ITabView, TabBinding
+
+# 叶子节点（用例）在第 0 列存储用例文件绝对路径，用于选中收集
+_FILE_ROLE = Qt.ItemDataRole.UserRole
 
 
 class CaseExecuteTab(ITabView):
@@ -37,12 +45,13 @@ class CaseExecuteTab(ITabView):
 
 
 class CaseExecuteWidget(QWidget):
-    """用例筛选与执行视图（§5）."""
+    """用例筛选与执行视图（§5）—— 目录层级树 + 多选 + 全选."""
 
     def __init__(self, binding: TabBinding, main_window: object) -> None:
         super().__init__()
         self._main = main_window
         self._cases: list[tuple[str, tuple[str, ...], str]] = []  # (name, tags, file)
+        self._root_dir: Path | None = None  # 当前加载的根目录（用于计算相对路径）
         self._init_ui()
         self._load_default_dir()
 
@@ -51,12 +60,28 @@ class CaseExecuteWidget(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # 顶部：目录加载 + 标签筛选 + 搜索
+        # 顶部第一行：加载目录 + 全选/展开 + 标签筛选 + 搜索
         top = QHBoxLayout()
         top.setSpacing(8)
         load_btn = QPushButton("加载目录")
         load_btn.clicked.connect(self._load_dir)
         top.addWidget(load_btn)
+
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        top.addWidget(self.select_all_btn)
+        deselect_all_btn = QPushButton("全不选")
+        deselect_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        deselect_all_btn.clicked.connect(lambda: self._set_all_checked(False))
+        top.addWidget(deselect_all_btn)
+        expand_btn = QPushButton("展开")
+        expand_btn.clicked.connect(self.tree_expand_all)
+        top.addWidget(expand_btn)
+        collapse_btn = QPushButton("折叠")
+        collapse_btn.clicked.connect(self.tree_collapse_all)
+        top.addWidget(collapse_btn)
+
         top.addWidget(QLabel("标签:"))
         self.tag_combo = QComboBox()
         self.tag_combo.setEditable(True)
@@ -71,14 +96,20 @@ class CaseExecuteWidget(QWidget):
         top.addWidget(self.search_edit, 1)
         layout.addLayout(top)
 
-        # 用例表格
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["选", "用例名", "标签", "文件"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
-        layout.addWidget(self.table, 1)
+        # 用例目录层级树
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["用例名", "标签", "文件"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        # 只允许通过复选框选择，避免选中高亮与勾选混淆
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tree.setSortingEnabled(False)
+        layout.addWidget(self.tree, 1)
 
         # 执行参数
         param = QHBoxLayout()
@@ -142,6 +173,7 @@ class CaseExecuteWidget(QWidget):
         from atprobe.domain.case.parser import CaseParseError, parse_case_file
 
         self._cases = []
+        self._root_dir = path.resolve() if path.is_dir() else path.parent.resolve()
         if path.is_dir():
             files = sorted(path.rglob("*.yaml"))
         elif path.is_file():
@@ -175,23 +207,103 @@ class CaseExecuteWidget(QWidget):
         self.tag_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.tag_combo.blockSignals(False)
 
+    # ------------------------------------------------------------------
+    # 树构建
+    # ------------------------------------------------------------------
     def _populate(self, filter_text: str) -> None:
+        """按标签/搜索过滤后重建目录树（默认全选 + 展开根目录）."""
         tag_filter = self.tag_combo.currentText().strip()
         all_tags = tag_filter in ("", "（全部）")
-        self.table.setRowCount(0)
+        kept: list[tuple[str, tuple[str, ...], str]] = []
         for name, tags, file in self._cases:
             if filter_text and filter_text not in name and filter_text not in file:
                 continue
             if not all_tags and tag_filter not in tags:
                 continue
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            chk = QCheckBox()
-            chk.setChecked(True)
-            self.table.setCellWidget(row, 0, chk)
-            self.table.setItem(row, 1, QTableWidgetItem(name))
-            self.table.setItem(row, 2, QTableWidgetItem(", ".join(tags)))
-            self.table.setItem(row, 3, QTableWidgetItem(file))
+            kept.append((name, tags, file))
+
+        self.tree.clear()
+        root = self._root_dir
+        # root_item：以根目录名作为顶层节点（如 testcases）；根目录下直接放用例时也要有顶层节点
+        root_name = root.name if (root and root.name) else "用例"
+        root_item = self._make_dir_item(root_name)
+
+        for name, tags, file in kept:
+            # 计算文件相对 root 的目录路径（相对路径列表，如 ["tcp"] 或 [] 表示直接在根下）
+            rel = self._rel_dir_parts(Path(file), root)
+            parent = root_item
+            for part in rel:
+                parent = self._ensure_dir_child(parent, part)
+            self._make_case_item(parent, name, tags, file)
+
+        self.tree.addTopLevelItem(root_item)
+        # 默认展开顶层根目录，让用户看到二级目录
+        self.tree.expandItem(root_item)
+        # 默认全选（AutoTristate 自动级联到子孙）
+        root_item.setCheckState(0, Qt.CheckState.Checked)
+
+    @staticmethod
+    def _rel_dir_parts(file_path: Path, root: Path | None) -> list[str]:
+        """文件相对 root 的目录层级（不含文件名）。无法计算相对路径时返回 []."""
+        if root is None:
+            return []
+        try:
+            rel = file_path.resolve().relative_to(root)
+        except (ValueError, OSError):
+            return []
+        parts = list(rel.parts)
+        return parts[:-1] if len(parts) > 1 else []
+
+    def _make_dir_item(self, name: str) -> QTreeWidgetItem:
+        """创建目录节点（三态复选框，第 0 列 = 目录名）."""
+        item = QTreeWidgetItem([name, "", ""])
+        item.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsAutoTristate
+            | Qt.ItemFlag.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.CheckState.Checked)
+        return item
+
+    def _ensure_dir_child(self, parent: QTreeWidgetItem, name: str) -> QTreeWidgetItem:
+        """获取/创建某父节点下的目录子节点（已存在则复用，避免重复创建）."""
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            if child.childCount() > 0 and child.data(0, _FILE_ROLE) is None and child.text(0) == name:
+                return child
+        item = self._make_dir_item(name)
+        parent.addChild(item)
+        return item
+
+    def _make_case_item(self, parent: QTreeWidgetItem, name: str, tags: tuple[str, ...], file: str) -> None:
+        """创建用例叶子节点（第 0 列=用例名，1=标签，2=文件；存储文件路径于 UserRole）."""
+        item = QTreeWidgetItem([name, ", ".join(tags), file])
+        item.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsAutoTristate
+            | Qt.ItemFlag.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.CheckState.Checked)
+        item.setData(0, _FILE_ROLE, file)
+        item.setToolTip(2, file)
+        parent.addChild(item)
+
+    # ------------------------------------------------------------------
+    # 选择 / 展开
+    # ------------------------------------------------------------------
+    def _set_all_checked(self, checked: bool) -> None:
+        """全选/全不选：操作顶层节点，AutoTristate 自动传播到所有子孙."""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item is not None:
+                item.setCheckState(0, state)
+
+    def tree_expand_all(self) -> None:
+        self.tree.expandAll()
+
+    def tree_collapse_all(self) -> None:
+        self.tree.collapseAll()
 
     def _filter(self) -> None:
         self._populate(self.search_edit.text().strip())
@@ -200,14 +312,26 @@ class CaseExecuteWidget(QWidget):
         self._populate(self.search_edit.text().strip())
 
     def _selected_files(self) -> list[str]:
-        """收集勾选用例的文件路径。注意：表格只显示筛选后的用例，需按文件匹配回 _cases."""
-        shown_files = [self.table.item(row, 3).text() for row in range(self.table.rowCount())  # type: ignore[union-attr]
-                       if self.table.item(row, 3) is not None]
+        """收集勾选用例的文件路径（仅叶子节点且 Checked）."""
         selected: list[str] = []
-        for row in range(self.table.rowCount()):
-            chk = self.table.cellWidget(row, 0)
-            if isinstance(chk, QCheckBox) and chk.isChecked():
-                selected.append(shown_files[row])
+
+        def walk(item: QTreeWidgetItem) -> None:
+            if item.childCount() == 0:
+                # 叶子 = 用例
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    file = item.data(0, _FILE_ROLE)
+                    if isinstance(file, str):
+                        selected.append(file)
+                return
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child is not None:
+                    walk(child)
+
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item is not None:
+                walk(item)
         return selected
 
     def _run(self) -> None:

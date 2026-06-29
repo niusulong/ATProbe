@@ -255,10 +255,15 @@ class SerialConnection:
     # §3.2 数据流发送（分块）—— 供 DataStreamSender 调用的底层写
     # ------------------------------------------------------------------
     def write_bytes(self, data: bytes) -> None:
-        """直接写字节（不分块、不加结束符，供数据流发送用）."""
+        """直接写字节（不分块、不加结束符，供数据流发送用）.
+
+        与 write_command 一样通知 TX 观察者：SerialConnection 是所有字节写入的
+        唯一咽喉点，订阅 TX 流应能看到这条链路上的所有写入（含原始字节/文件发送）。
+        """
         if not self._connected or self._serial is None:
             raise SendError(self.config.name, "端口未连接")
         self._log_tx(data)
+        self._notify_tx_observers(data)
         try:
             self._serial.write(data)  # type: ignore[union-attr]
             self._serial.flush()  # type: ignore[union-attr]

@@ -250,8 +250,19 @@ class MainWindow(QMainWindow):
         return Path(self._app_config.cases_dir)
 
     def env_config_path(self) -> str | None:
+        # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
+        # 确保环境配置页默认打开就有内容可编辑，而非空白页。
+        # 经 resources.builtin_resource 定位，开发态/打包态皆可用。
         p = Path(self._app_config.env_config)
-        return str(p) if p.exists() else None
+        if p.exists():
+            return str(p)
+        from atprobe.infra.resources import builtin_resource
+
+        try:
+            builtin = builtin_resource("env.yaml")
+            return str(builtin)
+        except FileNotFoundError:
+            return None
 
     def send_manual(self, port: str, command: str) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
@@ -267,6 +278,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "发送错误", f"发送失败：{exc}")
             return False
+
+    def send_file(self, port: str, data: bytes) -> bool:
+        """手动调试：写原始字节到端口（不加结束符），供文件/二进制数据发送.
+
+        返回 True 表示写入成功；未连接返回 False。
+        小文件（≤4KB）走本同步路径；大文件由 worker 直接持连接发送。
+        """
+        if not self._port_manager.is_connected(port):
+            return False
+        try:
+            self._port_manager.write_bytes(port, data)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "发送错误", f"文件发送失败：{exc}")
+            return False
+
+    def get_connection(self, port: str) -> Any:
+        """手动调试：取端口底层连接（供大文件 worker 直接持有发送）。"""
+        return self._port_manager.get_connection(port)
 
     def subscribe_rx(self, port: str, observer: Any) -> object | None:
         """订阅端口原始 RX 字节流（手动调试/实时监控的纯流式接收）."""
@@ -493,15 +523,32 @@ class MainWindow(QMainWindow):
         self._forward_progress(ev)
 
     def _forward_progress(self, ev: object) -> None:
-        """把进度事件转发给执行进度选项卡（自动弹出/复用，单例）."""
-        # 首次中间事件 → 确保选项卡存在
+        """把进度事件转发给执行进度选项卡（自动弹出/复用，单例）.
+
+        仅在选项卡不存在时创建（首次事件自动弹出，符合用户启动执行后查看进度的预期）；
+        已存在则只转发事件、不抢焦点——避免执行过程中用户切到其他页面（如实时监控）
+        被反复弹回执行进度页。
+        """
+        w = self._find_tab("execution_progress")
+        if w is not None:
+            handler = getattr(w, "on_event", None)
+            if callable(handler):
+                handler(ev)
+            return
+        # 不存在 → 首次事件创建（创建即激活，这是"开始执行后弹出进度"的合理行为）
         if not isinstance(ev, tuple):
             self.new_tab("execution_progress")
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if isinstance(w, QWidget) and w.property("tab_type") == "execution_progress":
+            w = self._find_tab("execution_progress")
+            if w is not None:
                 handler = getattr(w, "on_event", None)
                 if callable(handler):
                     handler(ev)
-                return
+
+    def _find_tab(self, type_name: str) -> QWidget | None:
+        """按 tab_type 属性查找已存在的选项卡 widget（单例去重用）."""
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, QWidget) and w.property("tab_type") == type_name:
+                return w
+        return None
 
