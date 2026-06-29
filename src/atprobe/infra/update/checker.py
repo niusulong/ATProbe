@@ -106,7 +106,7 @@ def _parse_semver(v: str) -> tuple[int, int, int]:
 
     去掉 v 前缀、忽略 -pre 后缀；缺位补 0；非数字段回退 0。
     """
-    core = re.split(r"[-+]", v.strip().lstrip("vV"), 1)[0]
+    core = re.split(r"[-+]", v.strip().lstrip("vV"), maxsplit=1)[0]
     parts = core.split(".")
     nums: list[int] = []
     for p in parts[:3]:
