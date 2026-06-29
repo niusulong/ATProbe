@@ -33,6 +33,8 @@ from atprobe.gui.tabs.registry import TabBinding, TabTypeRegistry, default_regis
 from atprobe.gui.theme import get_tokens
 from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
 from atprobe.infra.config.envconfig import load_env_config_file
+from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig
 from atprobe.infra.serial.exceptions import PortOpenError
 from atprobe.infra.serial.interfaces import CancelToken
@@ -61,7 +63,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ATProbe — 串口 AT 命令自动化测试工具")
         self.resize(1200, 800)
 
-        self._app_config = app_config or load_app_config_file(Path("atprobe.yaml"))
+        # atprobe.yaml 定位：打包态优先 exe 同级，回退 cwd（开发态 cwd=仓库根）
+        if is_frozen() and resolve_workspace_path("atprobe.yaml").exists():
+            _cfg_path = resolve_workspace_path("atprobe.yaml")
+        else:
+            _cfg_path = Path("atprobe.yaml")
+        self._app_config = app_config or load_app_config_file(_cfg_path)
         # 主题状态（与 app.py 启动时加载的偏好一致）
         from atprobe.gui.theme import current_theme_is_dark
 
@@ -247,13 +254,13 @@ class MainWindow(QMainWindow):
             return []
 
     def cases_dir(self) -> Path:
-        return Path(self._app_config.cases_dir)
+        return resolve_workspace_path(self._app_config.cases_dir)
 
     def env_config_path(self) -> str | None:
         # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
         # 确保环境配置页默认打开就有内容可编辑，而非空白页。
-        # 经 resources.builtin_resource 定位，开发态/打包态皆可用。
-        p = Path(self._app_config.env_config)
+        # 经 resolve_workspace_path 锚定工作区 + builtin_resource 兜底内置示例。
+        p = resolve_workspace_path(self._app_config.env_config)
         if p.exists():
             return str(p)
         from atprobe.infra.resources import builtin_resource
@@ -419,7 +426,7 @@ class MainWindow(QMainWindow):
             pressure_pass_threshold=float(threshold),
             env_config=env,
             session_id=session,
-            log_dir=self._app_config.log_dir,
+            log_dir=str(resolve_workspace_path(self._app_config.log_dir)),
         )
 
         self._set_engine_status("RUNNING", self._tokens["accent"])
@@ -432,7 +439,7 @@ class MainWindow(QMainWindow):
                 self.progress.emit(("done_noreport", "", result.summary.passed, result.summary.failed))
                 return
             # 生成报告
-            rdir = Path(self._app_config.report_dir) / session / "report.html"
+            rdir = resolve_workspace_path(self._app_config.report_dir) / session / "report.html"
             HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
             self.progress.emit(("done", str(rdir), result.summary.passed, result.summary.failed))
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "atprobe"
-version = "0.1.0"
+version = "0.2.0"
 description = "串口 AT 命令自动化测试工具 (Serial AT Command Automation Testing Tool)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -80,6 +80,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]   # 测试中允许 assert False 等
+# PyInstaller spec 不是标准 Python（PyInstaller exec 注入 SPECPATH/Analysis/EXE 等全局）
+"packaging/*.spec" = ["ALL"]
 
 [tool.ruff.format]
 quote-style = "double"

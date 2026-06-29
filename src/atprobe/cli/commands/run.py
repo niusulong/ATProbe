@@ -24,6 +24,8 @@ from atprobe.engine.interfaces import (
 )
 from atprobe.infra.config.appconfig import AppConfig, load_app_config_file, parse_port_expr
 from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
+from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import PortConfig
 from atprobe.reporting.console import (
     format_case_result,
@@ -58,7 +60,14 @@ def run(
 ) -> None:
     """执行测试用例/套件/目录."""
     # 1. 加载配置
-    cfg_path = config or Path("atprobe.yaml")
+    # 用户显式 --config 按其值（相对 cwd）；否则打包态优先找 exe 同级 atprobe.yaml，
+    # 找不到回退 cwd（开发态 cwd=仓库根，与 exe 同级等价）。
+    if config is not None:
+        cfg_path = config
+    elif is_frozen() and (resolve_workspace_path("atprobe.yaml")).exists():
+        cfg_path = resolve_workspace_path("atprobe.yaml")
+    else:
+        cfg_path = Path("atprobe.yaml")
     app_cfg = load_app_config_file(cfg_path)
 
     # 2. 解析端口（§3.3）。--vsim 模式忽略端口参数，统一用虚拟端口
@@ -112,8 +121,8 @@ def run(
         typer.secho("过滤后无可用用例", fg=typer.colors.YELLOW)
         raise typer.Exit(1)
 
-    # 5. 环境配置（M7）
-    env_path = env_config or Path(app_cfg.env_config)
+    # 5. 环境配置（M7）。用户显式 --env-config 按 cwd；否则锚定工作区
+    env_path = env_config or resolve_workspace_path(app_cfg.env_config)
     env_cfg = None
     if env_path.exists():
         try:
@@ -141,7 +150,8 @@ def run(
     import secrets
 
     session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
-    rdir = report_dir or Path(app_cfg.report_dir)
+    # 用户显式 --report-dir 按 cwd；否则锚定工作区
+    rdir = report_dir or resolve_workspace_path(app_cfg.report_dir)
     engine_cfg = EngineConfig(
         ports=tuple(ports),
         cases=tuple(cases),
@@ -149,7 +159,7 @@ def run(
         pressure_pass_threshold=app_cfg.pressure_pass_rate_threshold,
         env_config=env_cfg,
         session_id=session,
-        log_dir=app_cfg.log_dir,
+        log_dir=str(resolve_workspace_path(app_cfg.log_dir)),
     )
 
     # --vsim：注入进程内虚拟模组作为 sender，引擎不连任何真实硬件
@@ -221,7 +231,8 @@ def run(
 def _resolve_case_paths(paths: list[Path], app_cfg: AppConfig) -> list[Path]:
     """展开位置参数为用例文件列表（目录递归，排除套件文件避免重复）."""
     if not paths:
-        paths = [Path(app_cfg.cases_dir)]
+        # 无位置参数时用配置的 cases_dir，锚定到工作区
+        paths = [resolve_workspace_path(app_cfg.cases_dir)]
     result: list[Path] = []
     seen: set[Path] = set()
     for p in paths:
