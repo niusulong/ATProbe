@@ -80,6 +80,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]   # 测试中允许 assert False 等
+# PyInstaller spec 不是标准 Python（PyInstaller exec 注入 SPECPATH/Analysis/EXE 等全局）
+"packaging/*.spec" = ["ALL"]
 
 [tool.ruff.format]
 quote-style = "double"

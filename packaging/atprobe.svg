@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ATProbe 应用主图标：圆角方形背景（品牌蓝绿渐变）+ 终端窗口 + 信号波形。
+     语义：串口 AT 命令测试工具（终端交互 + 信号/探针）。
+     自带颜色 + 实心背景，确保 16/32/48px 小尺寸仍清晰。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0EA5E9"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+  </defs>
+  <!-- 圆角方形背景 -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bg)"/>
+  <!-- 终端窗口（白色描边，半透明填充） -->
+  <rect x="48" y="56" width="160" height="116" rx="14" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-width="8"/>
+  <!-- 终端标题栏分隔线 -->
+  <line x1="48" y1="86" x2="208" y2="86" stroke="#ffffff" stroke-width="6" stroke-opacity="0.7"/>
+  <!-- 终端光标 > 提示符 -->
+  <path d="M70 112 L92 128 L70 144" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 光标横线 -->
+  <line x1="104" y1="142" x2="148" y2="142" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+  <!-- 底部信号波形（探针/通信语义） -->
+  <path d="M48 208 Q72 188 96 208 T144 208 T192 208 T240 208"
+        fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-opacity="0.95"/>
+</svg>

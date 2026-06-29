@@ -161,7 +161,7 @@ gui_exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=None,  # 后续可加 packaging/atprobe.ico
+    icon=str(SPEC_DIR / "atprobe.ico"),
 )
 
 # --- CLI exe：独立 Analysis（console=True）---
