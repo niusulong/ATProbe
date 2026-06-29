@@ -22,7 +22,9 @@ from pathlib import Path
 from atprobe.infra.runtime import is_frozen
 from atprobe.infra.update import UpdateError
 
-_EXE_NAME = "atprobe.exe"
+# GUI 主 exe 名（spec 里 EXE name="ATProbe"，PyInstaller 产出 ATProbe.exe）。
+# 校验/部署都用这个名字；CLI exe（atprobe-cli.exe）不在原地替换范围。
+_EXE_NAME = "ATProbe.exe"
 _INTERNAL_NAME = "_internal"
 
 
@@ -46,6 +48,12 @@ def apply_update(
     _clean_dir(staging_root)
     staging_app = _extract_staging(zip_path, staging_root)
 
+    # staging 里主 exe 的真实文件名（大小写与 zip 产物一致，传给 bat 用于 copy）
+    staging_exe = _find_exe(staging_app)
+    if staging_exe is None:
+        raise UpdateError("安装包结构异常：找不到主程序 exe")
+    staging_exe_name = staging_exe.name
+
     exe_path = app_root / _EXE_NAME
     internal_path = app_root / _INTERNAL_NAME
     pid = os.getpid()
@@ -56,6 +64,7 @@ def apply_update(
         staging_dir=staging_app,
         pid=pid,
         restart=restart,
+        staging_exe_name=staging_exe_name,
     )
     bat_path = Path(tempfile.gettempdir()) / "atprobe-updater.bat"
     bat_path.write_text(script, encoding="utf-8")
@@ -71,16 +80,26 @@ def apply_update(
 
 
 def _validate_zip(zip_path: Path) -> None:
-    """zip 必须可打开且含 atprobe.exe + _internal/。"""
+    """zip 必须可打开且含 ATProbe.exe + _internal/。
+
+    exe 名校验大小写不敏感（容错：spec 改大小写时不致再次翻车），
+    但排除 atprobe-cli.exe（CLI exe 不是原地替换目标）。
+    """
     try:
         with zipfile.ZipFile(zip_path) as z:
             names = z.namelist()
     except zipfile.BadZipFile as exc:
         raise UpdateError(f"安装包损坏：{exc}") from exc
-    has_exe = any(n.endswith("/" + _EXE_NAME) or n.endswith(_EXE_NAME) for n in names)
+    target = _EXE_NAME.lower()
+    cli_name = "atprobe-cli.exe"
+    has_exe = any(
+        n.lower().endswith("/" + target) or (n.lower() == target)
+        for n in names
+        if not n.lower().endswith("/" + cli_name)
+    )
     has_internal = any(_INTERNAL_NAME in n for n in names)
     if not (has_exe and has_internal):
-        raise UpdateError("安装包损坏：缺少 atprobe.exe 或 _internal/")
+        raise UpdateError(f"安装包损坏：缺少 {_EXE_NAME} 或 {_INTERNAL_NAME}/")
 
 
 def _clean_dir(d: Path) -> None:
@@ -90,17 +109,28 @@ def _clean_dir(d: Path) -> None:
 
 
 def _extract_staging(zip_path: Path, staging_root: Path) -> Path:
-    """解压 zip 到 staging_root，返回含 atprobe.exe 的应用目录。"""
+    """解压 zip 到 staging_root，返回含主 exe 的应用目录."""
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(staging_root)
-    # zip 顶层目录名形如 ATProbe-<ver>/，找到含 atprobe.exe 的目录
+    # zip 顶层目录名形如 ATProbe-<ver>/，找到含主 exe（ATProbe.exe）的目录。
+    # 大小写不敏感探测（Windows 文件系统本身大小写不敏感，且 spec 名可能调整）。
     for item in staging_root.iterdir():
-        if item.is_dir() and (item / _EXE_NAME).exists():
+        if item.is_dir() and _find_exe(item) is not None:
             return item
     # 兜底：exe 直接在 staging_root
-    if (staging_root / _EXE_NAME).exists():
+    if _find_exe(staging_root) is not None:
         return staging_root
     raise UpdateError("安装包结构异常：找不到应用目录")
+
+
+def _find_exe(directory: Path) -> Path | None:
+    """在目录下大小写不敏感地查找主 GUI exe（ATProbe.exe），排除 atprobe-cli.exe。"""
+    target = _EXE_NAME.lower()
+    cli_name = "atprobe-cli.exe"
+    for p in directory.iterdir():
+        if p.is_file() and p.name.lower() == target and p.name.lower() != cli_name:
+            return p
+    return None
 
 
 def build_updater_script(
@@ -110,16 +140,22 @@ def build_updater_script(
     staging_dir: Path,
     pid: int,
     restart: bool = True,
+    staging_exe_name: str = _EXE_NAME,
 ) -> str:
     """生成 updater.bat 内容（Windows 批处理）。
 
     所有路径加引号，防含空格/中文。bat 逻辑：等待退出 → 备份 → 替换 → 重启 / 失败回滚。
+
+    Args:
+        staging_exe_name: staging 目录里主 exe 的真实文件名（大小写与 zip 产物一致），
+            默认 ATProbe.exe。bat 用它从 staging 复制到目标。
     """
     exe = _win(str(exe_path))
     internal = _win(str(internal_path))
     staging = _win(str(staging_dir))
     backup = _win(str(internal_path) + ".bak")
     exe_bak = _win(str(exe_path) + ".bak")
+    staging_exe = _win(str(staging_dir / staging_exe_name))
     restart_cmd = f'start "" "{exe}"' if restart else "exit /b 0"
     return f"""@echo off
 chcp 65001 >nul
@@ -155,7 +191,7 @@ if errorlevel 1 goto rollback
 REM 3. 部署新版
 xcopy /e /i /y "%STAGING%\\_internal" "%INTERNAL%" >nul
 if errorlevel 1 goto rollback
-copy /y "%STAGING%\\atprobe.exe" "%EXE%" >nul
+copy /y "{staging_exe}" "%EXE%" >nul
 if errorlevel 1 goto rollback
 
 REM 4. 成功：清理 + 重启
