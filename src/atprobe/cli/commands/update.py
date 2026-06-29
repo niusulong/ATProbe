@@ -34,7 +34,7 @@ def update(
         info = fetch_latest()
     except UpdateCheckError as exc:
         typer.secho(f"检查失败：{exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     if not is_newer(info.version, local):
         typer.echo(f"当前 {local}，已是最新版本。")
@@ -72,17 +72,17 @@ def update(
         )
     except DownloadCancelled:
         typer.echo("\n已取消下载。")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except DownloadError as exc:
         typer.secho(f"\n下载失败：{exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     typer.echo("\n下载完成，开始安装（程序将退出并重启）...")
     try:
         apply_update(result.path, app_root())
     except UpdateError as exc:
         typer.secho(f"安装失败：{exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
     # 脚本已 detached 启动，主动退出释放文件锁
     typer.echo("正在退出以完成升级...")
     raise typer.Exit(0)
