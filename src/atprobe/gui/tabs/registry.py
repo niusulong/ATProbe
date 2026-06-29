@@ -76,13 +76,11 @@ def default_registry() -> TabTypeRegistry:
     from atprobe.gui.tabs.execution_progress import ExecutionProgressTab
     from atprobe.gui.tabs.manual_debug import ManualDebugTab
     from atprobe.gui.tabs.monitor import MonitorTab
-    from atprobe.gui.tabs.report_view import ReportViewTab
 
     reg = TabTypeRegistry()
     reg.register(ManualDebugTab())
     reg.register(CaseExecuteTab())
     reg.register(MonitorTab())
     reg.register(ExecutionProgressTab())
-    reg.register(ReportViewTab())
     reg.register(EnvConfigTab())
     return reg
