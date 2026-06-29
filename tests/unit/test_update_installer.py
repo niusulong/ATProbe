@@ -13,9 +13,14 @@ from atprobe.infra.update.installer import apply_update, build_updater_script
 
 
 def _make_fake_zip(zip_path: Path) -> None:
-    """构造含 atprobe.exe + _internal/ 的假 zip。"""
+    """构造含 ATProbe.exe + _internal/ 的假 zip（对齐 CI 真实产物结构）.
+
+    注意：spec 里 GUI exe name="ATProbe"，PyInstaller 产出 ATProbe.exe（大写）。
+    早期测试误用小写 atprobe.exe，与真实产物不符，导致真机校验失败而测试通过。
+    """
     with zipfile.ZipFile(zip_path, "w") as z:
-        z.writestr("ATProbe-0.3.0/atprobe.exe", b"PE")
+        z.writestr("ATProbe-0.3.0/ATProbe.exe", b"PE")
+        z.writestr("ATProbe-0.3.0/atprobe-cli.exe", b"PE-CLI")  # CLI exe 应被识别为非主 exe
         z.writestr("ATProbe-0.3.0/_internal/python311.dll", b"dll")
         z.writestr("ATProbe-0.3.0/examples/env.yaml", b"env")  # 应被忽略
 
@@ -45,7 +50,7 @@ def test_apply_update_generates_and_launches_script(tmp_path: Path) -> None:
     _make_fake_zip(zip_path)
     fake_internal = tmp_path / "_internal"
     fake_internal.mkdir()
-    (tmp_path / "atprobe.exe").write_bytes(b"old")
+    (tmp_path / "ATProbe.exe").write_bytes(b"old")
 
     popen_mock = MagicMock()
     with patch("atprobe.infra.update.installer.is_frozen", return_value=True), patch(
@@ -65,7 +70,7 @@ def test_apply_update_generates_and_launches_script(tmp_path: Path) -> None:
 def test_updater_script_contains_key_commands(tmp_path: Path) -> None:
     """生成的 bat 必须含关键命令：等待退出 / 备份 / xcopy / 回滚标签 / 重启。"""
     script = build_updater_script(
-        exe_path=tmp_path / "atprobe.exe",
+        exe_path=tmp_path / "ATProbe.exe",
         internal_path=tmp_path / "_internal",
         staging_dir=tmp_path / "ATProbe-0.3.0",
         pid=12345,
@@ -94,13 +99,57 @@ def test_updater_script_contains_key_commands(tmp_path: Path) -> None:
 
 def test_updater_script_paths_quoted(tmp_path: Path) -> None:
     """路径含空格时 bat 内必须加引号（防 PATH/参数注入）。"""
-    exe = Path("D:/my tools/ATProbe/atprobe.exe")
+    exe = Path("D:/my tools/ATProbe/ATProbe.exe")
     script = build_updater_script(
         exe_path=exe,
         internal_path=exe.parent / "_internal",
         staging_dir=exe.parent / "ATProbe-0.3.0",
         pid=1,
     )
-    assert '"D:/my tools/ATProbe/atprobe.exe"' in script or (
-        '"D:\\my tools\\ATProbe\\atprobe.exe"' in script
+    assert '"D:/my tools/ATProbe/ATProbe.exe"' in script or (
+        '"D:\\my tools\\ATProbe\\ATProbe.exe"' in script
     )
+
+
+def test_updater_script_uses_staging_exe_name(tmp_path: Path) -> None:
+    """回归：bat 的 copy 命令必须用 staging 真实 exe 名（ATProbe.exe），而非硬编码小写。
+
+    bug：早期 bat 硬编码 copy "staging\\atprobe.exe"，但 CI 产出 ATProbe.exe。
+    Windows 大小写不敏感时能跑通，但语义错误且跨平台/路径敏感场景会失败。
+    修复后 staging_exe_name 参数注入真实名。
+    """
+    script = build_updater_script(
+        exe_path=tmp_path / "ATProbe.exe",
+        internal_path=tmp_path / "_internal",
+        staging_dir=tmp_path / "ATProbe-0.3.1",
+        pid=1,
+        staging_exe_name="ATProbe.exe",
+    )
+    # copy 命令应引用 staging 下的真实 exe 名（ATProbe.exe，大小写保留）
+    script_bs = script.replace("/", "\\")
+    assert "ATProbe-0.3.1\\ATProbe.exe" in script_bs, (
+        f"bat 应从 staging 复制真实名 ATProbe.exe，实际:\n{script}"
+    )
+    # 部署 copy 行不应是旧的硬编码小写 atprobe.exe
+    copy_lines = [
+        ln for ln in script.splitlines() if ln.strip().startswith("copy /y") and "%EXE%" in ln
+    ]
+    assert copy_lines, "应存在 copy 到 %EXE% 的部署行"
+    for ln in copy_lines:
+        assert "atprobe.exe" not in ln.lower() or "ATProbe.exe" in ln, (
+            f"部署 copy 行不应硬编码小写 atprobe.exe：{ln!r}"
+        )
+
+
+def test_validate_zip_accepts_real_ci_layout(tmp_path: Path) -> None:
+    """回归：CI 真实产物 zip（顶层 ATProbe-<ver>/ATProbe.exe + _internal/）必须通过校验。
+
+    bug：早期 _validate_zip 用大小写敏感 endswith('atprobe.exe') 校验，
+    而 CI 产出 ATProbe.exe（大写），导致真机报"缺少 atprobe.exe"。
+    """
+    zip_path = tmp_path / "ATProbe-0.3.1-win64.zip"
+    _make_fake_zip(zip_path)  # 含 ATProbe.exe + atprobe-cli.exe + _internal/
+    # 不应抛异常（直接调用内部函数）
+    from atprobe.infra.update.installer import _validate_zip
+
+    _validate_zip(zip_path)  # 通过即成功
