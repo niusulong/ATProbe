@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from atprobe.infra.update import AssetNotFoundError, UpdateCheckError
-from atprobe.infra.update.checker import ReleaseInfo, fetch_latest, is_newer
+from atprobe.infra.update.checker import fetch_latest, is_newer
 
 
 def _github_response(tag: str = "v0.3.0", *, with_asset: bool = True) -> bytes:
