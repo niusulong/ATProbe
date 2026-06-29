@@ -1,0 +1,105 @@
+name: TCP/UDP链路操作-未建链业务码(严格字节级)
+description: |
+  ch06 TCP/UDP 链路操作在未建立连接时的业务回码严格验证（无卡无网场景）。
+  严格到回车换行与空格数量：业务码格式 = \r\n+CMD: <msg>\r\n（冒号后1空格，无OK尾随）。
+  探测依据（精确 hex 捕获）：
+    AT+TCPSETUP=0,1.2.3.4,80   → \r\n+TCPSETUP: ERROR\r\n
+    AT+TCPSEND=0,1              → \r\n+TCPSEND: SOCKET ID OPEN FAILED\r\n
+    AT+TCPSEND=0,4097           → \r\n+TCPSEND: DATA LENGTH ERROR\r\n
+    AT+TCPCLOSE=0               → \r\n+TCPCLOSE: ERROR\r\n
+    AT+IPSTATUS=0               → \r\n+IPSTATUS: 0,DISCONNECT\r\n
+    AT+IPSTATUS=6               → \r\n+CME ERROR: 53\r\n   （链路号越界走 CME）
+    AT+TCPACK=0                 → \r\n+TCPACK: 0,DISCONNECT\r\n
+    AT+UDPSETUP=0,1.2.3.4,80    → \r\n+UDPSETUP: ERROR\r\n
+    AT+UDPCLOSE=0               → \r\n+UDPCLOSE: ERROR\r\n
+tags: [tcp, link, strict, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 说明：Neoway 业务码（+TCPSETUP: ERROR 等）不被框架识别为响应终结行，
+  # 会等满步骤超时。这些指令响应实际 100ms 内即时返回，故统一设 timeout: 1.2s 兜底。
+  # ---- 6.3 TCPSETUP 未建链（无网）→ 精确 \r\n+TCPSETUP: ERROR\r\n ----
+  - command: 'AT+TCPSETUP=0,1.2.3.4,80'
+    timeout: 1.2
+    assert:
+      - { name: TCPSETUP无网业务ERROR严格, matches: '^\r\n\+TCPSETUP: ERROR\r\n$' }
+      - { name: TCPSETUP不含CME, not_contains: "+CME ERROR" }
+
+  - command: 'AT+TCPSETUP=6,1.2.3.4,80'
+    timeout: 1.2
+    assert:
+      - { name: TCPSETUP链路号越界业务ERROR, matches: '^\r\n\+TCPSETUP: ERROR\r\n$' }
+
+  - command: 'AT+TCPSETUP=0'
+    timeout: 1.2
+    assert:
+      - { name: TCPSETUP缺参业务ERROR, matches: '^\r\n\+TCPSETUP: ERROR\r\n$' }
+
+  # ---- 6.4 TCPSEND 未建链 / 长度超限（消息体含空格，严格校验）----
+  - command: 'AT+TCPSEND=0,1'
+    timeout: 1.2
+    assert:
+      - { name: TCPSEND未建链严格, matches: '^\r\n\+TCPSEND: SOCKET ID OPEN FAILED\r\n$' }
+
+  - command: 'AT+TCPSEND=0,4097'
+    timeout: 1.2
+    assert:
+      - { name: TCPSEND长度超限严格, matches: '^\r\n\+TCPSEND: DATA LENGTH ERROR\r\n$' }
+
+  # ---- 6.8 TCPCLOSE 未建链 ----
+  - command: 'AT+TCPCLOSE=0'
+    timeout: 1.2
+    assert:
+      - { name: TCPCLOSE未建链业务ERROR, matches: '^\r\n\+TCPCLOSE: ERROR\r\n$' }
+
+  - command: 'AT+TCPCLOSE=6'
+    timeout: 1.2
+    assert:
+      - { name: TCPCLOSE链路号越界业务ERROR, matches: '^\r\n\+TCPCLOSE: ERROR\r\n$' }
+
+  # ---- 6.14 IPSTATUS 查询（链路号正常 vs 越界）----
+  - command: 'AT+IPSTATUS=0'
+    timeout: 1.2
+    extract:
+      ipst_n: '\+IPSTATUS:\s*(\d+)'
+      ipst_st: '\+IPSTATUS:\s*\d+,(\w+)'
+    assert:
+      - { name: IPSTATUS链路0严格格式, matches: '^\r\n\+IPSTATUS: 0,DISCONNECT\r\n$' }
+      - { name: IPSTATUS状态DISCONNECT, var: ipst_st, op: eq, value: "DISCONNECT" }
+
+  - command: 'AT+IPSTATUS=1'
+    timeout: 1.2
+    assert:
+      - { name: IPSTATUS链路1严格格式, matches: '^\r\n\+IPSTATUS: 1,DISCONNECT\r\n$' }
+
+  - command: 'AT+IPSTATUS=6'
+    assert:
+      - { name: IPSTATUS链路号越界CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+  # ---- 6.15 TCPACK 未建链 ----
+  - command: 'AT+TCPACK=0'
+    timeout: 1.2
+    assert:
+      - { name: TCPACK链路0严格格式, matches: '^\r\n\+TCPACK: 0,DISCONNECT\r\n$' }
+
+  - command: 'AT+TCPACK=6'
+    assert:
+      - { name: TCPACK链路号越界CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+  # ---- 6.9 / 6.13 UDP 未建链 ----
+  - command: 'AT+UDPSETUP=0,1.2.3.4,80'
+    timeout: 1.2
+    assert:
+      - { name: UDPSETUP无网业务ERROR, matches: '^\r\n\+UDPSETUP: ERROR\r\n$' }
+
+  - command: 'AT+UDPCLOSE=0'
+    timeout: 1.2
+    assert:
+      - { name: UDPCLOSE未建链业务ERROR, matches: '^\r\n\+UDPCLOSE: ERROR\r\n$' }
+
+teardown:
+  - command: ATE0

@@ -99,11 +99,15 @@ class Engine:
         self._cancel_token = cancel
 
         # §2.2 step 3: 打开端口
+        # 记录本次执行前已连接的端口（外部已开，如 GUI 手动连接/监控的端口），
+        # finally 只关闭本次新开的端口，避免破坏外部连接状态。
         ports_opened: list[str] = []
         try:
             for pc in config.ports:
+                already_open = port_manager.is_connected(pc.name)  # type: ignore[union-attr]
                 port_manager.open(pc)  # type: ignore[union-attr]
-                ports_opened.append(pc.name)
+                if not already_open:
+                    ports_opened.append(pc.name)
         except Exception as exc:  # 端口打开失败
             # 单端口失败不一定是致命；全部失败才是 ERROR（§7.5 场景C）
             if not any(port_manager.is_connected(p) for p in [pc.name for pc in config.ports]):  # type: ignore[union-attr]
@@ -148,8 +152,11 @@ class Engine:
                         )
                     )
         finally:
+            # 只关闭本次执行新打开的端口（外部已连接的端口保持不动，
+            # 避免破坏 GUI 监控/手动调试的连接与订阅状态）
             try:
-                port_manager.close_all()  # type: ignore[union-attr]
+                for p in ports_opened:
+                    port_manager.close(p)  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001
                 pass
             # 停止原始日志记录器，确保缓冲落盘（仅 Engine 自建的才停，外部注入的由外部管理）

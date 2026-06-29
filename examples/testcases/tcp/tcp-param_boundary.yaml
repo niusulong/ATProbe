@@ -1,0 +1,71 @@
+name: TCP/UDP参数设置-参数边界(严格字节级)
+description: |
+  ch06 TCP/UDP 指令参数边界与错误码严格验证（无卡无网场景）。
+  严格到回车换行与空格数量：成功 = \r\nOK\r\n；越界 = \r\n+CME ERROR: 53\r\n。
+  探测依据（精确 hex 捕获）：
+    AT+NETAPN="CMNET","",""          → \r\nOK\r\n
+    AT+RECVMODE=0/1,1                → \r\nOK\r\n
+    AT+DNSSERVER=1,114.114.114.114   → \r\nOK\r\n
+    AT+PDPKEEPALIVE=1,60             → \r\nOK\r\n
+    AT+TCPKEEPALIVE=0                → \r\nOK\r\n
+    AT+TCPKEEPALIVE=1,120,75,9       → \r\nOK\r\n
+    AT+NETAPN=CMNET,,                → \r\n+CME ERROR: 53\r\n   （参数须引号）
+    AT+XIIC=9                        → \r\n+CME ERROR: 53\r\n   （n 越界）
+    AT+PDPKEEPALIVE=1,0              → \r\n+CME ERROR: 53\r\n   （interval 越下限）
+    AT+TCPKEEPALIVE=1,10,75,9        → \r\n+CME ERROR: 53\r\n   （time<30 越下限）
+tags: [tcp, boundary, strict, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # ---- A. 正常设置成功 → 精确 \r\nOK\r\n（无多余内容）----
+  - command: 'AT+NETAPN="CMNET","",""'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  - command: 'AT+RECVMODE=0'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  - command: 'AT+RECVMODE=1,1'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  - command: 'AT+DNSSERVER=1,114.114.114.114'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  - command: 'AT+PDPKEEPALIVE=1,60'
+    assert: { matches: '^\r\nOK\r\n$' }
+    on_failure: continue
+
+  - command: 'AT+TCPKEEPALIVE=0'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  - command: 'AT+TCPKEEPALIVE=1,120,75,9'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+  # ---- B. 参数越界 → 精确 \r\n+CME ERROR: 53\r\n（冒号后1空格）----
+  # NETAPN 参数必须用引号括起；无引号 → 无效参数
+  - command: 'AT+NETAPN=CMNET,,'
+    assert:
+      - { name: NETAPN无引号CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+  # XIIC 的 <n> 只能 0/1，9 越界
+  - command: 'AT+XIIC=9'
+    assert:
+      - { name: XIIC的n越界CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+  # PDPKEEPALIVE interval 范围 1-65535，0 越下限
+  - command: 'AT+PDPKEEPALIVE=1,0'
+    assert:
+      - { name: PDPKEEPALIVE_interval为0_CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+  # TCPKEEPALIVE time 范围 30-7200，10 越下限
+  - command: 'AT+TCPKEEPALIVE=1,10,75,9'
+    assert:
+      - { name: TCPKEEPALIVE_time为10_CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
+
+teardown:
+  - command: 'AT+PDPKEEPALIVE=0,0'
+  - command: 'AT+TCPKEEPALIVE=0'
+  - command: ATE0

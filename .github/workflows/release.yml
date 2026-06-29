@@ -1,0 +1,48 @@
+name: Release
+
+# 仅在推送 v*.*.* tag 时触发构建发布；普通 push 不构建。
+# 流程：维护者改 pyproject.toml version → commit → git tag v<x.y.z> → git push origin v<x.y.z>
+# Actions 自动构建并发布到该 tag 的 GitHub Release。
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# 需要写权限以创建 Release 并上传 asset
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync dependencies（运行时 + PyInstaller）
+        run: uv sync --extra gui --extra packaging
+
+      - name: Build
+        run: uv run python packaging/build.py
+
+      - name: Upload artifact（便于排查失败的构建）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ATProbe-win64-zip
+          path: dist/ATProbe-*-win64.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release & upload zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ATProbe-*-win64.zip
+          generate_release_notes: true   # 自动从 commit 生成 changelog
+          fail_on_unmatched_files: true

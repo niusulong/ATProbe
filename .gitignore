@@ -19,6 +19,8 @@ wheels/
 share/python-wheels/
 *.manifest
 *.spec
+# 但 packaging/atprobe.spec 是源文件（PyInstaller 构建配置），需提交
+!packaging/atprobe.spec
 pip-log.txt
 pip-delete-this-directory.txt
 
@@ -76,6 +78,10 @@ tmp_*
 *.bak
 *.swp
 *~
+
+# PyInstaller 构建产物（rendered spec / 临时 build 目录）
+packaging/atprobe.rendered.spec
+packaging/__pycache__/
 
 # Windows 重定向产生的误生成文件
 nul

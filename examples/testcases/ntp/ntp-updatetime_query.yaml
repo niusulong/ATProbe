@@ -1,0 +1,55 @@
+name: 网络时间同步-查询测试设置(严格字节级)
+description: |
+  ch25 网络时间同步 AT+UPDATETIME 指令严格字节级验证（无卡无网场景）。
+  严格到回车换行与空格数量：正则 ^...$ 锚定，\r\n 显式，空格用字面空格。
+  探测依据（N58-R07-STD-OE_V20_MEITUAN-00F，无 PPP，debug 日志实测）：
+    AT+UPDATETIME=0   → \r\n+UPDATETIME:Last Update Time 0000-00-00,00:00:00\r\nOK\r\n
+                       （注意：冒号后无空格，直接接 Last；未同步时全0）
+    AT+UPDATETIME=?   → \r\n+UPDATETIME: (0-1),,(1-30),,(0-1)\r\nOK\r\n
+                       （冒号后1空格）
+    AT+UPDATETIME?    → \r\n+UPDATETIME: ,0,"",0\r\nOK\r\n
+                       （未设置：IP为空，冒号后1空格紧接逗号）
+    AT+UPDATETIME=1,..→ \r\n+UPDATETIME: No PPP Link\r\n
+                       （业务码，无OK尾随，需timeout）
+tags: [ntp, format, strict, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 25.1 查询模式 =0 —— 上次同步时间点；冒号后【无空格】直接接 "Last Update Time"
+  - command: 'AT+UPDATETIME=0'
+    extract:
+      last_time: 'Last Update Time (\d{4}-\d{2}-\d{2},\d{2}:\d{2}:\d{2})'
+    assert:
+      - { name: 查询模式严格格式, matches: '^\r\n\+UPDATETIME:Last Update Time \d{4}-\d{2}-\d{2},\d{2}:\d{2}:\d{2}\r\nOK\r\n$' }
+      - { name: 冒号后无空格反证, not_contains: "+UPDATETIME: Last" }
+      - { name: 未同步时间全0, var: last_time, op: eq, value: "0000-00-00,00:00:00" }
+
+  # 25.1 测试命令 =? —— 取值范围；冒号后1空格
+  - command: 'AT+UPDATETIME=?'
+    assert:
+      - { name: 测试命令严格格式, matches: '^\r\n\+UPDATETIME: \(0-1\),,\(1-30\),,\(0-1\)\r\nOK\r\n$' }
+
+  # 25.1 查询设置 ? —— 服务器IP/超时/时区/夏时制；未设置时 IP空、timeout=0、时区""
+  # 真实：+UPDATETIME: ,0,"",0 （冒号后1空格，IP空紧跟逗号）
+  - command: 'AT+UPDATETIME?'
+    extract:
+      ntp_ip: '\+UPDATETIME: ([^,]*),'
+      ntp_timeout: '\+UPDATETIME: [^,]*,(\d+),'
+    assert:
+      - { name: 查询设置严格格式, matches: '^\r\n\+UPDATETIME: [^,]*,\d+,"[EW]?[0-9]*",[01]\r\nOK\r\n$' }
+      - { name: 未设置IP为空, var: ntp_ip, op: eq, value: "" }
+      - { name: 未设置timeout为0, var: ntp_timeout, op: eq, value: "0" }
+
+  # 25.1 设置模式(无PPP) —— 业务码 No PPP Link，无OK，需timeout
+  - command: 'AT+UPDATETIME=1,210.72.145.44,10'
+    timeout: 2.0
+    assert:
+      - { name: 无PPP业务码严格格式, matches: '^\r\n\+UPDATETIME: No PPP Link\r\n$' }
+      - { name: 非CME错误, not_contains: "+CME ERROR" }
+
+teardown:
+  - command: ATE0

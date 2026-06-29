@@ -208,9 +208,44 @@ class TestEnvConfigTab:
 
 
 class TestCaseExecuteExtras:
-    """B2：标签筛选、dry-run、报告开关、_selected_files 正确性."""
+    """B2：目录层级树、标签筛选、dry-run、报告开关、_selected_files 正确性."""
 
-    def test_tag_filter_and_dry_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    @staticmethod
+    def _count_leaves(widget) -> int:  # noqa: ANN001
+        """递归统计树中用例叶子数."""
+        count = 0
+
+        def walk(item) -> None:  # noqa: ANN001
+            nonlocal count
+            if item.childCount() == 0:
+                count += 1
+                return
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(widget.tree.topLevelItemCount()):
+            walk(widget.tree.topLevelItem(i))
+        return count
+
+    @staticmethod
+    def _first_leaf_name(widget) -> str | None:  # noqa: ANN001
+        """取树中第一个用例叶子的用例名（第 0 列文本）."""
+        def walk(item):  # noqa: ANN001
+            if item.childCount() == 0:
+                return item.text(0)
+            for i in range(item.childCount()):
+                r = walk(item.child(i))
+                if r is not None:
+                    return r
+            return None
+
+        for i in range(widget.tree.topLevelItemCount()):
+            r = walk(widget.tree.topLevelItem(i))
+            if r is not None:
+                return r
+        return None
+
+    def test_tree_tag_filter_and_dry_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         import PySide6.QtWidgets as _qw
 
         from atprobe.gui.tabs.case_execute import CaseExecuteWidget
@@ -220,13 +255,18 @@ class TestCaseExecuteExtras:
         monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
         monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
 
-        # 写两个用例，一个带 network 标签，一个带 sms 标签
+        # 写用例：根目录下两个 + tcp/ 子目录一个，验证目录层级 + 标签筛选
         (tmp_path / "net.yaml").write_text(
             "name: 网络用例\ntags: [network]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
             encoding="utf-8",
         )
         (tmp_path / "sms.yaml").write_text(
             "name: 短信用例\ntags: [sms]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tcp").mkdir()
+        (tmp_path / "tcp" / "t1.yaml").write_text(
+            "name: TCP用例\ntags: [tcp]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
             encoding="utf-8",
         )
 
@@ -249,23 +289,36 @@ class TestCaseExecuteExtras:
         widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), main)  # type: ignore[arg-type]
         widget._load_path(tmp_path)  # noqa: SLF001
 
-        # 标签聚合：下拉应含 network、sms
+        # 标签聚合：下拉应含 network、sms、tcp
         tag_items = [widget.tag_combo.itemText(i) for i in range(widget.tag_combo.count())]
-        assert "network" in tag_items and "sms" in tag_items
+        assert "network" in tag_items and "sms" in tag_items and "tcp" in tag_items
 
-        # 默认（全部）两个用例都显示
-        assert widget.table.rowCount() == 2
+        # 默认（全部）三个用例都显示为叶子
+        assert self._count_leaves(widget) == 3
 
         # 选 network 标签 → 只显示网络用例
         widget.tag_combo.setCurrentText("network")
-        assert widget.table.rowCount() == 1
-        assert widget.table.item(0, 1).text() == "网络用例"  # type: ignore[union-attr]
+        assert self._count_leaves(widget) == 1
+        assert self._first_leaf_name(widget) == "网络用例"
 
-        # 切回全部，dry-run：应调用 run_cases(dry_run=True)
+        # 切回全部
         widget.tag_combo.setCurrentIndex(0)
+        assert self._count_leaves(widget) == 3
+
+        # 默认全选：_selected_files 应返回全部 3 个文件
+        assert len(widget._selected_files()) == 3  # noqa: SLF001
+
+        # 全不选 → 0 个；再全选 → 3 个
+        widget._set_all_checked(False)  # noqa: SLF001
+        assert widget._selected_files() == []  # noqa: SLF001
+        widget._set_all_checked(True)  # noqa: SLF001
+        assert len(widget._selected_files()) == 3  # noqa: SLF001
+
+        # dry-run：应调用 run_cases(dry_run=True)
         widget.ports_combo.setCurrentText("COM3")
         widget._dry_run()  # noqa: SLF001
         assert run_calls and run_calls[-1]["dry_run"] is True
+        assert len(run_calls[-1]["files"]) == 3
 
         # 关闭报告开关 → run_cases(no_report=True)
         widget.report_check.setChecked(False)
@@ -286,6 +339,11 @@ class _FakeMain:
         self.last_command: tuple[str, str] | None = None
         self.sent_event = threading.Event()
         self._rx_observers: dict[str, list] = {}
+        # 文件发送（小文件同步路径）
+        self.last_bytes: tuple[str, bytes] | None = None
+        self.file_sent_event = threading.Event()
+        # 大文件 worker 用的连接替身（None 表示不支持后台路径）
+        self._fake_connection = None
 
     def available_ports(self) -> list[str]:
         return ["COM1", "COM2"]
@@ -310,6 +368,18 @@ class _FakeMain:
         self.sent_event.set()
         return True
 
+    def send_file(self, port: str, data: bytes) -> bool:
+        """小文件同步写：记录写入字节并触发事件（供测试同步）。"""
+        if port not in self._connected:
+            return False
+        self.last_bytes = (port, data)
+        self.file_sent_event.set()
+        return True
+
+    def get_connection(self, port: str):
+        """大文件 worker 持有的连接替身（测试可预置）。"""
+        return self._fake_connection
+
     def subscribe_rx(self, port: str, observer) -> object:
         self._rx_observers.setdefault(port, []).append(observer)
         return (port, observer)
@@ -329,13 +399,8 @@ class _FakeMain:
 
 class TestManualDebugPortControl:
     def test_open_close_toggle(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        from PySide6.QtCore import QSettings
-
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
-
-        # 隔离 QSettings：用独立 key，避免污染其它测试/用户环境
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
 
         binding = TabBinding(type_name="manual_debug", params={})
         main = _FakeMain()
@@ -364,7 +429,6 @@ class TestManualDebugPortControl:
     def test_send_requires_connection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         # 把所有模态弹窗打桩，防止阻塞测试（_send 未连接时弹 warning）
         import PySide6.QtWidgets as _qw
-        from PySide6.QtCore import QSettings
 
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
@@ -373,7 +437,6 @@ class TestManualDebugPortControl:
         monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
         monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
 
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
         binding = TabBinding(type_name="manual_debug", params={})
         main = _FakeMain()
         widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
@@ -392,12 +455,9 @@ class TestManualDebugPortControl:
 
     def test_rx_streams_via_subscription(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """打开端口后 RX 订阅建立；模块回包字节经信号流式渲染到响应区."""
-        from PySide6.QtCore import QSettings
-
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
         binding = TabBinding(type_name="manual_debug", params={})
         main = _FakeMain()
         widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
@@ -417,98 +477,368 @@ class TestManualDebugPortControl:
         assert widget._rx_handle is None  # noqa: SLF001
 
 
-class TestManualDebugQuickCommands:
-    def test_add_remove_persist(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        from PySide6.QtCore import QSettings
+class TestManualDebugStripped:
+    """命令库改造后：历史/旧快捷指令已删，current_port/send_command 可用，
+    多行发送与 HEX 显示功能保留。"""
 
+    def test_no_history_no_quick_attrs(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """确认历史下拉与旧快捷指令属性已移除。"""
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
-        # 清空自定义，回落默认
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
-        binding = TabBinding(type_name="manual_debug", params={})
         main = _FakeMain()
-        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
-        assert widget._quick_commands == ["AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?"]  # noqa: SLF001
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        assert not hasattr(widget, "history_combo")
+        assert not hasattr(widget, "quick_btn_row")
+        assert not hasattr(widget, "_add_quick")
 
-        # 添加一条自定义
-        widget._add_quick("AT+CGMM")  # noqa: SLF001
-        assert "AT+CGMM" in widget._quick_commands  # noqa: SLF001
-        # 持久化到 QSettings
-        saved = QSettings("ATProbe", "ATProbe").value("manual_debug/quick_commands")
-        assert saved is not None and "AT+CGMM" in list(saved)
-
-        # 删除一条
-        widget._remove_quick("AT+CGMM")  # noqa: SLF001
-        assert "AT+CGMM" not in widget._quick_commands  # noqa: SLF001
-
-    def test_loads_persisted_on_construct(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        from PySide6.QtCore import QSettings
-
-        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
-        from atprobe.gui.tabs.registry import TabBinding
-
-        # 预置持久化值
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", ["ATI", "ATZ"])
-        binding = TabBinding(type_name="manual_debug", params={})
-        main = _FakeMain()
-        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
-        assert widget._quick_commands == ["ATI", "ATZ"]  # noqa: SLF001
-        # 清理：恢复默认，避免污染其它测试
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
-
-
-class TestManualDebugExtras:
-    """B3：历史指令、HEX 显示、多行发送."""
-
-    def test_multiline_send_and_history(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_current_port_and_send_command(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """current_port() 返回选中端口；send_command() 发送并 TX 上屏。"""
         import PySide6.QtWidgets as _qw
-        from PySide6.QtCore import QSettings
 
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
 
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        assert widget.current_port() == "COM1"
+        widget._toggle_connect()  # noqa: SLF001  打开 COM1
+        widget.send_command("AT+CSQ")
+        assert main.last_command == ("COM1", "AT+CSQ")
+        assert "TX> AT+CSQ" in widget.response_view.toPlainText()
+
+    def test_send_command_requires_connection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """send_command 端口未连接时不发送。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget.send_command("AT+CSQ")  # 未连接
+        assert main.last_command is None
+
+    def test_multiline_send_preserved(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """多行发送功能保留（经 send_edit + _send，非 send_command）。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+        widget.send_edit.setPlainText("AT\nATI\nAT+CSQ")
+        widget._send()  # noqa: SLF001
+        assert main.last_command == ("COM1", "AT+CSQ")
+        text = widget.response_view.toPlainText()
+        assert "TX> AT" in text and "TX> ATI" in text and "TX> AT+CSQ" in text
+
+    def test_hex_display_preserved(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """HEX 显示功能保留。"""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+        widget.hex_check.setChecked(True)
+        main.emit_rx("COM1", b"OK\r\n")
+        assert "4F 4B" in widget.response_view.toPlainText()
+
+
+class TestManualDebugFileSendRouting:
+    """MainWindow.send_file / get_connection 路由测试（通过 _FakeMain 验证契约）。"""
+
+    def test_send_file_requires_connection(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+
+        # 未连接 → send_file 判定未连接
+        assert main.is_port_connected("COM1") is False
+        assert main.send_file("COM1", b"abc") is False
+
+    def test_send_file_writes_when_connected(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        assert main.send_file("COM1", b"\x01\x02") is True
+        assert main.last_bytes == ("COM1", b"\x01\x02")
+
+    def test_get_connection_returns_fake(self) -> None:  # type: ignore[no-untyped-def]
+        main = _FakeMain()
+        sentinel = object()
+        main._fake_connection = sentinel  # noqa: SLF001
+        assert main.get_connection("COM1") is sentinel
+
+
+class TestManualDebugFileSendCard:
+    def test_file_send_card_exists(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        assert hasattr(widget, "file_btn")  # 选择文件按钮
+        assert hasattr(widget, "file_send_btn")  # 发送按钮
+        assert hasattr(widget, "file_progress")  # 进度条
+        assert hasattr(widget, "file_cancel_btn")  # 取消按钮
+
+    def test_small_file_sends_synchronously(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 写一个小文件（< 4KB 阈值）
+        f = tmp_path / "small.bin"
+        f.write_bytes(b"\x01\x02\x03\x04")
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001 —— 模拟已选文件
+        widget._update_file_label()
+
+        widget._send_file()  # noqa: SLF001
+
+        assert main.file_sent_event.is_set()
+        assert main.last_bytes == ("COM1", b"\x01\x02\x03\x04")
+        # TX 原始数据应上屏（响应区含 TX 标记）
+        text = widget.response_view.toPlainText()
+        assert "TX" in text
+
+    def test_file_send_requires_connection(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: None)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        f = tmp_path / "x.bin"
+        f.write_bytes(b"abc")
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001
+
+        widget._send_file()  # noqa: SLF001 —— 未连接 → 弹窗、不发
+
+        assert main.last_bytes is None
+
+
+class TestManualDebugFileSendLarge:
+    def test_large_file_uses_worker(self, qtbot, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        # 大文件（> 4KB）
+        f = tmp_path / "big.bin"
+        f.write_bytes(b"x" * 5000)
+
+        # 让 _FakeMain.get_connection 返回一个记录写入的替身
+        class _Conn:
+            def __init__(self) -> None:
+                self.written: list[bytes] = []
+
+            def write_bytes(self, d: bytes) -> None:
+                self.written.append(d)
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        main._fake_connection = _Conn()  # noqa: SLF001
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._file_path = str(f)  # noqa: SLF001
+        widget._update_file_label()
+
+        # 桩掉 time.sleep 避免 worker 真实等待
+        monkeypatch.setattr("atprobe.gui.widgets.file_send.time.sleep", lambda _s: None)
+
+        widget._send_file()  # noqa: SLF001
+
+        # 大文件 → worker 创建并启动（需事件循环驱动 started→run→finished）
+        assert widget._file_worker is not None  # noqa: SLF001
+        # 驱动事件循环，等待 worker 完成、线程退出、引用清理
+        qtbot.waitUntil(lambda: widget._file_worker is None, timeout=5000)  # noqa: SLF001
+        # 替身记录了分块写入（5000 字节按 1024 分块 = 5 块）
+        assert len(main._fake_connection.written) >= 1  # noqa: SLF001
+        assert b"".join(main._fake_connection.written) == b"x" * 5000  # noqa: SLF001
+
+    def test_file_send_disables_text_send(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+
+        # 进入发送中 → 文本发送框禁用、取消按钮可见
+        widget._enter_file_sending()  # noqa: SLF001
+        assert widget.send_edit.isEnabled() is False
+        assert widget.file_send_btn.isEnabled() is False
+        # isVisible() 对未 show() 的控件恒为 False，用 not isHidden() 验证可见策略
+        assert widget.file_cancel_btn.isHidden() is False
+
+        # 退出 → 恢复
+        widget._exit_file_sending()  # noqa: SLF001
+        assert widget.send_edit.isEnabled() is True
+
+
+class TestCommandLibraryPanel:
+    """命令库侧栏面板：加载渲染 + 单击发送信号。"""
+
+    def test_loads_and_renders_tree(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """面板从内置示例加载 → 渲染出项目/功能/命令三层。"""
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        panel = CommandLibraryPanel()
+        # 内置示例含 2 个顶层项目（N58 项目 + 通用）
+        assert panel.tree.topLevelItemCount() == 2
+        # 第一个项目下应有功能组（叶子为命令）
+        first = panel.tree.topLevelItem(0)
+        assert first is not None and first.childCount() > 0
+
+    def test_click_command_emits_signal(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """单击命令叶子 → emit send_requested(命令字符串)。"""
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        panel = CommandLibraryPanel()
+        received: list[str] = []
+        panel.send_requested.connect(lambda cmd: received.append(cmd))
+
+        # 找第一个命令叶子并单击
+        first_proj = panel.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        first_cmd = first_grp.child(0)
+        panel._on_click(first_cmd, 0)  # noqa: SLF001
+        assert len(received) == 1
+        assert received[0] == first_cmd.text(0)
+
+    def test_click_project_does_not_emit(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """单击项目/功能节点 → 不 emit 信号。"""
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        panel = CommandLibraryPanel()
+        received: list[str] = []
+        panel.send_requested.connect(lambda cmd: received.append(cmd))
+
+        proj_item = panel.tree.topLevelItem(0)
+        panel._on_click(proj_item, 0)  # noqa: SLF001
+        assert received == []
+
+    def test_builtin_missing_falls_back_to_default(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """内置示例文件缺失时，reload_library 回落到内存默认库（迁移 5 条指令）."""
+        from atprobe.gui.widgets import command_library as cl_mod
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        # 让 builtin_library_path 指向一个不存在的路径，模拟打包后缺失数据文件
+        fake_path = tmp_path / "quick_commands.yaml"
+        monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: fake_path)
+
+        panel = CommandLibraryPanel()
+        # 回退后应含 default_library 的项目（通用/基础，含 AT 等）
+        all_cmds = [
+            c for p in panel._library.projects for g in p.groups for c in g.commands  # noqa: SLF001
+        ]
+        assert "AT" in all_cmds and "AT+CSQ" in all_cmds
+
+
+class TestManualDebugEmbeddedPanel:
+    """手动调试页内嵌命令库面板：单击命令 → 页内 send_command。"""
+
+    def test_panel_embedded_in_manual_debug(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """手动调试页含内嵌命令库面板（QSplitter 左侧）。"""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        assert hasattr(widget, "_cmd_panel")
+        assert isinstance(widget._cmd_panel, CommandLibraryPanel)
+
+    def test_click_command_sends_in_page(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """单击面板命令 → 经 send_requested → 页内 send_command → send_manual 被调用。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
 
         main = _FakeMain()
         widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
         widget._toggle_connect()  # noqa: SLF001  打开 COM1
 
-        # 多行：三行依次发送
-        widget.send_edit.setPlainText("AT\nATI\nAT+CSQ")
-        widget._send()  # noqa: SLF001
-        # last_command 捕获最后一次（AT+CSQ）
-        assert main.last_command == ("COM1", "AT+CSQ")
-        # TX 三行都应上屏
-        text = widget.response_view.toPlainText()
-        assert "TX> AT" in text and "TX> ATI" in text and "TX> AT+CSQ" in text
+        # 单击面板第一个命令叶子
+        panel = widget._cmd_panel  # noqa: SLF001
+        first_proj = panel.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        first_cmd = first_grp.child(0)
+        panel._on_click(first_cmd, 0)  # noqa: SLF001
 
-        # 历史：最后一次指令入历史下拉并持久化
-        items = [widget.history_combo.itemText(i) for i in range(widget.history_combo.count())]
-        assert "AT+CSQ" in items
-        saved = QSettings("ATProbe", "ATProbe").value("manual_debug/history")
-        assert saved is not None and "AT+CSQ" in list(saved)
-        # 清理
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+        # 经 send_requested → send_command → send_manual，last_command 应被设置
+        assert main.last_command is not None
+        assert main.last_command[0] == "COM1"
+        assert main.last_command[1] == first_cmd.text(0)
 
-    def test_hex_display(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        from PySide6.QtCore import QSettings
 
-        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
-        from atprobe.gui.tabs.registry import TabBinding
+class TestLibraryManagerDialogToolbar:
+    """管理对话框顶部工具栏：新增入口始终可见 + 智能定位目标。"""
 
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/quick_commands", None)
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
-        main = _FakeMain()
-        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
-        widget._toggle_connect()  # noqa: SLF001
+    def test_toolbar_has_add_buttons(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """对话框顶部有 [＋项目][＋功能组][＋命令] 始终可见。"""
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
 
-        widget.hex_check.setChecked(True)
-        main.emit_rx("COM1", b"OK\r\n")
-        text = widget.response_view.toPlainText()
-        # HEX 模式：显示 4F 4B（OK 的十六进制），不显示明文 OK 行
-        assert "4F 4B" in text
-        QSettings("ATProbe", "ATProbe").setValue("manual_debug/history", None)
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        assert dlg._add_project_btn.text() == "＋项目"  # noqa: SLF001
+        assert dlg._add_group_btn.text() == "＋功能组"  # noqa: SLF001
+        assert dlg._add_cmd_btn.text() == "＋命令"  # noqa: SLF001
+
+    def test_add_command_needs_group_selection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """未选功能组时点＋命令 → 提示需先选功能组（不弹 QInputDialog）。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        info_shown: list[str] = []
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: info_shown.append("info"))
+        input_called: list[bool] = []
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: input_called.append(True) or ("", False))
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        dlg.tree.clearSelection()  # 不选任何节点
+        dlg._add_command_under_selection()  # noqa: SLF001
+        assert info_shown and not input_called  # 提示了且没弹输入框
+
+    def test_add_command_under_selected_group(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """选中功能组后点＋命令 → 弹输入框 → 命令加入该功能组。"""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGMM", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        first_proj = dlg.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        first_grp.setSelected(True)
+        before = first_grp.childCount()
+        dlg._add_command_under_selection()  # noqa: SLF001
+        new_proj = dlg.tree.topLevelItem(0)
+        new_grp = new_proj.child(0)
+        assert new_grp.childCount() == before + 1
+        assert any(new_grp.child(i).text(0) == "AT+CGMM" for i in range(new_grp.childCount()))
 

@@ -19,6 +19,10 @@
 uv sync --extra dev --extra gui
 ```
 
+## 下载使用（最终用户）
+
+无需安装 Python。从 [Releases](../../releases) 下载 `ATProbe-<version>-win64.zip`，解压后双击 `ATProbe.exe` 即可。详细说明见压缩包内 `README.txt`。
+
 ## 使用
 
 ### CLI
@@ -55,6 +59,24 @@ uv run mypy src            # type check
 uv run pytest              # tests
 uv run pytest --cov        # tests with coverage
 ```
+
+## 打包与发布
+
+### 本地构建（验证用）
+
+```bash
+uv sync --extra gui --extra packaging
+uv run python packaging/build.py
+# 产物：dist/ATProbe-<version>-win64.zip
+```
+
+### 自动发布（GitHub Actions）
+
+1. 改 `pyproject.toml` 的 `version` → commit
+2. `git tag v<version> && git push origin v<version>`
+3. GitHub Actions 自动构建并发布到 Releases（约 3–5 分钟）
+
+详见 [`docs/superpowers/specs/2026-06-29-packaging-and-distribution-design.md`](docs/superpowers/specs/2026-06-29-packaging-and-distribution-design.md)。
 
 ## 许可
 
