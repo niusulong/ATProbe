@@ -39,4 +39,11 @@ def run_gui(argv: list[str] | None = None) -> int:
 
     win = MainWindow()
     win.show()
+    # 启动 3 秒后静默检查更新（后台线程，失败不打扰用户）
+    from PySide6.QtCore import QTimer
+
+    def _startup_check() -> None:
+        win._check_update(manual=False)  # noqa: SLF001
+
+    QTimer.singleShot(3000, _startup_check)
     return app.exec()
