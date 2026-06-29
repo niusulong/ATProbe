@@ -366,6 +366,7 @@ class _FakeMain:
         self._connected: set[str] = set()
         self.open_calls: list[tuple[str, int, str]] = []
         self.last_command: tuple[str, str] | None = None
+        self.last_terminator: object | None = None
         self.sent_event = threading.Event()
         self._rx_observers: dict[str, list] = {}
         # 文件发送（小文件同步路径）
@@ -389,11 +390,15 @@ class _FakeMain:
         self._connected.discard(port)
         return True
 
-    def send_manual(self, port: str, command: str) -> bool:
-        """流式写：记录命令（不再等待响应，回包经 subscribe_rx 流入）."""
+    def send_manual(self, port: str, command: str, *, terminator: object | None = None) -> bool:
+        """流式写：记录命令（不再等待响应，回包经 subscribe_rx 流入）.
+
+        terminator 经 manual_debug 透传到这里（修：结束符选择原本被忽略）。
+        """
         if port not in self._connected:
             return False
         self.last_command = (port, command)
+        self.last_terminator = terminator
         self.sent_event.set()
         return True
 
@@ -481,6 +486,47 @@ class TestManualDebugPortControl:
         assert main.last_command == ("COM1", "AT+CSQ")
         # TX 立即上屏（不等响应）
         assert "TX> AT+CSQ" in widget.response_view.toPlainText()
+
+        # 结束符下拉切换为 \r → 应透传到 send_manual（修：UI 选择原本被忽略）
+        from atprobe.infra.serial.config import Terminator
+
+        widget.term_combo.setCurrentIndex(1)  # "\\r"
+        assert widget._terminator is Terminator.CR  # noqa: SLF001
+        main.last_command = None
+        widget._send()  # noqa: SLF001
+        assert main.last_command == ("COM1", "AT+CSQ")
+        assert main.last_terminator is Terminator.CR
+
+    def test_tx_hex_shows_terminator_bytes(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """HEX 模式下 TX 行显示实际发送字节（命令+结束符），结束符选择一目了然.
+
+        回归：N58 不回显 <LF>（手册 §3.2 结束符为 <CR>），RX 无法区分 \\r/\\r\\n。
+        故在 TX 侧显示完整字节让用户确认结束符配置生效。
+        """
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="manual_debug", params={})
+        main = _FakeMain()
+        widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+
+        widget.hex_check.setChecked(True)
+
+        # 结束符 \r\n → TX HEX 应含 0D 0A
+        widget.send_edit.setPlainText("AT")
+        widget._send()  # noqa: SLF001
+        text = widget.response_view.toPlainText()
+        assert "TX> 41 54 0D 0A" in text, f"CRLF 应显示 41 54 0D 0A: {text!r}"
+
+        # 结束符 \r → TX HEX 应含 0D（无 0A）
+        widget.term_combo.setCurrentIndex(1)  # "\\r"
+        widget._send()  # noqa: SLF001
+        text = widget.response_view.toPlainText()
+        assert "TX> 41 54 0D" in text, f"CR 应显示 41 54 0D: {text!r}"
+        # 关键判据：CR 模式的最后一条 TX 不应含结尾的 0A
+        last_tx = [ln for ln in text.splitlines() if "TX>" in ln][-1]
+        assert not last_tx.rstrip().endswith("0A"), f"CR 模式 TX 不应以 0A 结尾: {last_tx!r}"
 
     def test_rx_streams_via_subscription(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """打开端口后 RX 订阅建立；模块回包字节经信号流式渲染到响应区."""
