@@ -13,4 +13,11 @@
     M7 测试环境配置  -> atprobe.engine.envconfig
 """
 
-__version__ = "0.1.0"
+def _read_version() -> str:
+    """延迟导入避免循环依赖；运行时版本来自 VERSION 文件。"""
+    from atprobe.infra.version import current_version
+
+    return current_version()
+
+
+__version__ = _read_version()

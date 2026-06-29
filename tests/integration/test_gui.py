@@ -114,6 +114,35 @@ class TestMainWindow:
         win._port_manager.emit_rx("COM9", b"more")  # noqa: SLF001
         assert received == []
 
+    def test_help_menu_exists(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """帮助菜单存在，含检查更新/关于两个 action。"""
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        menubar = win.menuBar()
+        help_actions = [a for a in menubar.actions() if a.text().startswith("帮助")]
+        assert len(help_actions) == 1
+        help_menu = help_actions[0].menu()
+        assert help_menu is not None
+        texts = [a.text() for a in help_menu.actions() if a.text()]
+        assert any("检查更新" in t for t in texts)
+        assert any("关于" in t for t in texts)
+
+    def test_about_dialog_shows_version(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """关于对话框显示当前版本号。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "about",
+            lambda parent, title, text: shown.update(title=title, text=text),
+        )
+        win = MainWindow()
+        win._on_about()  # noqa: SLF001
+        assert "ATProbe" in shown.get("text", "")
+
 
 class TestMonitorMultiPort:
     """B4：多端口监控合并显示 + 导出."""
