@@ -57,6 +57,10 @@ class MainWindow(QMainWindow):
 
     # 跨线程事件投递信号（引擎线程 → 主线程）
     progress = Signal(object)
+    # 升级检查/下载结果投递信号（工作线程 → 主线程）
+    update_check_result = Signal(object)  # ReleaseInfo | None(无新版/失败) | Exception
+    update_download_progress = Signal(int, int)  # (done, total)
+    update_download_done = Signal(object)  # Path | Exception
 
     def __init__(self, app_config: AppConfig | None = None) -> None:
         super().__init__()
@@ -86,6 +90,11 @@ class MainWindow(QMainWindow):
         self._init_statusbar()
         self._init_menubar()
         self.progress.connect(self._on_progress)
+        self.update_check_result.connect(self._on_check_result)
+        self.update_download_progress.connect(self._on_download_progress)
+        self.update_download_done.connect(self._on_download_done)
+        self._update_in_progress = False
+        self._pending_release: object = None  # ReleaseInfo，下载期间持有
 
     # ------------------------------------------------------------------
     # 外壳初始化
@@ -235,9 +244,168 @@ class MainWindow(QMainWindow):
         self._check_update(manual=manual)
 
     def _check_update(self, manual: bool = True) -> None:
-        """检查更新（Task 11 完整实现；此处先占位，避免菜单触发时崩溃）。"""
-        # 占位：Task 11 将实现后台线程检查 + 信号投递 + 对话框
-        return
+        """后台检查更新（工作线程做 HTTP，结果经信号回主线程）。
+
+        manual=False（启动自动）：失败/无新版静默；manual=True（手动）：弹提示。
+        """
+        if self._update_in_progress:
+            return
+        self._check_manual = manual
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+
+    def _check_update_worker(self) -> None:
+        from atprobe.infra.update import UpdateCheckError
+        from atprobe.infra.update.checker import fetch_latest, is_newer
+        from atprobe.infra.version import current_version
+
+        try:
+            info = fetch_latest()
+            result = info if is_newer(info.version, current_version()) else None
+            self.update_check_result.emit(result)
+        except (UpdateCheckError, Exception) as exc:  # noqa: BLE001
+            # 网络失败等：手动模式弹窗，自动模式静默
+            self.update_check_result.emit(exc)
+
+    def _on_check_result(self, result: object) -> None:
+        """主线程：处理检查结果。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        from atprobe.infra.version import current_version
+
+        # 异常：失败
+        if isinstance(result, Exception):
+            if getattr(self, "_check_manual", False):
+                QMessageBox.warning(self, "检查更新", f"检查失败：{result}")
+            return
+        # None：已是最新
+        if result is None:
+            if getattr(self, "_check_manual", False):
+                QMessageBox.information(
+                    self, "检查更新", f"当前已是最新版本 {current_version()}"
+                )
+            return
+        # ReleaseInfo：有新版 → 弹升级对话框
+        self._show_update_dialog(result)  # type: ignore[arg-type]
+
+    def _show_update_dialog(self, info: object) -> None:
+        """有新版时弹升级对话框（版本号 + changelog + 立即更新/稍后）。"""
+        from PySide6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QTextEdit,
+            QVBoxLayout,
+        )
+
+        from atprobe.infra.version import current_version
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("发现新版本")
+        dlg.setMinimumWidth(480)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(
+            f"<b>发现新版本 {info.version}</b>（当前 {current_version()}）"  # type: ignore[attr-defined]
+        ))
+        notes = QTextEdit()
+        notes.setReadOnly(True)
+        notes.setHtml(f"<pre>{info.release_notes}</pre>")  # type: ignore[attr-defined]
+        layout.addWidget(QLabel("更新内容："))
+        layout.addWidget(notes, 1)
+        size_mb = getattr(info, "zip_size", 0) / (1024 * 1024)
+        layout.addWidget(QLabel(f"下载大小：约 {size_mb:.1f} MB"))
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("立即更新")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("稍后")
+        btns.accepted.connect(lambda: self._start_download(info, dlg))
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+        dlg.exec()
+
+    def _start_download(self, info: object, dlg: object) -> None:
+        """用户点立即更新：关闭对话框，启动下载（工作线程 + 进度对话框）。"""
+        from PySide6.QtWidgets import QProgressDialog
+
+        dlg.accept()  # type: ignore[attr-defined]
+        self._update_in_progress = True
+        self._pending_release = info
+
+        self._progress_dlg = QProgressDialog(
+            f"正在更新到 {info.version}...", "取消", 0, 100, self  # type: ignore[attr-defined]
+        )
+        self._progress_dlg.setWindowTitle("更新")
+        self._progress_dlg.setMinimumDuration(0)
+        self._progress_dlg.setValue(0)
+        self._progress_dlg.canceled.connect(self._cancel_download)
+        self._cancelled = False
+
+        threading.Thread(target=self._download_worker, args=(info,), daemon=True).start()
+
+    def _download_worker(self, info: object) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from atprobe.infra.update import DownloadCancelled, DownloadError
+        from atprobe.infra.update.downloader import download
+
+        url = getattr(info, "zip_url", "")
+        name = f"ATProbe-{getattr(info, 'version', '')}-win64.zip"
+        try:
+            result = download(
+                url,
+                Path(tempfile.gettempdir()),
+                filename=name,
+                expected_size=getattr(info, "zip_size", None),
+                progress_cb=lambda d, t: self.update_download_progress.emit(d, t),
+                cancel_token=lambda: getattr(self, "_cancelled", False),
+            )
+            self.update_download_done.emit(result.path)
+        except (DownloadCancelled, DownloadError, Exception) as exc:  # noqa: BLE001
+            self.update_download_done.emit(exc)
+
+    def _on_download_progress(self, done: int, total: int) -> None:
+        if hasattr(self, "_progress_dlg") and total > 0:
+            self._progress_dlg.setValue(done * 100 // total)
+
+    def _cancel_download(self) -> None:
+        self._cancelled = True
+
+    def _on_download_done(self, result: object) -> None:
+        """下载完成（Path）或失败（Exception）。"""
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        from atprobe.infra.runtime import app_root
+        from atprobe.infra.update import DownloadCancelled, UpdateError
+        from atprobe.infra.update.installer import apply_update
+
+        if hasattr(self, "_progress_dlg"):
+            self._progress_dlg.close()
+        self._update_in_progress = False
+
+        if isinstance(result, Exception):
+            if not isinstance(result, DownloadCancelled):
+                QMessageBox.critical(self, "更新失败", f"下载失败：{result}")
+            return
+        # 下载成功 → 最终确认安装
+        zip_path = Path(result)  # type: ignore[arg-type]
+        choice = QMessageBox.question(
+            self, "开始安装",
+            "更新已就绪。点击「是」后程序将关闭并自动完成升级（约 5 秒）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            apply_update(zip_path, app_root())
+        except UpdateError as exc:
+            QMessageBox.critical(self, "安装失败", str(exc))
+            return
+        # 脚本已 detached 启动，主动退出
+        QApplication.quit()
 
     # ------------------------------------------------------------------
     # 选项卡管理（§2.3）
