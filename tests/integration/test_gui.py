@@ -922,39 +922,67 @@ class TestManualDebugEmbeddedPanel:
 
 
 class TestLibraryManagerDialogToolbar:
-    """管理对话框顶部工具栏：新增入口始终可见 + 智能定位目标。"""
+    """管理对话框：顶部只保留＋项目，新增功能组/命令下放到树节点内嵌＋按钮."""
 
-    def test_toolbar_has_add_buttons(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """对话框顶部有 [＋项目][＋功能组][＋命令] 始终可见。"""
+    def test_toolbar_only_has_add_project(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """对话框顶部只有 [＋项目]，旧的 ＋功能组/＋命令 按钮已移除."""
         from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
 
         lib = load_library(builtin_library_path())
         dlg = LibraryManagerDialog(lib, builtin_library_path())
         assert dlg._add_project_btn.text() == "＋项目"  # noqa: SLF001
-        assert dlg._add_group_btn.text() == "＋功能组"  # noqa: SLF001
-        assert dlg._add_cmd_btn.text() == "＋命令"  # noqa: SLF001
+        # 旧的 ＋功能组 / ＋命令 按钮应已移除
+        assert not hasattr(dlg, "_add_group_btn")
+        assert not hasattr(dlg, "_add_cmd_btn")
 
-    def test_add_command_needs_group_selection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """未选功能组时点＋命令 → 提示需先选功能组（不弹 QInputDialog）。"""
+    def test_embedded_add_buttons_present(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """项目/功能组节点行内嵌 widget（含＋按钮），命令节点无."""
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+
+        first_proj = dlg.tree.topLevelItem(0)
+        # 项目节点应有内嵌 widget
+        assert dlg.tree.itemWidget(first_proj, 0) is not None  # noqa: SLF001
+        # 第一个子节点应是功能组，也应有内嵌 widget
+        first_grp = first_proj.child(0)
+        assert dlg.tree.itemWidget(first_grp, 0) is not None  # noqa: SLF001
+        # 功能组下的命令节点（叶子）不应有内嵌 widget
+        if first_grp.childCount() > 0:
+            first_cmd = first_grp.child(0)
+            assert dlg.tree.itemWidget(first_cmd, 0) is None  # noqa: SLF001
+
+    def test_add_group_via_embedded_button(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """项目节点内嵌＋ → _add_group_interactive → 新功能组出现在该项目下."""
         import PySide6.QtWidgets as _qw
 
         from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
 
-        info_shown: list[str] = []
-        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: info_shown.append("info"))
-        input_called: list[bool] = []
-        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: input_called.append(True) or ("", False))
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("新功能组", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
 
         lib = load_library(builtin_library_path())
         dlg = LibraryManagerDialog(lib, builtin_library_path())
-        dlg.tree.clearSelection()  # 不选任何节点
-        dlg._add_command_under_selection()  # noqa: SLF001
-        assert info_shown and not input_called  # 提示了且没弹输入框
+        first_proj = dlg.tree.topLevelItem(0)
+        from PySide6.QtCore import Qt as _Qt
 
-    def test_add_command_under_selected_group(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """选中功能组后点＋命令 → 弹输入框 → 命令加入该功能组。"""
+        proj_name = first_proj.data(0, _Qt.ItemDataRole.UserRole)[1]  # 元组第二项=项目名  # noqa: SLF001
+        before = first_proj.childCount()
+
+        dlg._add_group_interactive(proj_name)  # noqa: SLF001
+
+        new_proj = dlg.tree.topLevelItem(0)
+        assert new_proj.childCount() == before + 1
+        # 新功能组节点应存在
+        grp_names = [new_proj.child(i).text(0) for i in range(new_proj.childCount())]
+        assert "新功能组" in grp_names
+
+    def test_add_command_via_embedded_button(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """功能组节点内嵌＋ → _add_command_interactive → 新命令加入该功能组."""
         import PySide6.QtWidgets as _qw
 
         from atprobe.domain.quickcmd import builtin_library_path, load_library
@@ -967,11 +995,47 @@ class TestLibraryManagerDialogToolbar:
         dlg = LibraryManagerDialog(lib, builtin_library_path())
         first_proj = dlg.tree.topLevelItem(0)
         first_grp = first_proj.child(0)
-        first_grp.setSelected(True)
+        from PySide6.QtCore import Qt as _Qt
+
+        gnode = first_grp.data(0, _Qt.ItemDataRole.UserRole)  # 元组: ("group", proj, grp)  # noqa: SLF001
+        proj_name, grp_name = gnode[1], gnode[2]
         before = first_grp.childCount()
-        dlg._add_command_under_selection()  # noqa: SLF001
+
+        dlg._add_command_interactive(proj_name, grp_name)  # noqa: SLF001
+
         new_proj = dlg.tree.topLevelItem(0)
         new_grp = new_proj.child(0)
         assert new_grp.childCount() == before + 1
+        cmd_texts = [new_grp.child(i).text(0) for i in range(new_grp.childCount())]
+        assert "AT+CGMM" in cmd_texts
+
+    def test_add_command_no_selection_needed(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """无需预先选中节点：直接传项目+功能组名即可加命令（消除旧痛点）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        input_called: list[bool] = []
+        monkeypatch.setattr(
+            _qw.QInputDialog,
+            "getText",
+            lambda *a, **k: input_called.append(True) or ("AT+CGMM", True),
+        )
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        dlg.tree.clearSelection()  # 明确不选任何节点
+        first_proj = dlg.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        gnode = first_grp.data(0, _Qt.ItemDataRole.UserRole)  # noqa: SLF001
+
+        dlg._add_command_interactive(gnode[1], gnode[2])  # noqa: SLF001
+        # 应成功弹输入框并添加，不因未选中而失败
+        assert input_called
+        new_grp = dlg.tree.topLevelItem(0).child(0)
         assert any(new_grp.child(i).text(0) == "AT+CGMM" for i in range(new_grp.childCount()))
 

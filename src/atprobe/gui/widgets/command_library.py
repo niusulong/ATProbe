@@ -1,8 +1,11 @@
 """命令库侧栏面板 + 管理对话框（项目→功能→命令三层树）.
 
 面板作为普通 QWidget 嵌入手动调试页左侧（QSplitter），双击命令叶子经
-send_requested(str) 信号通知宿主页发送。增删改经 LibraryManagerDialog 集中完成，
-对话框顶部工具栏始终可见新增入口（项目/功能组/命令）。
+send_requested(str) 信号通知宿主页发送。增删改经 LibraryManagerDialog 集中完成。
+
+新增交互：顶部工具栏只保留「＋项目」（项目是顶级，无父节点可挂）；
+每个项目节点行内嵌「＋」（在其下新增功能组），每个功能组节点行内嵌「＋」
+（在其下新增命令）。在哪层就在哪层加，无需预先选中。删除/重命名仍在右侧表单。
 
 解耦：面板不认识手动调试页，只 emit send_requested；宿主页连接该信号发送。
 """
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -193,18 +197,13 @@ class LibraryManagerDialog(QDialog):
     def _init_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        # 顶部工具栏：[＋项目][＋功能组][＋命令][加载…][另存为…] [文件名]
+        # 顶部工具栏：[＋项目][加载…][另存为…] [文件名]
+        # 新增功能组/命令的入口下放到树节点（项目/功能组行内嵌＋），无需预选。
         top = QHBoxLayout()
         top.setSpacing(6)
         self._add_project_btn = QPushButton("＋项目")
         self._add_project_btn.clicked.connect(self._add_project_interactive)
         top.addWidget(self._add_project_btn)
-        self._add_group_btn = QPushButton("＋功能组")
-        self._add_group_btn.clicked.connect(self._add_group_under_selection)
-        top.addWidget(self._add_group_btn)
-        self._add_cmd_btn = QPushButton("＋命令")
-        self._add_cmd_btn.clicked.connect(self._add_command_under_selection)
-        top.addWidget(self._add_cmd_btn)
         top.addSpacing(12)
         load_btn = QPushButton("加载…")
         load_btn.clicked.connect(self._on_load_file)
@@ -266,10 +265,51 @@ class LibraryManagerDialog(QDialog):
                     gitem.addChild(citem)
                 pitem.addChild(gitem)
             self.tree.addTopLevelItem(pitem)
+            # 项目节点内嵌「＋」：在其下新增功能组
+            self.tree.setItemWidget(pitem, 0, self._make_node_widget(proj.name))
+            # 功能组节点内嵌「＋」：在其下新增命令
+            for i in range(pitem.childCount()):
+                gitem = pitem.child(i)
+                gnode = gitem.data(0, _NODE_ROLE)
+                if isinstance(gnode, tuple) and len(gnode) >= 3:
+                    self.tree.setItemWidget(
+                        gitem, 0, self._make_node_widget(gnode[2], proj=gnode[1])
+                    )
         self.tree.expandAll()
 
+    def _make_node_widget(self, label_text: str, *, proj: str | None = None) -> QWidget:
+        """构造节点行 widget：[QLabel 名称] [stretch] [内嵌＋按钮].
+
+        setItemWidget 会替换 item 第 0 列的整个显示内容（原文字会消失），
+        故容器内放一个 QLabel 显示名称，再贴一个右对齐的 ＋ 按钮。
+
+        Args:
+            label_text: 节点显示名（项目名或功能组名）。
+            proj: 项目名；非 None 表示这是功能组节点（＋→加命令），否则是项目节点（＋→加功能组）。
+        """
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(4)
+        name_lbl = QLabel(label_text)
+        row.addWidget(name_lbl)
+        row.addStretch()
+        btn = QToolButton()
+        btn.setAutoRaise(True)  # 扁平、悬停才显边框，不喧宾夺主
+        btn.setIcon(make_icon("add", color=self._tokens["accent"]))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("新增功能组" if proj is None else "新增命令")
+        if proj is None:
+            btn.clicked.connect(lambda _checked=False, p=label_text: self._add_group_interactive(p))
+        else:
+            btn.clicked.connect(
+                lambda _checked=False, p=proj, g=label_text: self._add_command_interactive(p, g)
+            )
+        row.addWidget(btn)
+        return container
+
     # ------------------------------------------------------------------
-    # 当前选中节点定位（供顶部新增按钮判断目标所属）
+    # 当前选中节点定位（供右侧表单 _on_tree_select 解析层级）
     # ------------------------------------------------------------------
     def _current_selection(self) -> tuple[str, ...] | None:
         """返回当前选中节点的元组标识（None 表示未选中）."""
@@ -278,21 +318,6 @@ class LibraryManagerDialog(QDialog):
             return None
         node = items[0].data(0, _NODE_ROLE)
         return node if isinstance(node, tuple) else None
-
-    def _selected_project(self) -> str | None:
-        """选中项目/功能组/命令时，返回所属项目名；否则 None."""
-        node = self._current_selection()
-        if node is None:
-            return None
-        # ("project", name) / ("group", proj, grp) / ("command", proj, grp, cmd)
-        return node[1] if len(node) >= 2 else None
-
-    def _selected_group(self) -> tuple[str, str] | None:
-        """选中功能组/命令时，返回 (项目, 功能组)；否则 None."""
-        node = self._current_selection()
-        if node is None or len(node) < 3:
-            return None
-        return (node[1], node[2])
 
     # ------------------------------------------------------------------
     # 表单切换
@@ -401,34 +426,33 @@ class LibraryManagerDialog(QDialog):
             return
         self._refresh_tree()
 
-    def _add_group_under_selection(self) -> None:
-        """新增功能组到「当前选中项目」；未选项目则提示."""
-        proj = self._selected_project()
-        if proj is None:
-            QMessageBox.information(self, "新增功能组", "请先选中一个项目或其下节点。")
-            return
-        name, ok = QInputDialog.getText(self, "新增功能组", f"{proj} 下的功能组名:")
+    def _add_group_interactive(self, proj_name: str) -> None:
+        """直接在某项目下新增功能组（由项目节点的内嵌＋按钮调用）.
+
+        与旧的 under_selection 版本区别：目标项目由参数显式传入（按钮所在的节点），
+        不再依赖选中态，也无需"先选中项目"的提示。
+        """
+        name, ok = QInputDialog.getText(self, "新增功能组", f"{proj_name} 下的功能组名:")
         if not (ok and name.strip()):
             return
         try:
-            self._library.add_group(proj, name)
+            self._library.add_group(proj_name, name)
         except ValueError as exc:
             QMessageBox.warning(self, "无法新增", str(exc))
             return
         self._refresh_tree()
 
-    def _add_command_under_selection(self) -> None:
-        """新增命令到「当前选中的功能组」；未选则提示."""
-        sel = self._selected_group()
-        if sel is None:
-            QMessageBox.information(self, "新增命令", "请先选中一个功能组或其下命令。")
-            return
-        proj, grp = sel
-        cmd, ok = QInputDialog.getText(self, "新增命令", f"{proj}/{grp} 的 AT 指令:")
+    def _add_command_interactive(self, proj_name: str, grp_name: str) -> None:
+        """直接在某功能组下新增命令（由功能组节点的内嵌＋按钮调用）.
+
+        与旧的 under_selection 版本区别：目标功能组由参数显式传入（按钮所在的节点），
+        不再依赖选中态，也无需"先选中功能组"的提示。
+        """
+        cmd, ok = QInputDialog.getText(self, "新增命令", f"{proj_name}/{grp_name} 的 AT 指令:")
         if not (ok and cmd.strip()):
             return
         try:
-            self._library.add_command(proj, grp, cmd)
+            self._library.add_command(proj_name, grp_name, cmd)
         except ValueError as exc:
             QMessageBox.warning(self, "无法新增", str(exc))
             return
