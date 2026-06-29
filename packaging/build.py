@@ -22,6 +22,11 @@ import tomllib
 import zipfile
 from pathlib import Path
 
+# Windows（尤其 CI runner）默认控制台编码是 cp1252，print 中文会 UnicodeEncodeError。
+# 强制 stdout/stderr 用 UTF-8，确保本地与 CI 行为一致。
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = REPO_ROOT / "packaging"
 DIST = REPO_ROOT / "dist"

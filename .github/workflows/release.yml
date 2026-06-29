@@ -15,6 +15,10 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    env:
+      # 强制 Python UTF-8 模式：Windows runner 默认 cp1252，print 中文会 UnicodeEncodeError。
+      # 同时覆盖子进程（PyInstaller 等）的输出编码。
+      PYTHONUTF8: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
