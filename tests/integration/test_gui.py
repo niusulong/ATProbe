@@ -24,8 +24,8 @@ class TestRegistry:
 
         reg = default_registry()
         types = reg.types()
-        # §2.3 第一阶段选项卡（含执行进度，执行时自动弹出）
-        for t in ("manual_debug", "case_execute", "monitor", "execution_progress", "report_view", "env_config"):
+        # §2.3 第一阶段选项卡（含执行进度，执行时自动弹出；报告查看已改用浏览器打开）
+        for t in ("manual_debug", "case_execute", "monitor", "execution_progress", "env_config"):
             assert t in types, f"缺少选项卡类型 {t}"
 
     def test_execution_progress_excluded_from_sidebar(self) -> None:
