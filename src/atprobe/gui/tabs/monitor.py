@@ -57,11 +57,35 @@ class _PortSubView(QWidget):
         self.port = port
         self._tokens = tokens
         self.buffer: deque[tuple[str, str, str]] = deque(maxlen=_MAX_LINES)
+        # 跨 chunk 的不完整行缓冲（仅文本模式用；HEX 模式每 chunk 独立渲染不累积）
+        self._line_buffer = ""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.view = QTextEdit()
         self.view.setReadOnly(True)
         layout.addWidget(self.view)
+
+    def feed(self, direction: str, ts: str, data: bytes, hex_mode: bool) -> None:
+        """喂入一个原始字节 chunk，按行切分后入 buffer.
+
+        - HEX 模式：整个 chunk 转十六进制一行显示（不跨 chunk 累积，与 manual_debug 一致）。
+        - 文本模式：累积到 _line_buffer，按 \\n 切分；完整行入 buffer，末尾未换行的
+          片段留在缓冲等下次 chunk。避免多行响应（AT\\r\\n\\r\\nOK\\r\\n）被黏成一行。
+        """
+        if hex_mode:
+            hex_line = " ".join(f"{b:02X}" for b in data)
+            if hex_line:
+                self.buffer.append((direction, ts, hex_line))
+            return
+        text = data.decode("utf-8", errors="replace")
+        self._line_buffer += text
+        parts = self._line_buffer.split("\n")
+        # 前面所有是完整行（以 \n 结尾），最后一段可能未到换行 → 留缓冲
+        for line in parts[:-1]:
+            stripped = line.rstrip("\r")
+            if stripped:
+                self.buffer.append((direction, ts, stripped))
+        self._line_buffer = parts[-1]
 
     def append(self, direction: str, ts: str, text: str) -> None:
         self.buffer.append((direction, ts, text))
@@ -263,16 +287,9 @@ class MonitorWidget(QWidget):
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
         from datetime import datetime
 
-        if self.hex_check.isChecked():
-            text = " ".join(f"{b:02X}" for b in data)
-        else:
-            text = data.decode("utf-8", errors="replace")
-        # 去掉末尾换行（TX/RX chunk 常带 \r\n，避免渲染出多余空行）
-        text = text.rstrip("\r\n")
-        # 时间戳与 manual_debug 响应区一致（含年月日），便于跨天核对
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sv = self._ensure_sub_view(port)
-        sv.append(direction, ts, text)
+        sv.feed(direction, ts, data, self.hex_check.isChecked())
 
     def _flush_all(self) -> None:
         """遍历所有子页 flush 各自 buffer（单 timer）。"""
