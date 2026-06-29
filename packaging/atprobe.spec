@@ -1,22 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onedir spec — ATProbe（GUI + CLI 双入口，Windows x64）。
 
-构建入口：``uv run python packaging/build.py``（build.py 会动态注入版本号到
-COLLECT name，替换下方 ATProbe-VERSION 占位符）。
+构建入口：``uv run python packaging/build.py``（build.py 注入版本号到 COLLECT name，
+并通过 --distpath 指定输出目录）。
+
+多入口策略：每个 exe 用独立 Analysis（PyInstaller 官方推荐的多入口做法），
+共享同一份 datas/binaries/hiddenimports 计算结果。COLLECT 把两个 exe +
+共用运行时收集到一个目录（_internal 共享，体积不重复）。
 
 关键点：
   - collect_all('PySide6'/'shiboken6')：Qt 插件全量收集，否则启动崩
   - collect_submodules('atprobe')：覆盖延迟导入
   - examples/ 打进 _internal/examples（resources.py 经此定位内置只读资源）
-  - 双 EXE：GUI（console=False）+ CLI（console=True）共享同一 COLLECT 目录
+  - 所有路径基于 spec 所在目录（PyInstaller 全局 SPECPATH），不依赖 cwd
 """
 
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
+# PyInstaller exec spec 时不设置 __file__，但提供全局变量 SPECPATH（spec 所在目录）
+SPEC_DIR = Path(SPECPATH).resolve()
+REPO_ROOT = SPEC_DIR.parent
+
 block_cipher = None
 
+# 共享的依赖计算（两个 exe 用同一份）
 datas = []
 binaries = []
 hiddenimports = []
@@ -28,34 +37,43 @@ for pkg in ("PySide6", "shiboken6"):
     binaries += b
     hiddenimports += h
 
-# 内置只读资源 → _internal/examples（resources.py 经 importlib.resources / 文件路径读取）
+# 内置只读资源 → _internal/examples（resources.py 经此定位）
 datas += [
-    ("../examples/env.yaml", "examples"),
-    ("../examples/quick_commands.yaml", "examples"),
-    ("../examples/testcases", "examples/testcases"),
+    (str(REPO_ROOT / "examples" / "env.yaml"), "examples"),
+    (str(REPO_ROOT / "examples" / "quick_commands.yaml"), "examples"),
+    (str(REPO_ROOT / "examples" / "testcases"), "examples/testcases"),
 ]
+
+# 包内数据文件 → _internal/atprobe/...（PackageLoader/importlib.resources 经此定位）
+# collect_data_files 自动收集 atprobe 包内所有非 .py 数据文件（如 reporting/templates/*.j2），
+# 避免逐个手写、漏报（之前漏 templates 导致 HtmlReporter 崩）
+from PyInstaller.utils.hooks import collect_data_files
+
+datas += collect_data_files("atprobe")
 
 # 源码全量收集（含延迟导入的子模块）
 hiddenimports += collect_submodules("atprobe")
 
-a = Analysis(
-    ["entry_gui.py", "entry_cli.py"],
-    pathex=[str(Path("..", "src").resolve())],
+pathex = [str(REPO_ROOT / "src")]
+hookspath = [str(SPEC_DIR / "hooks")]
+excludes = ["tkinter", "PyQt5", "PyQt6", "pytest", "_pytest"]
+
+# --- GUI exe：独立 Analysis（console=False）---
+gui_a = Analysis(
+    [str(SPEC_DIR / "entry_gui.py")],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[str(Path("hooks").resolve())],
-    excludes=["tkinter", "PyQt5", "PyQt6", "pytest", "_pytest"],
+    hookspath=hookspath,
+    excludes=excludes,
     cipher=block_cipher,
     noarchive=False,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-# GUI exe：取 Analysis scripts[0]（entry_gui.py 对应），console=False 不弹黑窗
+gui_pyz = PYZ(gui_a.pure, gui_a.zipped_data, cipher=block_cipher)
 gui_exe = EXE(
-    pyz,
-    a.scripts[:1],
+    gui_pyz,
+    gui_a.scripts,
     [],
     exclude_binaries=True,
     name="ATProbe",
@@ -67,10 +85,22 @@ gui_exe = EXE(
     icon=None,  # 后续可加 packaging/atprobe.ico
 )
 
-# CLI exe：取 Analysis scripts[1]（entry_cli.py 对应），console=True 保留控制台
+# --- CLI exe：独立 Analysis（console=True）---
+cli_a = Analysis(
+    [str(SPEC_DIR / "entry_cli.py")],
+    pathex=pathex,
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=hookspath,
+    excludes=excludes,
+    cipher=block_cipher,
+    noarchive=False,
+)
+cli_pyz = PYZ(cli_a.pure, cli_a.zipped_data, cipher=block_cipher)
 cli_exe = EXE(
-    pyz,
-    a.scripts[1:],
+    cli_pyz,
+    cli_a.scripts,
     [],
     exclude_binaries=True,
     name="atprobe-cli",
@@ -81,6 +111,6 @@ cli_exe = EXE(
     console=True,
 )
 
-# COLLECT name 由 build.py 在调用前用字符串替换注入版本号（见 build.py 的 render_spec）
-# 此处占位 ATProbe-VERSION，build.py 会替换为 ATProbe-<version>。
-COLLECT(gui_exe, cli_exe, a.binaries, a.datas, name="ATProbe-VERSION")
+# COLLECT 把两个 exe + 共用运行时收集到一个目录（_internal 共享）
+# COLLECT name 由 build.py 在调用前替换 ATProbe-VERSION → ATProbe-<version>
+COLLECT(gui_exe, cli_exe, gui_a.binaries, gui_a.datas, name="ATProbe-VERSION")
