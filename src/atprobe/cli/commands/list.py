@@ -8,6 +8,8 @@ import typer
 
 from atprobe.domain.case.parser import CaseParseError, parse_case_file
 from atprobe.infra.config.appconfig import load_app_config_file
+from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.runtime import is_frozen
 
 
 def list_cmd(
@@ -16,16 +18,24 @@ def list_cmd(
     tag: list[str] = typer.Option([], "--tag", "-t", help="标签过滤"),
 ) -> None:
     """列出可用用例 / 套件 / 串口."""
-    app_cfg = load_app_config_file(config or Path("atprobe.yaml"))
+    # 用户显式 --config 按其值；否则打包态优先 exe 同级 atprobe.yaml，回退 cwd
+    if config is not None:
+        cfg_path = config
+    elif is_frozen() and resolve_workspace_path("atprobe.yaml").exists():
+        cfg_path = resolve_workspace_path("atprobe.yaml")
+    else:
+        cfg_path = Path("atprobe.yaml")
+    app_cfg = load_app_config_file(cfg_path)
 
+    cases_dir = resolve_workspace_path(app_cfg.cases_dir)
     if target == "ports":
         _list_ports()
         return
     if target == "suites":
-        _list_suites(Path(app_cfg.cases_dir))
+        _list_suites(cases_dir)
         return
     # 默认 cases
-    _list_cases(Path(app_cfg.cases_dir), tag)
+    _list_cases(cases_dir, tag)
 
 
 def _list_cases(cases_dir: Path, tag: list[str]) -> None:
