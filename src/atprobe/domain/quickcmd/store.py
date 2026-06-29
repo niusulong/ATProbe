@@ -19,10 +19,6 @@ from ruamel.yaml.error import YAMLError
 
 from atprobe.domain.quickcmd.models import CommandLibrary
 
-# 项目根目录（src/atprobe/domain/quickcmd/store.py → 上溯 4 级到项目根）
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
-_BUILTIN_PATH = _PROJECT_ROOT / "examples" / "quick_commands.yaml"
-
 
 class QuickCmdStoreError(Exception):
     """命令库文件读写/解析错误（对齐 EnvConfigError 风格）。"""
@@ -149,5 +145,11 @@ def default_library() -> CommandLibrary:
 
 
 def builtin_library_path() -> Path:
-    """返回内置示例文件的绝对路径 examples/quick_commands.yaml。"""
-    return _BUILTIN_PATH
+    """返回内置示例文件的绝对路径 examples/quick_commands.yaml。
+
+    经 ``atprobe.infra.resources.builtin_resource`` 定位，开发态读仓库根、
+    打包态读 _internal/examples，避免 ``parents[N]`` 硬编码在打包后失效。
+    """
+    from atprobe.infra.resources import builtin_resource
+
+    return builtin_resource("quick_commands.yaml")
