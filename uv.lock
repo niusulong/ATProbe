@@ -75,7 +75,7 @@ wheels = [
 
 [[package]]
 name = "atprobe"
-version = "0.3.6"
+version = "0.3.8"
 source = { editable = "." }
 dependencies = [
     { name = "jinja2" },

@@ -84,8 +84,10 @@ class StepPressureStats:
     command: str
     success_count: int = 0
     fail_count: int = 0
-    # 响应时间（毫秒），仅成功的（§5.4：超时不计入分布）
-    response_times: tuple[float, ...] = ()
+    # 响应时间分布统计量（毫秒，仅成功的，§5.4：超时不计入分布）。
+    # 不保留全量 response_times 数组 —— 它是计算百分位的中间实现细节，
+    # 且随轮数线性增长会放大内存占用（零消费者）。模型只持有统计结论，
+    # 保持领域层纯净（TSD §2.1 SRP / §2.2 领域层无实现泄漏）。
     min_ms: float = 0.0
     max_ms: float = 0.0
     avg_ms: float = 0.0

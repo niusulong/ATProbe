@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from atprobe.domain.case.models import Case, FailureStrategy, Step
 from atprobe.domain.report.models import (
@@ -33,10 +33,6 @@ class PressureRunResult:
     """压测整体运行结果."""
 
     stats: PressureStats
-    # 每步每轮的响应时间（ms）—— 仅成功且未超时（用于分布统计）
-    step_response_times: dict[int, list[float]] = field(default_factory=dict)
-    step_success: dict[int, int] = field(default_factory=dict)
-    step_fail: dict[int, int] = field(default_factory=dict)
     aborted: bool = False
 
 
@@ -141,10 +137,7 @@ def run_pressure(
         success_rate=success_rate, aborted=aborted,
         pass_threshold=pass_threshold, passed=passed, step_stats=step_stats,
     )
-    return PressureRunResult(
-        stats=stats, step_response_times=step_rt, step_success=step_suc,
-        step_fail=step_fail, aborted=aborted,
-    )
+    return PressureRunResult(stats=stats, aborted=aborted)
 
 
 def _step_command(step: Step) -> str:
@@ -170,7 +163,7 @@ def _build_step_stat(
         return StepPressureStats(
             step_index=idx, command=cmd,
             success_count=suc, fail_count=fail,
-            response_times=tuple(s), min_ms=s[0], max_ms=s[-1], avg_ms=avg,
+            min_ms=s[0], max_ms=s[-1], avg_ms=avg,
             p95_ms=p95, p99_ms=p99,
         )
     return StepPressureStats(
