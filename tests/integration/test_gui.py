@@ -453,6 +453,8 @@ class _FakeMain:
         self.file_sent_event = threading.Event()
         # 大文件 worker 用的连接替身（None 表示不支持后台路径）
         self._fake_connection = None
+        # 可控：设为 True 时 open_port 返回 False 模拟打开失败
+        self.fail_open = False
 
     def available_ports(self) -> list[str]:
         return ["COM1", "COM2"]
@@ -462,6 +464,8 @@ class _FakeMain:
 
     def open_port(self, port: str, baud: int = 115200, frame: str = "8N1") -> bool:
         self.open_calls.append((port, baud, frame))
+        if self.fail_open:
+            return False  # 模拟端口被占用/权限拒绝
         self._connected.add(port)
         return True
 
@@ -653,6 +657,221 @@ class TestManualDebugPortControl:
         assert "AT" in text and "+CSQ: 12,99" in text and "OK" in text
         # AT 和 +CSQ 不应黏在一行
         assert "AT+CSQ" not in text
+
+    def test_custom_baudrate_accepted(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """自定义波特率（非预设值）应被接受并传给 open_port，且加入下拉候选."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        widget.baud_combo.setEditText("512000")
+        assert widget._current_baud() == 512000  # noqa: SLF001
+
+        # 打开端口 → 自定义波特率传入
+        widget._toggle_connect()  # noqa: SLF001
+        assert widget._main.open_calls[-1] == ("COM1", 512000, "8N1")  # noqa: SLF001
+        # 自定义值应已加入下拉候选（数字项去重升序，末尾固定「自定义…」项）
+        items = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
+        assert "512000" in items
+        assert items[-1] == "自定义…"
+        nums = [int(x) for x in items[:-1]]
+        assert nums == sorted(set(nums))
+
+    def test_baudrate_non_numeric_rejected(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """非数字波特率 → 校验失败返回 None，且不打开端口."""
+        import PySide6.QtWidgets as _qw
+
+        warned: list[str] = []
+
+        def fake_warning(parent, title, text, *a, **k):  # noqa: ANN001
+            warned.append(text)
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", fake_warning)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        widget.baud_combo.setEditText("abc")
+        assert widget._current_baud() is None  # noqa: SLF001
+        assert warned  # 弹了提示
+
+        # toggle_connect 不应打开端口
+        open_before = len(widget._main.open_calls)  # noqa: SLF001
+        widget._toggle_connect()  # noqa: SLF001
+        assert len(widget._main.open_calls) == open_before  # noqa: SLF001
+
+    def test_baudrate_out_of_range_rejected(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """超范围波特率（0 / 过大）→ 校验失败返回 None."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        widget.baud_combo.setEditText("0")
+        assert widget._current_baud() is None  # noqa: SLF001
+        widget.baud_combo.setEditText("99999999")
+        assert widget._current_baud() is None  # noqa: SLF001
+
+    def test_remember_baud_no_duplicate(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """已存在的预设波特率不应重复加入候选."""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        before = widget.baud_combo.count()
+        widget._remember_baud(115200)  # noqa: SLF001  # 预设值已存在
+        assert widget.baud_combo.count() == before
+
+    def test_custom_label_item_present(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """下拉列表末尾应有固定「自定义…」触发项."""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        items = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
+        assert items[-1] == "自定义…"
+
+    def test_select_custom_item_opens_input_dialog(
+        self, qapp, monkeypatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """选「自定义…」→ 弹输入框 → 确认合法值 → 填入并记忆为候选."""
+        import PySide6.QtWidgets as _qw
+
+        getInt_calls: list[int] = []
+        monkeypatch.setattr(
+            _qw.QInputDialog, "getInt", lambda *a, **k: getInt_calls.append(1) or (768000, True)
+        )
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        # 切到「自定义…」项
+        custom_idx = widget.baud_combo.findText("自定义…")
+        assert custom_idx >= 0
+        widget.baud_combo.setCurrentIndex(custom_idx)
+
+        assert getInt_calls, "选「自定义…」应弹输入框"
+        assert widget.baud_combo.currentText() == "768000"
+        # 应已记忆为候选
+        items = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
+        assert "768000" in items
+        # 打开端口 → 用自定义值
+        widget._toggle_connect()  # noqa: SLF001
+        assert widget._main.open_calls[-1] == ("COM1", 768000, "8N1")  # noqa: SLF001
+
+    def test_select_custom_item_cancel_reverts(
+        self, qapp, monkeypatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """选「自定义…」→ 取消输入 → 回退到上一个有效波特率，不残留「自定义…」字样."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QInputDialog, "getInt", lambda *a, **k: (0, False))  # 取消
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        idx9600 = widget.baud_combo.findText("9600")
+        widget.baud_combo.setCurrentIndex(idx9600)  # 经信号更新 _last_valid_baud
+        custom_idx = widget.baud_combo.findText("自定义…")
+        widget.baud_combo.setCurrentIndex(custom_idx)
+
+        # 取消后应回退到 9600，不残留「自定义…」
+        assert widget.baud_combo.currentText() == "9600"
+
+    def test_open_port_failure_no_remember_no_subscribe(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """打开失败 → 不记忆波特率候选、不订阅 RX（HIGH1 修复回归）."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        main.fail_open = True  # open_port 返回 False
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget.baud_combo.setEditText("512000")
+
+        items_before = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
+        widget._toggle_connect()  # noqa: SLF001
+
+        # 失败：open_port 被调用过
+        assert ("COM1", 512000, "8N1") in main.open_calls
+        # 但 512000 不应被加入候选（成功才记忆）
+        items_after = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
+        assert items_before == items_after, "打开失败不应记忆波特率候选"
+        assert "512000" not in items_after
+        # 不应订阅 RX（无 observer 注册）
+        assert "COM1" not in main._rx_observers or not main._rx_observers["COM1"]  # noqa: SLF001
+        # 端口未连接
+        assert not main.is_port_connected("COM1")
+
+    def test_typed_valid_baud_preserved_on_custom_cancel(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """直接键入有效波特率后，选「自定义…」取消应保留键入值（MED3 修复回归）.
+
+        回归点：editable combo 键入只改 currentText 不改 currentIndex，原先
+        _last_valid_baud 不更新，取消时会回退到旧预设值、丢弃键入值。
+        """
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QInputDialog, "getInt", lambda *a, **k: (0, False))  # 取消
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        widget.baud_combo.setEditText("512000")  # 直接键入，不走下拉
+        # 触发一次 _current_baud 收口更新 _last_valid_baud
+        assert widget._current_baud() == 512000  # noqa: SLF001
+
+        custom_idx = widget.baud_combo.findText("自定义…")
+        widget.baud_combo.setCurrentIndex(custom_idx)  # 选自定义 → 取消
+
+        # 取消应回退到键入的 512000（而非旧预设 115200）
+        assert widget.baud_combo.currentText() == "512000"
+
+    def test_baud_index_changed_not_reentrant(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """选「自定义…」确认后，_on_baud_index_changed 不应被重复触发（MED4 修复回归）."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QInputDialog, "getInt", lambda *a, **k: (768000, True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        call_count = [0]
+        original = widget._on_baud_index_changed  # noqa: SLF001
+
+        def counting_slot(index: int) -> None:  # noqa: ANN001
+            call_count[0] += 1
+            original(index)
+
+        widget.baud_combo.currentIndexChanged.disconnect()
+        widget.baud_combo.currentIndexChanged.connect(counting_slot)
+
+        custom_idx = widget.baud_combo.findText("自定义…")
+        widget.baud_combo.setCurrentIndex(custom_idx)  # 选自定义 → 输入 768000 → 确认
+
+        # 选自定义触发 1 次；确认后的 setCurrentText 不应再额外触发（已被 blockSignals）
+        # 允许 1~2 次（Qt 内部可能有 1 次合理重入），但绝不应是 3+ 次失控重入
+        assert call_count[0] <= 2, f"_on_baud_index_changed 被触发 {call_count[0]} 次，疑似重入"
+        assert widget.baud_combo.currentText() == "768000"
 
 
 class TestManualDebugStripped:
@@ -1083,4 +1302,289 @@ class TestLibraryManagerDialogToolbar:
         assert input_called
         new_grp = dlg.tree.topLevelItem(0).child(0)
         assert any(new_grp.child(i).text(0) == "AT+CGMM" for i in range(new_grp.childCount()))
+
+    def test_add_keeps_position_by_selecting_new_node(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """添加命令后，新命令节点被选中（保持位置、不跳回顶端）.
+
+        回归点：之前 _refresh_tree() 重建后无选中态 + expandAll() 让滚动条重置顶端，
+        指令多时无法连续添加。现在新增项被 setCurrentItem 选中并居中滚动。
+        """
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGSN", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        first_proj = dlg.tree.topLevelItem(0)
+        first_grp = first_proj.child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        gnode = first_grp.data(0, _Qt.ItemDataRole.UserRole)  # noqa: SLF001
+
+        dlg._add_command_interactive(gnode[1], gnode[2])  # noqa: SLF001
+
+        # 重建后 currentItem 应为新加的命令节点（其 role 元组第四项为 "AT+CGSN"）
+        cur = dlg.tree.currentItem()
+        assert cur is not None
+        role = cur.data(0, _Qt.ItemDataRole.UserRole)
+        assert role == ("command", gnode[1], gnode[2], "AT+CGSN")
+
+    def test_add_group_keeps_position(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """添加功能组后，新功能组节点被选中并居中滚动到位."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("新功能组", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        lib = load_library(builtin_library_path())
+        dlg = LibraryManagerDialog(lib, builtin_library_path())
+        first_proj = dlg.tree.topLevelItem(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        proj_name = first_proj.data(0, _Qt.ItemDataRole.UserRole)[1]  # noqa: SLF001
+
+        dlg._add_group_interactive(proj_name)  # noqa: SLF001
+
+        cur = dlg.tree.currentItem()
+        assert cur is not None
+        role = cur.data(0, _Qt.ItemDataRole.UserRole)
+        assert role == ("group", proj_name, "新功能组")
+
+
+class TestCommandLibraryPanelContextMenu:
+    """发送界面（侧栏面板）：右键菜单 + 双击修改（改动即时落盘）."""
+
+    def test_context_menu_command_has_edit_delete(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """右键命令节点：菜单含「修改」「删除」两项."""
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        panel = CommandLibraryPanel()
+        first_cmd = panel.tree.topLevelItem(0).child(0).child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
+        assert node[0] == "command"  # 确认是命令叶子
+
+        # 收集菜单 action 文本
+        texts: list[str] = []
+        panel.tree.setCurrentItem(first_cmd)
+        menu_text = panel._collect_menu_texts(first_cmd)  # noqa: SLF001
+        texts.extend(menu_text)
+        assert any("修改" in t for t in texts), f"命令右键菜单应有「修改」: {texts}"
+        assert any("删除" in t for t in texts), f"命令右键菜单应有「删除」: {texts}"
+
+    def test_context_menu_project_has_rename_delete_add_group(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """右键项目节点：菜单含「重命名」「删除项目」「新增功能组」."""
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        panel = CommandLibraryPanel()
+        first_proj = panel.tree.topLevelItem(0)
+        texts = panel._collect_menu_texts(first_proj)  # noqa: SLF001
+        assert any("重命名" in t for t in texts), texts
+        assert any("删除" in t for t in texts), texts
+        assert any("新增功能组" in t for t in texts), texts
+
+    def test_double_click_command_edits_and_persists(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """双击命令 → 弹输入框改值 → 即时落盘到 YAML（reload 后能看到新值）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.widgets import command_library as cl_mod
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        # 用临时文件作为库路径（避免污染内置示例文件）
+        lib_file = tmp_path / "lib.yaml"
+        from atprobe.domain.quickcmd import default_library, dump_library
+
+        dump_library(default_library(), lib_file)
+        monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGMM_NEW", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        panel = CommandLibraryPanel()
+        first_cmd = panel.tree.topLevelItem(0).child(0).child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
+        proj, grp, old_cmd = node[1], node[2], node[3]
+
+        panel._on_double_click(first_cmd)  # noqa: SLF001
+
+        # 内存库已更新
+        new_grp = panel._library.find_group(proj, grp)  # noqa: SLF001
+        assert new_grp is not None
+        assert "AT+CGMM_NEW" in new_grp.commands
+        assert old_cmd not in new_grp.commands or old_cmd == "AT+CGMM_NEW"
+        # 已落盘到 YAML（reload 后仍能看到）
+        from atprobe.domain.quickcmd import load_library
+
+        disk_lib = load_library(lib_file)
+        disk_grp = disk_lib.find_group(proj, grp)
+        assert disk_grp is not None and "AT+CGMM_NEW" in disk_grp.commands
+
+    def test_delete_command_no_confirm(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """删除命令不弹确认（QMessageBox.question 不应被调用）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.widgets import command_library as cl_mod
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        lib_file = tmp_path / "lib.yaml"
+        from atprobe.domain.quickcmd import default_library, dump_library
+
+        dump_library(default_library(), lib_file)
+        monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
+
+        question_called: list[bool] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "question", lambda *a, **k: question_called.append(True) or _qw.QMessageBox.StandardButton.No
+        )
+
+        panel = CommandLibraryPanel()
+        first_cmd = panel.tree.topLevelItem(0).child(0).child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
+        proj, grp, cmd = node[1], node[2], node[3]
+
+        panel._delete_command(proj, grp, cmd)  # noqa: SLF001
+
+        assert not question_called, "删命令不应弹确认"
+        grp_obj = panel._library.find_group(proj, grp)  # noqa: SLF001
+        assert grp_obj is not None and cmd not in grp_obj.commands
+
+    def test_delete_project_confirms(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """删除项目弹确认：选 No 不删，选 Yes 删."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.widgets import command_library as cl_mod
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel
+
+        lib_file = tmp_path / "lib.yaml"
+        from atprobe.domain.quickcmd import default_library, dump_library
+
+        dump_library(default_library(), lib_file)
+        monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
+
+        # --- 选 No：不删 ---
+        monkeypatch.setattr(
+            _qw.QMessageBox, "question", lambda *a, **k: _qw.QMessageBox.StandardButton.No
+        )
+        panel = CommandLibraryPanel()
+        first_proj = panel.tree.topLevelItem(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        proj_name = first_proj.data(0, _Qt.ItemDataRole.UserRole)[1]
+        panel._delete_project(proj_name)  # noqa: SLF001
+        assert panel._library.find_project(proj_name) is not None  # noqa: SLF001  # 仍在
+
+        # --- 选 Yes：删 ---
+        monkeypatch.setattr(
+            _qw.QMessageBox, "question", lambda *a, **k: _qw.QMessageBox.StandardButton.Yes
+        )
+        panel2 = CommandLibraryPanel()
+        first_proj2 = panel2.tree.topLevelItem(0)
+        proj_name2 = first_proj2.data(0, _Qt.ItemDataRole.UserRole)[1]
+        panel2._delete_project(proj_name2)  # noqa: SLF001
+        assert panel2._library.find_project(proj_name2) is None  # noqa: SLF001  # 已删
+
+
+class TestLibraryManagerDialogNoFormPanel:
+    """添加界面（管理对话框）：去掉右侧表单，全靠双击 + 右键增删改."""
+
+    def test_form_panel_removed(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """右侧表单相关成员应已全部移除."""
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
+        for attr in ("_form_host", "_form_layout", "_on_tree_select", "_build_project_form"):
+            assert not hasattr(dlg, attr), f"右侧表单成员 {attr} 应已移除"
+
+    def test_double_click_command_edits(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """对话框双击命令 → 修改（工作副本，未落盘）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGSN_NEW", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
+        first_cmd = dlg.tree.topLevelItem(0).child(0).child(0)
+        from PySide6.QtCore import Qt as _Qt
+
+        node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
+        proj, grp = node[1], node[2]
+
+        dlg._on_double_click(first_cmd)  # noqa: SLF001
+
+        new_grp = dlg._library.find_group(proj, grp)  # noqa: SLF001
+        assert new_grp is not None and "AT+CGSN_NEW" in new_grp.commands
+
+    def test_context_menu_group_has_add_command(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """对话框右键功能组：菜单含「重命名」「新增命令」「删除功能组」."""
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
+        first_grp = dlg.tree.topLevelItem(0).child(0)
+        texts = dlg._collect_menu_texts(first_grp)  # noqa: SLF001
+        assert any("重命名" in t for t in texts), texts
+        assert any("新增命令" in t for t in texts), texts
+        assert any("删除" in t for t in texts), texts
+
+    def test_delete_project_confirms_in_dialog(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """对话框删除项目弹确认：选 Yes 删，选 No 不删."""
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtCore import Qt as _Qt
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+
+        # Yes → 删
+        monkeypatch.setattr(
+            _qw.QMessageBox, "question", lambda *a, **k: _qw.QMessageBox.StandardButton.Yes
+        )
+        dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
+        proj_name = dlg.tree.topLevelItem(0).data(0, _Qt.ItemDataRole.UserRole)[1]  # noqa: SLF001
+
+        dlg._delete_project(proj_name)  # noqa: SLF001
+        assert dlg._library.find_project(proj_name) is None  # noqa: SLF001
+
+    def test_embedded_add_button_click_adds_command(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """功能组节点内嵌的＋按钮：点击 → 弹输入框 → 加命令（覆盖 lambda 接线）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.quickcmd import builtin_library_path, load_library
+        from atprobe.gui.widgets.command_library import _NODE_ROLE, LibraryManagerDialog
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CBC", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+
+        dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
+        first_grp_item = dlg.tree.topLevelItem(0).child(0)
+        gnode = first_grp_item.data(0, _NODE_ROLE)
+        proj_name, grp_name = gnode[1], gnode[2]
+
+        # 取内嵌 widget 里的＋按钮（QToolButton）并点击
+        node_widget = dlg.tree.itemWidget(first_grp_item, 0)  # noqa: SLF001
+        assert node_widget is not None
+        add_btn = node_widget.findChild(_qw.QToolButton)
+        assert add_btn is not None, "功能组节点应有内嵌＋按钮"
+        add_btn.click()
+
+        # 命令已加入该功能组
+        grp = dlg._library.find_group(proj_name, grp_name)  # noqa: SLF001
+        assert grp is not None and "AT+CBC" in grp.commands
 
