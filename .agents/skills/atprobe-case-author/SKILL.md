@@ -33,7 +33,7 @@ examples/testcases/<功能块>/<功能块>-<指令>-<类型>-<变体>.yaml
 示例：
 ```
 TCP-TCPSEND-FUNC-NORMAL_SEND.yaml       # 数据发送的正常业务路径
-TCP-TCPSEND-PARA-OVER_LENGTH.yaml       # 长度越界 → CME 53
+TCP-XIIC-PARA-OVER_N.yaml               # XIIC 链路号越界 → CME 53
 TCP-RECVMODE-RESP-QUERY_FORMAT.yaml     # 查询响应字节格式
 TCP-CMDPARSE-FUNC-INVALID_NAME.yaml     # 功能块级：指令名拼错（CME 58）
 ```
