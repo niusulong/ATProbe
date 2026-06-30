@@ -199,10 +199,13 @@ Neoway 业务码（如 `+TCPSETUP: ERROR`、`+IPSTATUS: 0,DISCONNECT`、`+PDPSTA
 ## YAML 最小骨架
 
 ```yaml
-name: <用例名>
+# 文件名示例：TCP-RECVMODE-RESP-QUERY_FORMAT.yaml
+name: TCP-接收模式-查询响应格式(严格字节级)
 description: |
-  <场景前提 + 验证目标 + 探测依据（真实响应格式，第3步后回填）>
-tags: [<分类>, p0]
+  场景前提：N58 COM5，无卡无网场景，无需前置依赖。
+  验证目标：AT+RECVMODE? 响应的字节格式（冒号后空格数、字段结构）。
+  探测依据：（第3步运行后回填，如 \r\n+RECVMODE: 1,1\r\nOK\r\n）
+tags: [TCP, RECVMODE, RESP, p0]
 port: COM5    # 可选，仅日志标注；实际发送端口由配置文件 ports[0] 决定
 
 setup:
@@ -210,11 +213,11 @@ setup:
     assert: { matches: '^\r\nOK\r\n$' }
 
 steps:
-  - command: 'AT+CMD?'
+  - command: 'AT+RECVMODE?'
     extract:
-      val: '\+CMD:\s*(\d+)'
+      val: '\+RECVMODE:\s*(\d+)'
     assert:
-      - { name: 严格格式, matches: '^\r\n\+CMD: \d+\r\nOK\r\n$' }
+      - { name: 严格格式, matches: '^\r\n\+RECVMODE: \d+,\d+\r\nOK\r\n$' }
       - { name: 值在范围, var: val, op: in, values: ["0", "1"] }
 
 teardown:
@@ -225,5 +228,6 @@ teardown:
 
 ## 何时读 references
 
+- `references/testcase-matrix.md` —— **第 1、2 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
+- `references/yaml-schema.md` —— 第 2、4 步写用例时读取（完整 schema + 断言操作符表 + tags/description 强制三段约束）
 - `references/response-patterns.md` —— 第 4 步收紧断言时读取（Neoway 固件回码规律 + 严格正则速查）
-- `references/yaml-schema.md` —— 第 2、4 步写用例时读取（完整 schema + 断言操作符表）
