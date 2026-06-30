@@ -44,7 +44,7 @@ from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
-from atprobe.gui.widgets.text_render import split_lines_with_endings
+from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 from atprobe.infra.serial.config import Terminator
 
 if TYPE_CHECKING:
@@ -626,8 +626,8 @@ class ManualDebugWidget(QWidget):
         """主线程槽：按换行把 RX 字节拆成行渲染，未到换行的尾部留作缓冲.
 
         HEX 开关打开时，每行以十六进制展示（M1 §7.2）。
-        文本模式下，每行末尾的换行符转义成可见的 \\r\\n 文本，让用户直观看到
-        每行的实际换行构成——N58 回显行只有 \\r（吞掉 LF），响应行是完整 \\r\\n。
+        文本模式下按实际换行符显示：一个 \\n 换一行，连续 \\n 之间的空行保留，
+        忠实反映模块返回的换行结构（行尾 \\r 去除，避免回车错乱）。
         """
         if self.hex_check.isChecked():
             hex_line = " ".join(f"{b:02X}" for b in chunk)
@@ -638,12 +638,11 @@ class ManualDebugWidget(QWidget):
         text = chunk.decode("utf-8", errors="replace")
         self._rx_buffer.extend(text.encode("utf-8"))
         data = self._rx_buffer.decode("utf-8", errors="replace")
-        # 按换行切：完整的行立即渲染（行末换行符转义），最后一段（无换行）留作下次
+        # 按换行切：完整的行立即渲染（保留空行），最后一段（无换行）留作下次
         parts = data.split("\n")
         if len(parts) > 1:
-            # 前面 N-1 段都是完整行（以 \n 结尾），重组后交给切行函数转义
             complete = "\n".join(parts[:-1]) + "\n"
-            for line in split_lines_with_endings(complete):
+            for line in split_lines_preserving_blanks(complete):
                 self._append_line("RX", line, self._tokens["data.rx"])
         self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
 
@@ -673,7 +672,7 @@ class ManualDebugWidget(QWidget):
                 self._append_line("TX", hex_line, self._tokens["data.tx"])
             return
         text = chunk.decode("utf-8", errors="replace")
-        for line in split_lines_with_endings(text):
+        for line in split_lines_preserving_blanks(text):
             self._append_line("TX", line, self._tokens["data.tx"])
 
     # ------------------------------------------------------------------

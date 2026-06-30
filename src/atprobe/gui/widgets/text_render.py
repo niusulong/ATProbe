@@ -1,52 +1,41 @@
 """RX/TX 文本渲染共享工具。
 
-提供「按换行切行 + 行内 CR/LF 转义成可见文本」的逻辑，供手动调试页和监控页
-复用，确保两处文本模式行为一致。
+提供「按换行切行 + 保留空行」的逻辑，供手动调试页和监控页复用，
+确保两处文本模式行为一致。
 
-转义规则（非 HEX 文本模式）：
-    把不可见的 \\r / \\n 转义成可见的 \\r / \\n 文本，让用户直观看到每行的
-    实际换行符构成——N58 回显行只有 \\r（吞掉 LF），响应行是完整 \\r\\n，
-    转义后能清晰区分。
+渲染规则（非 HEX 文本模式）：
+    按实际换行符显示——一个 \\n 换一行，连续 \\n 之间的空行也保留，
+    忠实反映模块返回的换行结构。\\r 视为行尾回车（rstrip 去除，避免
+    光标回头造成显示错乱）。
 """
 
 from __future__ import annotations
 
 
-def escape_control_chars(s: str) -> str:
-    """把字符串里的 \\r / \\n 转义成可见的 \\r / \\n 文本.
+def split_lines_preserving_blanks(text: str) -> list[str]:
+    """按 \\n 切行，rstrip 行尾 \\r，保留空行（忠实反映换行符数量）.
+
+    与 text.split("\\n") + 过滤空行的区别：
+        - 保留空行（连续 \\n 之间的空行如实保留，一个 \\n 一行）
+        - 行尾的 \\r 去掉（\\r 是回车，\\n 才是换行；\\r\\n 作为单个换行）
+        - 末尾 split 产生的空串不返回（避免末尾 \\n 凭空多一个空行）
 
     例：
-        "AT\\r"        → "AT\\\\r"
-        "+CSQ: 1\\r\\n" → "+CSQ: 1\\\\r\\\\n"
-    其它控制字符保持原样（用 errors=replace 在上游已兜底）。
-    """
-    return s.replace("\r", "\\r").replace("\n", "\\n")
-
-
-def split_lines_with_endings(text: str) -> list[str]:
-    """按 \\n 切行，每行末尾的换行符转义成可见文本.
-
-    与单纯的 text.split("\\n") 区别：保留每行对应的换行符构成并转义显示，
-    便于用户看到「这行以 \\r 结束还是 \\r\\n」。
-
-    - 以 \\n 结尾的完整行：part 中残留的 \\r 转义为 \\\\r，再补 \\n 的可见形式 \\\\n
-    - 末尾无 \\n 的残留片段：其中的 \\r 也转义（不补 \\n）
-
-    跳过完全为空的行（split 产生的尾部空串），但保留含 \\r 的「空内容行」
-    （它是真实的换行，需转义显示）。
+        "A\\r\\n\\r\\nB\\r\\n" → ["A", "", "B"]  （A 和 B 之间保留一个空行）
+        "A\\r\\nB\\r\\n"       → ["A", "B"]
+        "AT\\r\\r\\nOK\\r\\n"  → ["AT", "OK"]    （回显的 \\r 被行尾 rstrip 去除）
     """
     parts = text.split("\n")
     lines: list[str] = []
     for i, part in enumerate(parts):
         is_last = i == len(parts) - 1
+        stripped = part.rstrip("\r")
         if is_last:
-            # 最后一段可能是不完整行（无 \\n），转义其中残留的 \\r
-            escaped = escape_control_chars(part)
-            if escaped:  # 跳过尾部空串
-                lines.append(escaped)
+            # 最后一段可能是不完整行（无 \\n）；仅当有内容时保留
+            # （纯空串是末尾 \\n 造成的，不返回）
+            if stripped:
+                lines.append(stripped)
         else:
-            # 完整行：part 末尾原本跟着 \\n（已被 split 消费），前面可能有 \\r
-            # 转义 part（含其中的 \\r），再补上 \\n 的可见形式
-            escaped = escape_control_chars(part) + "\\n"
-            lines.append(escaped)
+            # 完整行（以 \\n 结尾）：保留（含空行，忠实反映换行符数量）
+            lines.append(stripped)
     return lines
