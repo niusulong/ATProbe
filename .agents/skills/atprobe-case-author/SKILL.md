@@ -129,7 +129,7 @@ TCP-CMDPARSE-FUNC-INVALID_NAME.yaml     # 功能块级：指令名拼错（CME 5
 ### 3. 跑一次，拿真实响应
 
 ```bash
-uv run python -m atprobe run examples/testcases/<dir>/ --config examples/atprobe-<port>.yaml --log-level debug
+uv run python -m atprobe run examples/testcases/<功能块>/ --config examples/atprobe-<port>.yaml --log-level debug
 ```
 
 `--log-level debug` 会在每步打印真实响应文本（`resp:` 行，`\r\n` 转义为 `<CR><LF>` 便于核对字节格式）。
@@ -193,7 +193,7 @@ Neoway 业务码（如 `+TCPSETUP: ERROR`、`+IPSTATUS: 0,DISCONNECT`、`+PDPSTA
 
 ### suite 文件是索引不是可执行单元
 
-`suite-<dir>.yaml` 是文档索引，**不能** `run suite-xxx.yaml`（会报 `steps: Field required`）。
+`suite-<功能块>.yaml` 是文档索引，**不能** `run suite-xxx.yaml`（会报 `steps: Field required`）。
 运行方式是 `run <目录>`。目录扫描时框架会自动跳过 `suite-` 开头文件避免重复。
 
 ## YAML 最小骨架
