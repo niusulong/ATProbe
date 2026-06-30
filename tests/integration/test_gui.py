@@ -254,6 +254,74 @@ class TestMonitorLineRendering:
         assert "12,99OK" not in text
 
 
+class TestMonitorMemoryBounding:
+    """长会话内存治理：QTextEdit 块上限 + 定时器随订阅起停 + 关子页释放控件."""
+
+    def test_sub_view_has_block_limit(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """每个监控子页 view 的 QTextDocument 必须设了块上限（防长监控撑爆内存）."""
+        from atprobe.gui.tabs.monitor import _MAX_LINES, _PortSubView
+        from atprobe.gui.theme import get_tokens
+
+        sv = _PortSubView("COM5", get_tokens())
+        assert sv.view.document().maximumBlockCount() == _MAX_LINES
+
+    def test_block_limit_actually_trims(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """块上限真实生效：append 超过上限后旧块被丢弃（验证非空设值）."""
+        from atprobe.gui.tabs.monitor import _PortSubView
+        from atprobe.gui.theme import get_tokens
+
+        sv = _PortSubView("COM5", get_tokens())
+        cap = sv.view.document().maximumBlockCount()
+        assert cap > 0
+        for i in range(cap + 50):
+            sv.view.append(f"line{i}")
+        assert sv.view.document().blockCount() == cap
+        # 最旧块应被丢弃：line0 不再存在
+        assert "line0" not in sv.view.toPlainText()
+
+    def test_timer_not_started_at_construction(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """定时器在构造时不启动（随订阅起停；构造态不应空转）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        assert not widget._timer.isActive()  # noqa: SLF001
+
+    def test_toggle_stops_timer_and_keeps_data(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """停止监控：定时器停转，但已捕获数据仍保留（可回看/导出）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget._timer.start(200)  # noqa: SLF001
+        widget._on_data("COM5", "RX", b"hello\r\n")  # noqa: SLF001
+        widget._toggle(False)  # noqa: SLF001
+        assert not widget._timer.isActive()  # noqa: SLF001
+        # 数据仍保留：停止前已 flush（_toggle(False) 内冲刷残余 buffer）
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        assert "hello" in text
+
+    def test_close_sub_tab_schedules_widget_delete(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """关闭子页：子页从 _sub_views 移除且控件标记 deleteLater（待事件循环回收）.
+
+        反复加/减端口会累积悬挂控件，deleteLater 让其被回收，防长会话内存增长。
+        """
+        import shiboken6 as shiboken  # noqa: PLC0415
+        from PySide6.QtCore import QCoreApplication, QEvent
+
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        sv = widget._ensure_sub_view("COM5")  # noqa: SLF001
+        idx = widget._port_tabs.indexOf(sv)  # noqa: SLF001
+        widget._on_close_sub_tab(idx)  # noqa: SLF001
+        assert "COM5" not in widget._sub_views  # noqa: SLF001
+        # deleteLater 投递 DeferredDelete 事件到 sv；处理之使 C++ 对象回收
+        QCoreApplication.sendPostedEvents(sv, int(QEvent.Type.DeferredDelete))
+        assert not shiboken.isValid(sv)  # sv 的 C++ 对象已被回收
+
+
 class TestExecutionProgressTab:
     def test_event_flow_renders(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """B1：执行进度选项卡消费 CaseStart/Step/CaseResult/Finished 事件，更新表格与进度条."""
@@ -295,6 +363,25 @@ class TestExecutionProgressTab:
         # 完成
         widget.on_event(EngineFinishedEvent(summary=Summary(total_cases=2, passed=1, failed=1)))
         assert widget.progress_bar.value() == 100
+
+    def test_new_run_clears_previous_results(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """新运行首个用例（case_index==1）自动清空上一轮结果（防跨运行累积）."""
+        from atprobe.engine.interfaces import CaseStartEvent
+        from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ExecutionProgressWidget(TabBinding(type_name="execution_progress", params={}), object())  # type: ignore[arg-type]
+        # 第一轮：2 个用例
+        widget.on_event(CaseStartEvent(case_name="A", case_index=1, total_cases=2, case_type="regular"))
+        widget.on_event(CaseStartEvent(case_name="B", case_index=2, total_cases=2, case_type="regular"))
+        assert widget.table.rowCount() == 2
+
+        # 第二轮：case_index==1 应触发清空，只保留本轮首个用例
+        widget.on_event(CaseStartEvent(case_name="C", case_index=1, total_cases=1, case_type="regular"))
+        assert widget.table.rowCount() == 1
+        assert widget.table.item(0, 1).text() == "C"  # type: ignore[union-attr]
+        # 上一轮映射表也清空，仅本轮首行
+        assert widget._case_names == {1: "C"}  # noqa: SLF001
 
 
 class TestEnvConfigTab:

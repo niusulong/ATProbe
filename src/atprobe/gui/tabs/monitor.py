@@ -64,6 +64,11 @@ class _PortSubView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.view = QTextEdit()
         self.view.setReadOnly(True)
+        # 块上限：Qt 在 C++ 层自动丢弃最旧块，保证 QTextDocument 有界
+        # （与 deque 的 _MAX_LINES 一致，实现文件 docstring 声明的"环形缓冲"意图）。
+        # 注意 setMaximumBlockCount 是 QTextDocument 的方法（非 QTextEdit），对 QTextEdit
+        # 需经 document() 设置；这是富文本控件唯一原生的滚动上限机制。
+        self.view.document().setMaximumBlockCount(_MAX_LINES)
         layout.addWidget(self.view)
 
     def feed(self, direction: str, ts: str, data: bytes, hex_mode: bool) -> None:
@@ -141,10 +146,11 @@ class MonitorWidget(QWidget):
         self._port_checks: list[QCheckBox] = []
         self._sub_views: dict[str, _PortSubView] = {}  # port -> 子页
         self._init_ui()
-        # 定时刷新显示（节流，避免每字节刷新卡顿）；单 timer 遍历所有子页 flush
+        # 定时刷新显示（节流，避免每字节刷新卡顿）；单 timer 遍历所有子页 flush。
+        # 生命周期对齐"监控中"：随订阅起停，不监控时停止空转（P0 资源正确释放）。
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._flush_all)
-        self._timer.start(200)
+        # 不在构造时 start —— 见 _toggle
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -239,12 +245,15 @@ class MonitorWidget(QWidget):
     def _on_close_sub_tab(self, idx: int) -> None:
         """用户关闭某端口子页：移除子页（历史数据清除）。不影响监控订阅状态。"""
         w = self._port_tabs.widget(idx)
-        if w is self._empty_hint:
-            return  # 占位页不允许关
+        if w is None or w is self._empty_hint:
+            return  # 无效索引或占位页不允许关
         port = getattr(w, "port", None)
         self._port_tabs.removeTab(idx)
         if port and port in self._sub_views:
             del self._sub_views[port]
+        # removeTab 仅摘标签不销毁 widget；显式释放，避免长会话反复加/减端口累积悬挂控件
+        # （与 _refresh_port_checks 重建勾选行时的销毁模式一致）
+        w.deleteLater()
         # 若无子页了，恢复占位提示
         if not self._sub_views and self._port_tabs.indexOf(self._empty_hint) < 0:
             self._port_tabs.addTab(self._empty_hint, "—")
@@ -280,10 +289,15 @@ class MonitorWidget(QWidget):
             self.subscribe_btn.setText("停止监控")
             if hasattr(self._main, "subscribe_monitor"):
                 self._main.subscribe_monitor(self._selected_ports(), self._on_data)
+            # 订阅成功后启动刷新定时器（与订阅生命周期绑定）
+            self._timer.start(200)
         else:
             self.subscribe_btn.setText("开始监控")
             if hasattr(self._main, "unsubscribe_monitor"):
                 self._main.unsubscribe_monitor()
+            # 停止监控：冲刷残余 buffer（保留已捕获数据供回看/导出），再停定时器避免空转
+            self._flush_all()
+            self._timer.stop()
 
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
         from datetime import datetime

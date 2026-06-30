@@ -279,6 +279,10 @@ class ManualDebugWidget(QWidget):
 
         self.response_view = QTextEdit()
         self.response_view.setReadOnly(True)
+        # 块上限：Qt 在 C++ 层自动丢弃最旧块（§10.3，防止长会话撑爆内存）。
+        # 取代逐行 cursor 手术裁剪 —— 框架机制更快且无需在每次追加时动文档。
+        # setMaximumBlockCount 是 QTextDocument 的方法，对富文本 QTextEdit 经 document() 设置。
+        self.response_view.document().setMaximumBlockCount(_MAX_RESPONSE_LINES)
         # 在 response_view 定义之后再连接，避免 mypy 无法推断 lambda 内属性类型
         clear_resp_btn.clicked.connect(self.response_view.clear)  # type: ignore[attr-defined]
         resp_layout.addWidget(self.response_view, 1)
@@ -810,14 +814,7 @@ class ManualDebugWidget(QWidget):
             f'<span style="color:{color};">{safe}</span>'
             f'</div>'
         )
-        # 环形缓冲：超过行数上限丢弃旧行（§10.3，防止长会话撑爆内存）
-        doc = self.response_view.document()
-        if doc.blockCount() > _MAX_RESPONSE_LINES:
-            cursor = self.response_view.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor)
-            cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
+        # 行数上限由构造时 setMaximumBlockCount 兜底（见 _init_ui），此处无需手卷裁剪。
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         """页面关闭：撤销 RX 订阅 + 取消进行中的文件发送，避免悬挂线程。"""

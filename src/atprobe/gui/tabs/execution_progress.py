@@ -138,6 +138,10 @@ class ExecutionProgressWidget(QWidget):
         from atprobe.engine.interfaces import CaseStartEvent
 
         assert isinstance(ev, CaseStartEvent)
+        # 新运行首个用例（scheduler 每次 start 从 1 计数）：先清空上一轮显示状态，
+        # 避免跨运行累积（视图自管显示状态，SRP；复用既有 in-band 信号不新增事件类型）。
+        if ev.case_index == 1:
+            self.clear()
         self._total_cases = max(self._total_cases, ev.total_cases)
         row = self.table.rowCount()
         self._case_rows[ev.case_index] = row
