@@ -48,9 +48,13 @@ TCP-TCPSEND-FUNC-NOLINK.yaml            # 合法长度但未建链 → +TCPSEND:
 TCP-TCPSEND-FUNC-LENGTH_OVER.yaml       # 长度超限 → +TCPSEND: DATA LENGTH ERROR（业务码，非 CME）
 ```
 
-> **重要区分（实测结论）**：TCPSEND 的"长度超限"返回的是**业务码** `+TCPSEND: DATA LENGTH ERROR`（带 timeout），**不是** CME 53。这是发送动作的业务失败，归 FUNC。而链路号越界（如 `AT+IPSTATUS=6`、`AT+TCPACK=6`）才返回 CME 53，归 PARA。**不要假设所有越界都走 CME——动作指令的越界常表现为业务码**，须以实测为准。
+> **重要区分（规律提示）**：动作指令的"参数越界"常表现为**业务码**而非 CME。例如 TCPSEND 的"长度超限"
+> 通常返回业务码 `+TCPSEND: DATA LENGTH ERROR`（归 FUNC），而链路号越界（如 `AT+IPSTATUS=6`、
+> `AT+TCPACK=6`）才返回 CME 53（归 PARA）。**不要假设所有越界都走 CME**。具体某指令越界走业务码还是 CME，
+> **以文档描述为准**；文档不明时问用户。
 
-> 动作指令（如 TCPSEND）的 PARA 类在无网环境下难以干净验证（参数合法但因无链路直接业务失败）。这类指令的 PARA 验证价值低于纯设置指令（如 TCPKEEPALIVE）。
+> 动作指令（如 TCPSEND）的 PARA 类验证价值低于纯设置指令（如 TCPKEEPALIVE）——动作指令的参数合法性往往
+> 在实际动作时才体现，难以独立于业务路径单独验证。
 
 ## 功能块级通用用例
 
