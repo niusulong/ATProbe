@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import MONO_FONT, get_tokens
-from atprobe.gui.widgets.text_render import split_lines_with_endings
+from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 
 _MAX_LINES = 10000  # 环形缓冲上限（§10.3）
 
@@ -70,8 +70,8 @@ class _PortSubView(QWidget):
         """喂入一个原始字节 chunk，按行切分后入 buffer.
 
         - HEX 模式：整个 chunk 转十六进制一行显示（不跨 chunk 累积，与 manual_debug 一致）。
-        - 文本模式：累积到 _line_buffer，按 \\n 切分；完整行入 buffer（行末换行符转义
-          成可见 \\r\\n），末尾未换行的片段留在缓冲等下次 chunk。
+        - 文本模式：累积到 _line_buffer，按 \\n 切分；完整行入 buffer（保留空行，
+          忠实反映换行符数量），末尾未换行的片段留在缓冲等下次 chunk。
         """
         if hex_mode:
             hex_line = " ".join(f"{b:02X}" for b in data)
@@ -84,7 +84,7 @@ class _PortSubView(QWidget):
         # 前面所有是完整行（以 \n 结尾），最后一段可能未到换行 → 留缓冲
         if len(parts) > 1:
             complete = "\n".join(parts[:-1]) + "\n"
-            for line in split_lines_with_endings(complete):
+            for line in split_lines_preserving_blanks(complete):
                 self.buffer.append((direction, ts, line))
         self._line_buffer = parts[-1]
 

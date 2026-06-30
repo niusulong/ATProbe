@@ -232,24 +232,26 @@ class TestMonitorLineRendering:
         text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
         assert "41 54" in text and "4F 4B" in text  # HEX 完整显示
 
-    def test_text_mode_escapes_line_endings(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """文本模式下，行末换行符转义成可见的 \\r\\n 文本.
+    def test_text_mode_clean_newline_preserves_blanks(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """文本模式：按实际换行显示，保留空行，不显示转义字符.
 
-        N58 真实回包 b'AT\\r\\r\\n+CSQ: 12,99\\r\\nOK\\r\\n'（回显行只有 \\r，
-        响应行完整 \\r\\n）。转义后用户能直观看到每行的换行构成。
+        N58 真实回包 b'+CSQ: 12,99\\r\\n\\r\\nOK\\r\\n'（响应与 OK 间有空行）。
+        一个 \\r\\n 一行，两个之间保留空行；不出现 \\r / \\n 字样。
         """
         from atprobe.gui.tabs.monitor import MonitorWidget
         from atprobe.gui.tabs.registry import TabBinding
 
         widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
-        widget._on_data("COM5", "RX", b"AT\r\r\n+CSQ: 12,99\r\nOK\r\n")  # noqa: SLF001
+        widget._on_data("COM5", "RX", b"+CSQ: 12,99\r\n\r\nOK\r\n")  # noqa: SLF001
         widget._flush_all()  # noqa: SLF001
 
         text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
-        # 响应行末应出现可见的 \r\n 文本（转义后的反斜杠+r+反斜杠+n）
-        assert r"\r\n" in text, f"响应行末应转义显示 \\r\\n: {text!r}"
-        # 回显行 AT 后应能看到 \r（N58 吞掉 LF，回显只有 CR）
-        assert "AT\\r" in text, f"回显行 AT 后应转义显示 \\r: {text!r}"
+        # 不应出现转义字样
+        assert r"\r" not in text, f"文本模式不应显示 \\r 转义: {text!r}"
+        assert r"\n" not in text, f"文本模式不应显示 \\n 转义: {text!r}"
+        # 内容各自独立成行
+        assert "+CSQ: 12,99" in text and "OK" in text
+        assert "12,99OK" not in text
 
 
 class TestExecutionProgressTab:
@@ -628,10 +630,11 @@ class TestManualDebugPortControl:
         widget._toggle_connect()  # noqa: SLF001
         assert widget._rx_handle is None  # noqa: SLF001
 
-    def test_rx_text_mode_escapes_line_endings(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """文本模式下，RX 行末换行符转义成可见 \\r\\n 文本（与监控页一致）.
+    def test_rx_text_mode_clean_newline_no_escape(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """文本模式：按实际换行显示，干净换行不显示转义字符，保留空行.
 
-        N58 真实回包 b'AT\\r\\r\\n+CSQ: 12,99\\r\\nOK\\r\\n'。
+        N58 真实回包 b'AT\\r\\r\\n+CSQ: 12,99\\r\\n\\r\\nOK\\r\\n'（响应与 OK 间有空行）。
+        每个换行符对应一行，空行保留；不出现任何 \\r / \\n 字样。
         """
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
@@ -641,10 +644,15 @@ class TestManualDebugPortControl:
         widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
         widget._toggle_connect()  # noqa: SLF001
 
-        main.emit_rx("COM1", b"AT\r\r\n+CSQ: 12,99\r\nOK\r\n")
+        main.emit_rx("COM1", b"AT\r\r\n+CSQ: 12,99\r\n\r\nOK\r\n")
         text = widget.response_view.toPlainText()
-        assert r"\r\n" in text, f"响应行末应转义显示 \\r\\n: {text!r}"
-        assert "AT\\r" in text, f"回显行 AT 后应转义显示 \\r: {text!r}"
+        # 不应出现转义字样
+        assert r"\r" not in text, f"文本模式不应显示 \\r 转义: {text!r}"
+        assert r"\n" not in text, f"文本模式不应显示 \\n 转义: {text!r}"
+        # 内容应各自独立成行
+        assert "AT" in text and "+CSQ: 12,99" in text and "OK" in text
+        # AT 和 +CSQ 不应黏在一行
+        assert "AT+CSQ" not in text
 
 
 class TestManualDebugStripped:
