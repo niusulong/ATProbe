@@ -99,14 +99,19 @@ AT 指令按 3GPP 有 4 种形态。**读文档看该指令支持哪些形态，
 
 两条线不冲突，各自独立成文件。
 
-### 5.1 完整示例：TCPSEND 指令的文件集
+### 5.1 代表性示例：TCPSEND 指令的文件集（节选）
+
+TCPSEND 是带参数的动作指令，按矩阵需有 PARA 全套 + FUNC-NORMAL_&lt;动作&gt; + FUNC-NOLINK。下面是代表性文件（PARA 行因参数组合多而节选）：
 
 ```
-TCP-TCPSEND-PARA-VALID_LENGTH.yaml      # 合法长度 → OK
-TCP-TCPSEND-PARA-OVER_LENGTH.yaml       # 4097 → CME 53
 TCP-TCPSEND-FUNC-NORMAL_SEND.yaml       # 实际发送成功（description 注明需注网）
-TCP-TCPSEND-FUNC-NOLINK.yaml            # 未建链 → +TCPSEND: SOCKET ID OPEN FAILED
+TCP-TCPSEND-FUNC-NOLINK.yaml            # 合法长度但未建链 → +TCPSEND: SOCKET ID OPEN FAILED
+TCP-TCPSEND-FUNC-LENGTH_OVER.yaml       # 长度超限 → +TCPSEND: DATA LENGTH ERROR（业务码，非 CME）
 ```
+
+> **重要区分（实测结论）**：TCPSEND 的"长度超限"返回的是**业务码** `+TCPSEND: DATA LENGTH ERROR`（带 timeout），**不是** CME 53。这是发送动作的业务失败，归 FUNC。而链路号越界（如 `AT+IPSTATUS=6`、`AT+TCPACK=6`）才返回 CME 53，归 PARA。**不要假设所有越界都走 CME——动作指令的越界常表现为业务码**，须以实测为准。
+
+> 动作指令（如 TCPSEND）的 PARA 类在无网环境下难以干净验证（参数合法但因无链路直接业务失败）。这类指令的 PARA 验证价值低于纯设置指令（如 TCPKEEPALIVE）。纯设置指令的 PARA 示例见 §6.1 目录树中的 `TCP-NETAPN-PARA-*` / `TCP-XIIC-PARA-*`。
 
 ## 6. 目录结构与 suite 索引
 

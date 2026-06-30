@@ -26,8 +26,9 @@
 
 ## 类型设计依据
 
-- **PARAM 与 BND 合并为 PARA**：参数校验与边界针对同一组设置类指令，只是断言期望不同（OK vs CME）。合并后集中在同一类型下便于整体查漏，变体名（`VALID_*` / `OVER_*` / `WRONG_FORMAT_*`）已显式标注 success/fail。
+- **参数校验与边界合并为单一 PARA 类型**：参数校验（合法值→OK）与边界测试（越界→CME）针对同一组设置类指令，只是断言期望不同。合并后集中在同一类型下便于整体查漏，变体名（`VALID_*` / `OVER_*` / `WRONG_FORMAT_*`）已显式标注 success/fail。
 - **业务失败路径归 FUNC**：指令自身前提不满足（如 TCPSEND 未建链）属该指令正常行为范畴，不另设错误类。业务码（`+TCPSEND: ERROR`）与 CME 错误码（参数越界）走不同类型，语义清晰。
+- **NOLINK 与 PRECONDITION_FAIL 的区分**：两者都属 FUNC 的业务失败路径。`FUNC-NOLINK` 用于依赖链路的指令（如 TCPSEND/TCPCLOSE，未建链时失败）；`FUNC-PRECONDITION_FAIL` 用于不依赖链路的执行命令（其他前提不满足）。具体用哪个取决于指令是否涉及链路。
 
 ## 跨类型说明：带参数的动作指令
 
@@ -37,16 +38,19 @@
 
 两条线不冲突。
 
-## 完整示例：TCPSEND 指令的文件集
+## 代表性示例：TCPSEND 指令的文件集（节选）
 
-TCPSEND 支持设置形态 `=<linkid>,<length>` 且是动作指令，套矩阵：
+TCPSEND 是带参数的动作指令，按矩阵需有 PARA 全套 + FUNC-NORMAL_<动作> + FUNC-NOLINK。下面是代表性文件（PARA 行因参数组合多而节选）：
 
 ```
-TCP-TCPSEND-PARA-VALID_LENGTH.yaml      # 合法长度 → OK
-TCP-TCPSEND-PARA-OVER_LENGTH.yaml       # 4097 → CME 53
 TCP-TCPSEND-FUNC-NORMAL_SEND.yaml       # 实际发送成功（description 注明需注网）
-TCP-TCPSEND-FUNC-NOLINK.yaml            # 未建链 → +TCPSEND: SOCKET ID OPEN FAILED
+TCP-TCPSEND-FUNC-NOLINK.yaml            # 合法长度但未建链 → +TCPSEND: SOCKET ID OPEN FAILED
+TCP-TCPSEND-FUNC-LENGTH_OVER.yaml       # 长度超限 → +TCPSEND: DATA LENGTH ERROR（业务码，非 CME）
 ```
+
+> **重要区分（实测结论）**：TCPSEND 的"长度超限"返回的是**业务码** `+TCPSEND: DATA LENGTH ERROR`（带 timeout），**不是** CME 53。这是发送动作的业务失败，归 FUNC。而链路号越界（如 `AT+IPSTATUS=6`、`AT+TCPACK=6`）才返回 CME 53，归 PARA。**不要假设所有越界都走 CME——动作指令的越界常表现为业务码**，须以实测为准。
+
+> 动作指令（如 TCPSEND）的 PARA 类在无网环境下难以干净验证（参数合法但因无链路直接业务失败）。这类指令的 PARA 验证价值低于纯设置指令（如 TCPKEEPALIVE）。
 
 ## 功能块级通用用例
 
