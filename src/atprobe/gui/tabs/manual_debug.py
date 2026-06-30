@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
@@ -55,6 +56,10 @@ if TYPE_CHECKING:
 
 # 常见波特率（可编辑输入自定义值）
 _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
+# 自定义波特率上限（覆盖常见 USB-串口芯片支持的最高值，如 FTDI/CH340）
+_MAX_BAUDRATE = 4_000_000
+# 下拉末尾固定项：选中后弹输入框让用户填自定义波特率
+_CUSTOM_BAUD_LABEL = "自定义…"
 # 常见帧格式（3 字符紧凑写法）
 _FRAMES = ["8N1", "8N2", "8E1", "8O1", "7E1", "7O1"]
 
@@ -93,6 +98,8 @@ class ManualDebugWidget(QWidget):
         self._rx_handle: object | None = None
         # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染
         self._rx_buffer = bytearray()
+        # 上一个有效波特率（选「自定义…」取消输入时回退到此值）
+        self._last_valid_baud: int = 115200
         self._init_ui()
         # RX 字节在串口读线程到达 → 信号切主线程 → 渲染
         self.rx_received.connect(self._on_rx_bytes)
@@ -126,7 +133,7 @@ class ManualDebugWidget(QWidget):
 
         self.port_combo = QComboBox()
         self.port_combo.setMinimumWidth(140)
-        port_layout.addWidget(self.port_combo, 1)
+        port_layout.addWidget(self.port_combo)
 
         refresh_btn = QPushButton("刷新")
         refresh_btn.clicked.connect(self._refresh_ports)
@@ -136,15 +143,21 @@ class ManualDebugWidget(QWidget):
         self.baud_combo = QComboBox()
         self.baud_combo.setEditable(True)
         self.baud_combo.addItems(_BAUDRATES)
-        self.baud_combo.setCurrentText("115200")
-        self.baud_combo.setMaximumWidth(90)
+        self.baud_combo.addItem(_CUSTOM_BAUD_LABEL)  # 末尾固定项：触发自定义输入
+        # 用 setCurrentIndex（而非 setCurrentText）设默认值：editable combo 的
+        # setCurrentText 只改 lineEdit 文本、不更新 currentIndex，会导致后续
+        # currentIndexChanged 信号判断失准。先设 index 再连信号，避免构造期误触发。
+        self.baud_combo.setCurrentIndex(_BAUDRATES.index("115200"))
+        self.baud_combo.currentIndexChanged.connect(self._on_baud_index_changed)
+        # 显式宽度：容纳最长项 921600（6 位，14px 下约 72px）+ padding 20 + 下拉箭头 22，
+        # 留余量防字体回退/DPR 缩放导致砍首位（AdjustToContents 在 editable 模式计算不可靠）
+        self.baud_combo.setMinimumWidth(120)
         port_layout.addWidget(self.baud_combo)
 
         port_layout.addWidget(self._caption_label("帧格式"))
         self.frame_combo = QComboBox()
         self.frame_combo.addItems(_FRAMES)
         self.frame_combo.setCurrentText("8N1")
-        self.frame_combo.setMaximumWidth(70)
         port_layout.addWidget(self.frame_combo)
 
         # 打开/关闭端口按钮（toggle 语义，文案与图标随连接状态切换）
@@ -154,6 +167,7 @@ class ManualDebugWidget(QWidget):
         self.connect_btn.setIcon(self._action_icon("connect"))
         self.connect_btn.clicked.connect(self._toggle_connect)
         port_layout.addWidget(self.connect_btn)
+        port_layout.addStretch()  # 多余空间留到末尾，避免端口框/按钮被拉宽
 
         layout.addWidget(port_group)
         self._refresh_ports()
@@ -334,20 +348,101 @@ class ManualDebugWidget(QWidget):
                 self._main.close_port(port)
         else:
             # 当前未连接 → 打开（带波特率/帧格式）
+            baud = self._current_baud()
+            if baud is None:
+                return  # 波特率校验失败（已弹提示），放弃打开
             open_port = getattr(self._main, "open_port", None)
             if not callable(open_port):
                 self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
                 return
-            open_port(port, self._current_baud(), self.frame_combo.currentText())
-            # 打开成功后建立 RX 订阅（纯流式接收）
+            ok = open_port(port, baud, self.frame_combo.currentText())
+            # 打开失败（被占用/权限/参数错，open_port 已弹错误框）→ 不记忆、不订阅。
+            # 显式判 False：兼容返回 None 的旧实现（视为成功，不误杀）。
+            if ok is False:
+                self._refresh_ports()
+                return
+            # 成功：记忆自定义波特率候选 + 建立 RX 订阅（纯流式接收）
+            self._remember_baud(baud)
             self._attach_rx(port)
         self._refresh_ports()
 
-    def _current_baud(self) -> int:
+    def _on_baud_index_changed(self, index: int) -> None:
+        """下拉项变更：选中「自定义…」→ 弹输入框；选中预设值 → 仅记录最近有效值.
+
+        「自定义…」是固定触发项，确认输入合法后把值填回 currentText 并记忆为候选；
+        取消或非法则回退到 _last_valid_baud，避免残留「自定义…」字样导致打开失败。
+        _last_valid_baud 的权威更新统一收口在 _current_baud（toggle 时），
+        此处仅在选预设值时做轻量同步（下拉是主交互路径）。
+        所有 setCurrentText 都包在 blockSignals 内，避免重入本槽二次触发信号。
+        """
+        text = self.baud_combo.itemText(index) if index >= 0 else ""
+        if text != _CUSTOM_BAUD_LABEL:
+            if text.isdigit():
+                self._last_valid_baud = int(text)
+            return
+        value, ok = QInputDialog.getInt(
+            self,
+            "自定义波特率",
+            f"输入波特率（1 ~ {_MAX_BAUDRATE}）:",
+            self._last_valid_baud,
+            1,
+            _MAX_BAUDRATE,
+        )
+        if ok:
+            self._last_valid_baud = value
+            target = str(value)
+            # 记忆候选（内部已 blockSignals 重建）；落地的 setCurrentText 也包进
+            # blockSignals，否则会再次触发 currentIndexChanged 造成重入。
+            self.baud_combo.blockSignals(True)
+            self._remember_baud(value)
+            self.baud_combo.setCurrentText(target)
+            self.baud_combo.blockSignals(False)
+        else:
+            # 取消 → 回退到最近有效值，不残留「自定义…」（同样防重入）
+            self.baud_combo.blockSignals(True)
+            self.baud_combo.setCurrentText(str(self._last_valid_baud))
+            self.baud_combo.blockSignals(False)
+
+    def _current_baud(self) -> int | None:
+        """解析当前波特率输入（支持自定义），返回 int 或校验失败返回 None.
+
+        校验：必须为纯整数、且在 1 ~ 4_000_000（覆盖常见 USB-串口芯片上限）。
+        非法时不静默回落，而是弹提示返回 None，让调用方放弃打开端口。
+        """
+        raw = self.baud_combo.currentText().strip()
         try:
-            return int(self.baud_combo.currentText().strip())
+            baud = int(raw)
         except ValueError:
-            return 115200
+            QMessageBox.warning(self, "波特率无效", f"波特率必须为整数，当前输入：{raw!r}")
+            return None
+        if baud < 1 or baud > _MAX_BAUDRATE:
+            QMessageBox.warning(
+                self, "波特率无效", f"波特率需在 1 ~ {_MAX_BAUDRATE} 之间，当前：{baud}"
+            )
+            return None
+        # 有效值收口：无论来源（下拉/键盘/自定义输入框），都同步为最近有效值，
+        # 供「自定义…」取消输入时回退（避免丢弃用户键入的有效值）。
+        self._last_valid_baud = baud
+        return baud
+
+    def _remember_baud(self, baud: int) -> None:
+        """把使用过的自定义波特率加入下拉候选（去重、按数值升序）.
+
+        仅在本会话生效（不持久化）；让用户下次能直接从下拉选到，不必重输。
+        重建后末尾保留「自定义…」固定项。
+        """
+        items = [self.baud_combo.itemText(i) for i in range(self.baud_combo.count())]
+        text = str(baud)
+        if text in items:
+            return  # 已在候选中
+        values = sorted({int(x) for x in items if x.isdigit()} | {baud})
+        cur = self.baud_combo.currentText()
+        self.baud_combo.blockSignals(True)
+        self.baud_combo.clear()
+        self.baud_combo.addItems([str(v) for v in values])
+        self.baud_combo.addItem(_CUSTOM_BAUD_LABEL)
+        self.baud_combo.setCurrentText(cur)
+        self.baud_combo.blockSignals(False)
 
     def _sync_connect_state(self) -> None:
         """根据当前端口连接状态切换按钮文案/图标与参数控件可用性."""
