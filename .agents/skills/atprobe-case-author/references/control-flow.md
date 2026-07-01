@@ -136,7 +136,7 @@ steps:
 |---|---|---|---|
 | `when` | ✅（条件不满足则跳过该 setup 步骤） | ✅ | ❌（仅 teardown 不支持） |
 | `retry` | ✅ | ✅ | ✅（失败仅记警告，retry 耗尽也不影响用例结果） |
-| `poll` | ❌ | ✅ | ❌ |
+| `poll` | ✅（setup 中较少用） | ✅ | ❌ |
 | `on_failure` | ❌（setup 失败一律跳过整个用例） | ✅ | ❌（teardown 失败仅记警告） |
 
 - setup 任一步骤失败（含 retry 耗尽）→ 跳过整个用例（标记"跳过"非"失败"），但 teardown 仍执行。
