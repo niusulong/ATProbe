@@ -167,6 +167,24 @@ class Engine:
                             duration_ms=cr.duration_ms, error_msg=cr.error_msg,
                         )
                     )
+
+            # 套件级后置（REQ-M2 §12.2）：cases 循环后执行一次（在 finally 关闭端口之前，
+            # 确保 teardown 命令发往仍打开的端口）。无条件执行，失败仅记警告
+            # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
+            # cancel=None（不响应取消）；StepResult 仅用于日志/事件，不进 aggregate。
+            suite_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+            for i, step in enumerate(config.suite_teardown, start=1):
+                try:
+                    r = execute_step(
+                        step, index=i, phase="suite_teardown", ctx=suite_ctx,
+                        sender=sender, default_port=default_port,
+                        step_timeout_default=config.step_timeout_default,
+                        clock=self._clock, sleep=self._sleep, cancel=None,
+                        is_teardown=True,
+                    )
+                    self._emit_step(handler, r)
+                except Exception:  # noqa: BLE001 - suite_teardown 失败仅记录，不影响结果
+                    pass
         finally:
             # 只关闭本次执行新打开的端口（外部已连接的端口保持不动，
             # 避免破坏 GUI 监控/手动调试的连接与订阅状态）
@@ -178,23 +196,6 @@ class Engine:
             # 停止原始日志记录器，确保缓冲落盘（仅 Engine 自建的才停，外部注入的由外部管理）
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
-
-        # 套件级后置（REQ-M2 §12.2）：cases 循环后执行一次。无条件执行，失败仅记警告
-        # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
-        # cancel=None（不响应取消）；StepResult 仅用于日志/事件，不进 aggregate。
-        suite_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
-        for i, step in enumerate(config.suite_teardown, start=1):
-            try:
-                r = execute_step(
-                    step, index=i, phase="suite_teardown", ctx=suite_ctx,
-                    sender=sender, default_port=default_port,
-                    step_timeout_default=config.step_timeout_default,
-                    clock=self._clock, sleep=self._sleep, cancel=None,
-                    is_teardown=True,
-                )
-                self._emit_step(handler, r)
-            except Exception:  # noqa: BLE001 - suite_teardown 失败仅记录，不影响结果
-                pass
 
         summary = aggregate(case_results)
         env_snap = self._env_snapshot(config)
