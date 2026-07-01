@@ -189,13 +189,16 @@ class SerialConnection:
     def close(self) -> None:
         self._stop_event.set()
         self._connected = False
+        # 先让读线程退出（serial.read 有 100ms 超时，最多等 ~100ms 它会看到 stop_event），
+        # 再关闭 serial——避免读线程阻塞在 read 中时底层 overlapped 结构被释放，
+        # 引发 "byref() argument must be NoneType" 的 TypeError（Windows pyserial）。
+        if self._read_thread is not None and self._read_thread is not threading.current_thread():
+            self._read_thread.join(timeout=2.0)
         if self._serial is not None:
             try:
                 self._serial.close()  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001 - 关闭容错
                 pass
-        if self._read_thread is not None and self._read_thread is not threading.current_thread():
-            self._read_thread.join(timeout=2.0)
         self._read_thread = None
 
     @property
@@ -298,10 +301,21 @@ class SerialConnection:
                     break
                 chunk = self._serial.read(256)  # type: ignore[union-attr]
             except (SerialException, OSError):
-                # 断连
+                # 断连：退避后再重试，避免 read 立即抛错导致的忙循环（100% CPU 空转）
                 self._handle_disconnect()
+                self._stop_event.wait(0.1)  # 100ms 退避，且响应停止信号
+                continue
+            except Exception:
+                # 其他异常（如 close 期间 overlapped 结构释放引发的 TypeError）：
+                # 若已请求停止则安静退出，否则按断连处理并退避
+                if self._stop_event.is_set():
+                    break
+                self._handle_disconnect()
+                self._stop_event.wait(0.1)
                 continue
             if not chunk:
+                # 无数据：短暂退避，避免 read 立即返回空导致的忙循环
+                self._stop_event.wait(0.01)  # 10ms
                 continue
             self._log_rx(chunk)
             # 原始 RX 字节流：先通知观察者（手动调试/监控的纯流式接收，读线程上下文）
