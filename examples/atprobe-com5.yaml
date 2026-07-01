@@ -1,0 +1,32 @@
+# ATProbe 配置：COM5（Neoway N58 真实模组，USB-TTL）
+# 用途：真实硬件端到端测试，无需 com0com/vsim。
+# 设备特性（探测所得）：
+#   - Neoway N58, FW N58-R07-...-MEITUAN-00F, IMEI 866758050000161
+#   - 默认回显 ON（ATE0 可关）
+#   - +CSQ: 10,99（rssi=10 正好在 network 用例断言 >=10 边界）
+#   - +CEREG: 0,2（未注册，但断言只看 contains "+CEREG:"）
+#   - +CPIN: NO SIM（无 SIM 卡）
+#   - AT&V / AT+CSQ? 不支持（返回 ERROR）
+
+ports:
+  - COM5:115200:8N1
+
+default:
+  step_timeout: 5
+  baud: 115200
+  log_level: progress
+
+cases_dir: ./examples/testcases
+report_dir: ./reports
+env_config: ./examples/env.yaml
+
+console:
+  color: true
+  command_truncate: 40
+
+log:
+  dir: ./logs
+  keep: 0
+
+pressure:
+  pass_rate_threshold: 95
