@@ -173,11 +173,11 @@ steps:
 """)
         result = _engine_with_fake(fake_port).start(_cfg([case]))
         cr = result.case_results[0]
-        # on_failure=skip：失败步状态仍为 FAIL（M3 §4.6），但执行继续到下一步
-        # 存在 FAIL 但无 abort → 用例 = FAIL（§4.6 规则 2）
-        assert cr.status is CaseStatus.FAIL
-        assert cr.step_results[0].status is StepStatus.FAIL
+        # on_failure=skip：失败步记 SKIPPED（不算失败，REQ-M2 §3.4），执行继续到下一步
+        # 无 FAIL 且第二步 PASS → 用例整体 PASS
+        assert cr.step_results[0].status is StepStatus.SKIPPED
         assert cr.step_results[1].status is StepStatus.PASS  # 后续步骤仍执行
+        assert cr.status is CaseStatus.PASS
 
 
 class TestPoll:
@@ -412,3 +412,45 @@ steps:
         assert "安全阀" in cr.error_msg
         # 连续断连 3 次即放弃 → 执行的步骤数应 < 5
         assert len(cr.step_results) < 5
+
+
+class TestOnFailureStrategies:
+    """REQ-M2 §3.4：区分 on_failure 的 skip vs continue 语义."""
+
+    def test_skip_marks_skipped_not_fail(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "ERROR\r\n")
+        fake_port.script_text("COM3", "OK\r\n", match="AT+SECOND")
+        case = parse_case("""
+name: skip测试
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+    on_failure: skip
+  - command: AT+SECOND
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.step_results[0].status is StepStatus.SKIPPED  # 非FAIL
+        assert len(cr.step_results) == 2  # 后续步骤执行
+        assert cr.status is CaseStatus.PASS  # skip不进FAIL统计，第二步PASS
+
+    def test_continue_marks_fail_and_continues(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "ERROR\r\n")
+        fake_port.script_text("COM3", "OK\r\n", match="AT+SECOND")
+        case = parse_case("""
+name: continue测试
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+    on_failure: continue
+  - command: AT+SECOND
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.step_results[0].status is StepStatus.FAIL  # 记FAIL
+        assert len(cr.step_results) == 2  # 后续步骤执行
+        assert cr.status is CaseStatus.FAIL  # 第一步FAIL导致用例FAIL

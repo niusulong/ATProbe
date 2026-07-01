@@ -171,7 +171,15 @@ def execute_step(
     for k, v in attempt.extracted.items():
         ctx.variables[k] = v
 
-    status = StepStatus.PASS if attempt.step_passed else StepStatus.FAIL
+    # status 与 abort_case 一并算出（含 skip 区分，REQ-M2 §3.4）
+    strategy: FailureStrategy | None = None
+    if not attempt.step_passed:
+        strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
+
+    if not attempt.step_passed and strategy is FailureStrategy.SKIP:
+        status = StepStatus.SKIPPED          # skip：步骤记 SKIPPED（不算失败）
+    else:
+        status = StepStatus.PASS if attempt.step_passed else StepStatus.FAIL
 
     assertion_results = tuple(
         AssertionResult(
@@ -191,10 +199,12 @@ def execute_step(
     # ------------------------------------------------------------------
     # 7. on_failure
     # ------------------------------------------------------------------
-    abort_case = False
-    if status is StepStatus.FAIL and not is_teardown:
-        strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
-        abort_case = strategy is FailureStrategy.ABORT
+    # on_failure（skip 已在 status 体现，此处仅决 abort_case）
+    abort_case = (
+        not is_teardown
+        and status is StepStatus.FAIL
+        and strategy is FailureStrategy.ABORT
+    )
 
     return StepExecResult(
         status=status, step_result=sr, extracted=attempt.extracted, abort_case=abort_case
