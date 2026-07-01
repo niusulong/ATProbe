@@ -60,7 +60,7 @@ class AssertionResult:
 @dataclass(frozen=True)
 class StepResult:
     step_index: int
-    phase: str  # "setup" / "steps" / "teardown"
+    phase: str  # "setup" / "steps" / "teardown" / "suite_setup" / "suite_teardown"
     input_type: InputType
     command: str  # 发送的命令或数据摘要（截断后）
     port: str
