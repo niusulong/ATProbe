@@ -86,6 +86,7 @@ class _SingleAttempt:
 
     response: Response
     extracted: dict[str, str]
+    matched: dict[str, bool]  # 每个 extract 是否匹配（用于过滤不写入池）
     assertion_outcomes: list[AssertionOutcome]
     step_passed: bool  # 本次是否成功（发送 ok 且断言全通过）
     step_error: str  # 失败原因（成功时为空）
@@ -167,9 +168,10 @@ def execute_step(
         )
         return StepExecResult(status=StepStatus.INTERRUPTED, step_result=sr, interrupted=True)
 
-    # 提交 extract 到变量池（最后一次执行的值，§9.2 变量值保留）
+    # 提交 extract 到变量池（仅匹配成功的变量；失败的等同未定义，REQ-M2 §5.1）
     for k, v in attempt.extracted.items():
-        ctx.variables[k] = v
+        if attempt.matched.get(k, True):
+            ctx.variables[k] = v
 
     # status 与 abort_case 一并算出（含 skip 区分，REQ-M2 §3.4）
     strategy: FailureStrategy | None = None
@@ -309,6 +311,7 @@ def _single_attempt(
     cancel: CancelToken | None,
 ) -> _SingleAttempt:
     t0 = clock()
+    matched: dict[str, bool] = {}
     resp = sender.send_command(port, request, timeout=timeout, cancel=cancel)
     dt = (clock() - t0) * 1000.0
 
@@ -317,12 +320,13 @@ def _single_attempt(
 
     if not resp.ok:
         return _SingleAttempt(
-            response=resp, extracted=extracted, assertion_outcomes=outcomes,
+            response=resp, extracted=extracted, matched=matched,
+            assertion_outcomes=outcomes,
             step_passed=False, step_error=resp.error or "响应异常", duration_ms=dt,
         )
 
     if step.extract:
-        values, _matched = extract_all(step.extract, resp.text)
+        values, matched = extract_all(step.extract, resp.text)
         extracted = values
 
     # 断言求值用「本次 extract + 已有变量池」临时作用域（不污染 ctx，由外层提交）
@@ -334,11 +338,13 @@ def _single_attempt(
     if step.assertions and any(not a.passed for a in outcomes):
         failed = next(a for a in outcomes if not a.passed)
         return _SingleAttempt(
-            response=resp, extracted=extracted, assertion_outcomes=outcomes,
+            response=resp, extracted=extracted, matched=matched,
+            assertion_outcomes=outcomes,
             step_passed=False, step_error=failed.reason or "断言失败", duration_ms=dt,
         )
     return _SingleAttempt(
-        response=resp, extracted=extracted, assertion_outcomes=outcomes,
+        response=resp, extracted=extracted, matched=matched,
+        assertion_outcomes=outcomes,
         step_passed=True, step_error="", duration_ms=dt,
     )
 

@@ -454,3 +454,29 @@ steps:
         assert cr.step_results[0].status is StepStatus.FAIL  # 记FAIL
         assert len(cr.step_results) == 2  # 后续步骤执行
         assert cr.status is CaseStatus.FAIL  # 第一步FAIL导致用例FAIL
+
+
+class TestExtractMatched:
+    def test_unmatched_extract_is_undefined(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # Step1 响应不含 X: 字段，extract missing 不匹配；rssi 匹配
+        fake_port.script_text("COM3", "+CSQ: 23\r\nOK\r\n", match="AT+CSQ")
+        fake_port.script_text("COM3", "OK\r\n", match="AT+SECOND")
+        case = parse_case("""
+name: extract失败测试
+port: COM3
+steps:
+  - command: AT+CSQ
+    extract:
+      rssi: 'CSQ: (\\d+)'
+      missing: 'X: (\\d+)'   # 不匹配
+    assert: { contains: "OK" }
+  - command: AT+SECOND
+    when: 'missing is null'   # 提取失败不写入池 → 未定义 → is null True → 步骤执行
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        # missing 提取失败不写入变量池 → 第二步 when True → 非 SKIPPED
+        assert cr.step_results[1].status is not StepStatus.SKIPPED
+        # rssi 提取成功仍展示在 extracted_vars
+        assert cr.step_results[0].extracted_vars.get("rssi") == "23"
