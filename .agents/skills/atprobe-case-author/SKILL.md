@@ -53,6 +53,43 @@ TCP-CMDPARSE-FUNC-INVALID_NAME.yaml     # 功能块级：指令名拼错（CME 5
 - **tags 强制三段**：`[<功能块>, <指令>, <类型>]`，可追加 `p0/p1` 等。例：`tags: [TCP, TCPSEND, FUNC, p0]`。
 - **description 强制三段**：场景前提（设备状态/前置依赖/是否需注网）+ 验证目标 + 文档依据（断言依据文档哪段描述/响应格式）。
 
+### 设备状态清洁（setup/teardown 完整生命周期）
+
+> **每条用例执行前后，设备状态都必须是干净的。** 多个用例共享同一设备，若 A 用例的设置指令改变了
+> 某参数，B 用例的查询断言就会基于被污染的状态而误判。用例必须自己负责"不留痕迹"。
+
+针对**会改设备状态的指令**（主要是 PARA 设置类、FUNC 动作类），用 setup/teardown 配对保证状态可逆：
+
+- **setup 查初始值**：测试前先查询被改参数的当前值，用 `extract` 存入变量池。
+- **steps 测试**：执行被测指令（设置新值/触发动作）。
+- **teardown 恢复**：用 `{{var}}` 引用 setup 提取的初始值，把参数设回原值。框架支持 command 里
+  `{{var}}` 模板替换（见 step_runner「解析输入，模板替换 {{var}}」）。
+
+```yaml
+# 示例：测试 AT+RECVMODE= 设置指令，setup 记录初始值，teardown 恢复
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+  - command: 'AT+RECVMODE?'                 # 查初始值
+    extract:
+      init_n: '\+RECVMODE:\s*(\d)'           # 存入变量 init_n
+      init_mode: '\+RECVMODE:\s*\d+,(\d)'    # 存入变量 init_mode
+    assert: { contains: "OK" }               # 宽松断言，只为提取
+
+steps:
+  - command: 'AT+RECVMODE=0'                 # 被测指令：设置新值
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: 'AT+RECVMODE={{init_n}},{{init_mode}}'   # 恢复初始值（{{var}} 替换）
+  - command: ATE0
+```
+
+变体处理：
+- 指令**不改设备状态**（如 RESP 查询类、CMDPARSE 指令名拼错）——无需状态恢复，setup/teardown 只放 ATE0 等基础规整。
+- 指令改状态但**文档定义了明确的默认值/安全值**——teardown 可直接写死默认值，不必 extract 初始值。
+- 动作类指令（如 TCPSEND）建链后的链路——teardown 用 `AT+TCPCLOSE` 主动断开，恢复到未建链状态。
+
 ### 功能块名从哪来（通用，不硬编码）
 
 **绝不维护指令集特定的映射表。** 功能块目录名在读文档阶段运行时提取：
@@ -147,6 +184,7 @@ TCP-CMDPARSE-FUNC-INVALID_NAME.yaml     # 功能块级：指令名拼错（CME 5
 - 动作指令有 FUNC-NORMAL（成功）和 FUNC-NOLINK/PRECONDITION_FAIL（前提失败）
 - 业务码响应步骤都加了 `timeout`
 - 断言的正则与文档描述的响应格式严格对应（空格数、换行、错误码数值）
+- **改设备状态的用例，setup 查了初始值且 teardown 用 `{{var}}` 恢复**（见「设备状态清洁」原则）
 
 > 本 skill 只负责**生成**用例，不负责运行。用例的运行与设备验证由用户后续用
 > `uv run python -m atprobe run <目录> --config <配置>` 执行——若运行时发现设备响应与文档不符，
