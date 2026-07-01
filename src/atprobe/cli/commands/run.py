@@ -165,7 +165,9 @@ def run(
     if dry_run:
         typer.echo("Dry Run — 将执行的用例：")
         for c in cases:
-            typer.echo(f"  - {c.name}  [{', '.join(c.tags)}]")
+            # 参数化实例显示 #N 后缀（与实际执行/报告一致）
+            disp = c.name if c.param_index is None else f"{c.name}#{c.param_index}"
+            typer.echo(f"  - {disp}  [{', '.join(c.tags)}]")
         typer.echo(f"端口：{', '.join(p.name for p in ports)}")
         typer.echo(f"用例数：{len(cases)}")
         # 端口可用性检查（REQ-M5 §3.2/§3.6）：vsim 跳过（虚拟端口不枚举）

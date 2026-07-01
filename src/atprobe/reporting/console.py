@@ -91,6 +91,20 @@ class ConsoleReporter(IReporter):
             for c in interrupted:
                 stream.write(f"  [{_status_color('INTERRUPTED', color=color)}] {c.case_name} ({c.error_msg})\n")
 
+        # 套件级前后置诊断（REQ-M2 §12.2）：展示非 PASS 的 suite_setup/teardown 步骤，
+        # 便于定位"用例被跳过是因 suite_setup 失败"等场景（issue #5）
+        suite_failed_steps = [
+            sr for sr in (*result.suite_setup_results, *result.suite_teardown_results)
+            if sr.status is not StepStatus.PASS
+        ]
+        if suite_failed_steps:
+            stream.write("\n套件级前后置异常:\n")
+            for sr in suite_failed_steps:
+                stream.write(
+                    f"  [{_status_color(sr.status.value, color=color)}] {sr.phase} 步骤{sr.step_index}: "
+                    f"{sr.command} {sr.error_msg}\n"
+                )
+
         stream.write(f"\n{'=' * 118}\n")
 
 

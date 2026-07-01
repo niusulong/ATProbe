@@ -113,3 +113,19 @@ class TestConsoleReporter:
         ConsoleReporter().render(result, ReportOutput(to_console=True, color=False))
         out = capsys.readouterr().out
         assert "用例总数: 0" in out
+
+    def test_suite_setup_failure_shown(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # suite_setup 失败的步骤应在汇总中展示（issue #5：套件前后置诊断）
+        suite_step = StepResult(
+            step_index=1, phase="suite_setup", input_type=InputType.COMMAND,
+            command="AT+CFUN=1", port="COM3", status=StepStatus.FAIL,
+            request="AT+CFUN=1", response="ERROR\r\n",
+            error_msg="响应不含 OK",
+        )
+        summary = aggregate([])
+        result = ExecutionResult(summary=summary, suite_setup_results=(suite_step,))
+        ConsoleReporter().render(result, ReportOutput(to_console=True, color=False))
+        out = capsys.readouterr().out
+        assert "套件级前后置异常" in out
+        assert "suite_setup" in out
+        assert "AT+CFUN=1" in out

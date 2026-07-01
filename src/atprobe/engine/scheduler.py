@@ -127,6 +127,7 @@ class Engine:
             # （与用例变量池隔离，但 setup 各步共享同一 ctx 以便 extract 传递）。
             # cancel=cancel 响应停止；失败 → 不继续 cases（但仍执行 teardown）
             suite_setup_failed = False
+            suite_setup_results: list[StepResult] = []
             suite_setup_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
             for i, step in enumerate(config.suite_setup, start=1):
                 if self._stop_mode is StopMode.ALL:
@@ -138,6 +139,7 @@ class Engine:
                     step_timeout_default=config.step_timeout_default,
                     clock=self._clock, sleep=self._sleep, cancel=cancel,
                 )
+                suite_setup_results.append(r.step_result)
                 self._emit_step(handler, r)
                 if r.abort_case:  # suite_setup 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
                     suite_setup_failed = True
@@ -176,7 +178,8 @@ class Engine:
             # 套件级后置（REQ-M2 §12.2）：cases 循环后执行一次（在 finally 关闭端口之前，
             # 确保 teardown 命令发往仍打开的端口）。无条件执行，失败仅记警告
             # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
-            # cancel=None（不响应取消）；StepResult 仅用于日志/事件，不进 aggregate。
+            # cancel=None（不响应取消）；StepResult 进 ExecutionResult 供报告诊断。
+            suite_teardown_results: list[StepResult] = []
             suite_teardown_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
             for i, step in enumerate(config.suite_teardown, start=1):
                 try:
@@ -187,6 +190,7 @@ class Engine:
                         clock=self._clock, sleep=self._sleep, cancel=None,
                         is_teardown=True,
                     )
+                    suite_teardown_results.append(r.step_result)
                     self._emit_step(handler, r)
                 except Exception:  # noqa: BLE001 - suite_teardown 失败仅记录，不影响结果
                     pass
@@ -204,7 +208,13 @@ class Engine:
 
         summary = aggregate(case_results)
         env_snap = self._env_snapshot(config)
-        result = ExecutionResult(summary=summary, case_results=tuple(case_results), env_snapshot=env_snap)
+        # suite 前后置结果（try 块内收集；非套件执行或提前异常时为空）
+        ss_results = tuple(locals().get("suite_setup_results", ()))
+        st_results = tuple(locals().get("suite_teardown_results", ()))
+        result = ExecutionResult(
+            summary=summary, case_results=tuple(case_results), env_snapshot=env_snap,
+            suite_setup_results=ss_results, suite_teardown_results=st_results,
+        )
         if handler is not None:
             handler(EngineFinishedEvent(summary=summary))
         self._state = EngineState.FINISHED
