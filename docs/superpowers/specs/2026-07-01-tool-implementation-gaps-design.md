@@ -88,8 +88,8 @@ cli/commands/run.py        ← #2 参数化展开 / #5 suite 解析与触发
 |---|---|---|---|
 | `when` | ✅ | ✅ | ❌（仅 teardown 不支持） |
 | `retry` | ✅ | ✅ | ✅ |
-| `poll` | ❌ | ✅ | ❌ |
-| `on_failure` | ❌（setup 失败一律跳过整个用例） | ✅ | ❌（teardown 失败仅记警告） |
+| `poll` | ✅（setup 中较少用） | ✅ | ❌ |
+| `on_failure` | ❌（setup 失败/被skip 一律跳过整个用例） | ✅ | ❌（teardown 失败仅记警告） |
 
 配套修正矩阵下方文字说明：
 - 「setup 不支持 when」→「setup 支持 when（条件不满足则跳过该 setup 步骤）」
