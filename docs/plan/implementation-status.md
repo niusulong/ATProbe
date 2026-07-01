@@ -46,18 +46,6 @@
 
 ## 二、实现与文档描述不符（功能已实现，但行为与 reference 描述有差异）
 
-### 6. teardown 步骤的 retry 未被拦截 —— 与文档不符
-
-- **状态**：`control-flow.md` 表格称 teardown 不支持 retry，但**代码未拦截**——teardown 步骤若带 `retry` 块，实际会重试。
-- **代码证据**：`step_runner.py:145` 对 poll 有 `and not is_teardown` 守卫，但 retry 路径（`:151` else 分支）无此守卫。
-- **生成用例时**：teardown 步骤避免写 retry（虽然能跑，但与文档语义不符，后续可能被修正为拦截）。
-
-### 7. setup 步骤的 when 会被求值 —— 与文档不符
-
-- **状态**：`control-flow.md` 表格称 setup 不支持 when，但**代码允许**——setup 步骤的 when 会被求值。
-- **代码证据**：`step_runner.py:117` 守卫是 `if not is_teardown and step.when is not None`，setup 非 teardown，故 when 生效。
-- **生成用例时**：setup 步骤避免写 when（虽然能跑，但与文档语义不符）。
-
 ### 8. on_failure 的 skip 与 continue 行为相同 —— 与文档不符
 
 - **状态**：`control-flow.md` 区分 skip（跳过当前步骤）和 continue（标记失败继续），但**代码不区分**——两者都 `abort_case=False`，行为完全相同（继续后续步骤）。
@@ -70,14 +58,3 @@
 - **代码证据**：`extractor.py:31-32` 返回 `ExtractionResult(value="", matched=False)`；`step_runner.py:307` `values, _matched = extract_all(...)` 丢弃 `_matched`，只把 `""` 写入池。
 - **生成用例时**：不要依赖"提取失败 vs 未定义"的区分。用 `is null` 判断变量是否存在时，注意提取失败的变量是空字符串而非 null。
 
-### 10. tags 筛选仅支持并集，不支持交集 —— 与文档不符
-
-- **状态**：`conventions.md` 称"支持多标签组合筛选（交集/并集）"，但**代码只支持并集**（`--tag` 多值取并集）和排除（`--exclude-tag`），不支持交集。
-- **代码证据**：`run.py:117` 用 `any(...)` 判断 `--tag` 命中（并集语义）。
-- **生成用例时**：tags 按并集筛选设计即可。
-
-### 11. name 唯一性不强制 —— 与文档不符
-
-- **状态**：`conventions.md` 称 name"必须唯一"，但**代码不强制**——重名不会报错，仅在文档约定。
-- **代码证据**：仅 `models.py:260` docstring 提及，无运行时检查。
-- **生成用例时**：仍应保持 name 唯一（报告会用"文件名+name"双标识，重名虽不报错但报告会混淆）。
