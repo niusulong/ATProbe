@@ -385,10 +385,12 @@ class SerialConnection:
 
     def _handle_disconnect(self) -> None:
         self._connected = False
-        # 通知当前等待的 send_command
-        self._response_q.put(
-            Response(text="", status=ResponseStatus.ERROR, error="端口断连")
-        )
+        # 仅在有 send_command 等待响应时通知，避免无人等待时往队列堆积陈旧 ERROR
+        # （否则下一次 send_command 的 get 会立即拿到这个过期断连响应）
+        if self._awaiting.is_set():
+            self._response_q.put(
+                Response(text="", status=ResponseStatus.ERROR, error="端口断连")
+            )
 
     # ------------------------------------------------------------------
     # 原始日志
