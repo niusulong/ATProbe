@@ -165,12 +165,13 @@ steps:
       - { name: XIIC越界CME53, matches: '^\r\n\+CME ERROR: 53\r\n$' }
 ```
 
-## 命名与结构规范约束（详见 SKILL.md「命名与结构规范」章节）
+## 深入机制：按需读 sibling references
 
-- **tags 强制三段**：前三个元素必须是 `[<功能块>, <指令>, <类型>]`，类型为 FUNC/RESP/PARA 之一。可继续追加优先级等标签（如 `p0`）。例：`tags: [TCP, TCPSEND, FUNC, p0]`。
-- **description 强制三段**：用 `|` 块，内容包含：
-  1. **场景前提**：设备状态（有无 SIM/注网/PDP）、前置依赖、是否需注网。
-  2. **验证目标**：本用例要验证什么。
-  3. **文档依据**：断言依据文档哪段描述/响应格式（作为断言来源的可追溯记录；文档为准，非设备实测）。
-- **文件命名**：`<功能块>-<指令>-<类型>-<变体>.yaml`，四段全大写。详见 SKILL.md。
-- **单一职责**：`steps` 内所有断言只针对同一被测指令；前置依赖指令进 setup/teardown 且断言宽松。
+本文件是**字段速查**（字段名 + 断言操作符 + 基本规则）。具体机制的设计用法见按功能域拆分的兄弟文件，按需加载：
+
+- `variables.md` —— 变量系统（提取 / `{{var}}` 引用 / 作用域 / 内置变量 / 环境配置）
+- `control-flow.md` —— 控制流（`when` 条件 / if-else 模拟 / `on_failure` / `retry` / `poll`）
+- `parameters.md` —— 参数化矩阵（`parameters` 展开多次执行）
+- `pressure.md` —— 压测配置（`loop` 循环 / 压测语义 / 统计维度）
+- `suite.md` —— 套件组织（`suite` 定义 / 执行顺序 / 目录结构）
+- `conventions.md` —— 书写规范（正则书写 / tags 系统 / name 唯一性 / 超时）
