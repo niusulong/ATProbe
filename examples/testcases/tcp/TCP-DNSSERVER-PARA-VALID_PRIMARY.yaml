@@ -3,17 +3,14 @@ description: |
   场景前提：无卡无网。DNSSERVER 改 DNS 配置（持久），n=1 首选 DNS。
   验证目标：AT+DNSSERVER=1,114.114.114.114 合法设置 → 严格 \r\nOK\r\n。
   文档依据：据 ch06 §6.16，n 取值 1-2（1首选/2备选），设置成功响应 \r\nOK\r\n。
+  设备偏差（实测）：设备查询 AT+DNSSERVER? 返回空（+DNSSERVER: ），无 dns1:/dns2: 字段，
+    无法 extract 初始值。故 teardown 用安全默认值 0.0.0.0 恢复（清空 DNS），不依赖 extract。
 tags: [TCP, DNSSERVER, PARA, p1]
 port: COM5
 
 setup:
   - command: ATE0
     assert: { matches: '^\r\nOK\r\n$' }
-  - command: 'AT+DNSSERVER?'               # 查初始 DNS
-    extract:
-      init_dns1: 'dns1:([\d.]+)'
-      init_dns2: 'dns2:([\d.]+)'
-    assert: { contains: "OK" }
 
 steps:
   # 6.16 DNSSERVER 合法设置（首选 DNS）→ 严格 OK
@@ -21,6 +18,6 @@ steps:
     assert: { matches: '^\r\nOK\r\n$' }
 
 teardown:
-  - command: 'AT+DNSSERVER=1,{{init_dns1}}'   # 恢复首选 DNS
-  - command: 'AT+DNSSERVER=2,{{init_dns2}}'   # 恢复备选 DNS
+  - command: 'AT+DNSSERVER=1,0.0.0.0'   # 恢复为安全默认值（设备查询返回空，无法 extract 初始值）
+  - command: 'AT+DNSSERVER=2,0.0.0.0'
   - command: ATE0
