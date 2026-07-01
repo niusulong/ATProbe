@@ -66,3 +66,25 @@ class TestRunDryRun:
              "--port", "COM99", "--tag", "nonexistent-tag", "--dry-run"],
         )
         assert result.exit_code == 1
+
+
+class TestParameterization:
+    def test_parameters_expand_to_n_instances(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+        case_file = tmp_path / "para.yaml"
+        case_file.write_text("""
+name: 多参数测试
+parameters:
+  - { val: A }
+  - { val: B }
+  - { val: C }
+steps:
+  - command: 'AT{{val}}'
+    assert: { contains: "OK" }
+""", encoding="utf-8")
+        # dry-run 展开后应显示 3 个实例
+        cfg = tmp_path / "atprobe.yaml"
+        cfg.write_text("ports: [COM3]\ncases_dir: .\n", encoding="utf-8")
+        result = runner.invoke(app, ["run", "--config", str(cfg), "--dry-run", "--vsim", str(case_file)])
+        assert result.exit_code == 0
+        # 三个实例都列出（dry-run 打印每个用例名）
+        assert result.stdout.count("多参数测试") == 3

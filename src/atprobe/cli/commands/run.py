@@ -13,6 +13,7 @@ from pathlib import Path
 
 import typer
 
+from atprobe.domain.case.models import Case
 from atprobe.domain.case.parser import CaseParseError, parse_case_file
 from atprobe.engine import Engine, EngineConfig
 from atprobe.engine.config import StopMode
@@ -105,10 +106,11 @@ def run(
     cases = []
     for cp in case_paths:
         try:
-            cases.append(parse_case_file(cp))
+            parsed = parse_case_file(cp)
         except CaseParseError as exc:
             typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
             raise typer.Exit(2) from exc
+        cases.extend(_expand_parameters(parsed))
 
     # 4. 标签过滤（§3.4：多 --tag 并集；--exclude-tag 排除）
     if tag or exclude_tag:
@@ -272,3 +274,19 @@ def _check_ports_available(ports: list[PortConfig]) -> None:
         )
     else:
         typer.secho(f"端口可用性检查：通过（可用端口：{', '.join(sorted(available))}）")
+
+
+def _expand_parameters(case: Case) -> list[Case]:
+    """参数化展开：把 parameters 矩阵的每行展开为独立 Case 实例（REQ-M2 §10.2）.
+
+    每个实例的 parameters 缩为单行，并带 param_index 序号（1-based）。
+    非参数化用例（parameters 为空）返回单元素列表（原样）。
+    """
+    if not case.parameters:
+        return [case]
+    instances: list[Case] = []
+    for idx, row in enumerate(case.parameters, start=1):
+        instances.append(
+            case.model_copy(update={"parameters": (row,), "param_index": idx})
+        )
+    return instances
