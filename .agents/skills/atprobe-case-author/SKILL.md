@@ -174,7 +174,7 @@ teardown:
 - `description` 三段：场景前提 + 验证目标 + 文档依据（写明断言依据文档哪段描述/响应格式）
 - 需注网的 FUNC 用例，description 写明"需注网"
 
-完整 YAML schema、字段语义见 `references/yaml-schema.md`。
+完整 YAML schema、字段语义见 `references/yaml-schema.md`。涉及变量引用、条件执行、参数化、压测、套件时，按需读对应机制 reference（见文末「何时读 references」）。
 
 ### 3. 自查用例完整性（交付前）
 
@@ -235,9 +235,17 @@ teardown:
   - command: ATE0
 ```
 
-更多字段（retry/poll/when/on_failure/data 输入等）和完整断言语法读 `references/yaml-schema.md`。
+更多字段（retry/poll/when/on_failure/data 输入等）和完整断言语法读 `references/yaml-schema.md`；这些机制的深入用法见 `control-flow.md`（retry/poll/when/on_failure）、`variables.md`（变量引用）、`parameters.md`/`pressure.md`/`suite.md`。
 
-## 何时读 references
+## 何时读 references（渐进式按需加载）
+
+写用例时按当前需要读对应机制说明，不必一次全读：
 
 - `references/testcase-matrix.md` —— **第 1、2 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
-- `references/yaml-schema.md` —— 第 2 步写用例时读取（完整 schema + 断言操作符表 + tags/description 强制三段约束）
+- `references/yaml-schema.md` —— **字段速查**（顶层 Case/Step 字段 + 断言操作符表 + extract/data 规则 + 严格字节级示例）
+- `references/variables.md` —— 用到**变量**时读（`{{var}}` 引用 / extract 提取 / 作用域 / 内置变量 / 跨端口共享）
+- `references/control-flow.md` —— 用到**条件或重试**时读（`when` 条件跳过 / if-else 模拟 / `on_failure` / `retry` / `poll`）
+- `references/parameters.md` —— 写**参数化**用例时读（`parameters` 矩阵展开多次执行）
+- `references/pressure.md` —— 写**压测**用例时读（`loop` 循环 / 压测语义 / 统计维度）
+- `references/suite.md` —— 组织**套件**时读（`suite` 定义 / 执行顺序 / 目录结构）
+- `references/conventions.md` —— 随时查**书写规范**（正则单引号规范 / tags 系统 / name 唯一性 / 超时仅步骤级）
