@@ -15,6 +15,7 @@ import typer
 
 from atprobe.domain.case.models import Case
 from atprobe.domain.case.parser import CaseParseError, parse_case_file
+from atprobe.domain.suite import SuiteParseError, parse_suite_file
 from atprobe.engine import Engine, EngineConfig
 from atprobe.engine.config import StopMode
 from atprobe.engine.interfaces import (
@@ -103,8 +104,33 @@ def run(
         typer.secho("错误：未找到任何用例文件", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
 
-    cases = []
-    for cp in case_paths:
+    # 套件文件识别：suite- 前缀的单文件走套件执行路径（REQ-M2 §12）
+    suite_files = [p for p in case_paths if p.name.startswith("suite-")]
+    case_files = [p for p in case_paths if not p.name.startswith("suite-")]
+
+    cases: list = []
+    suite_setups: list = []
+    suite_teardowns: list = []
+    # 套件：解析 suite，按 cases 列表载入用例（相对套件文件所在目录）
+    for sf in suite_files:
+        try:
+            suite = parse_suite_file(sf)
+        except SuiteParseError as exc:
+            typer.secho(f"套件解析失败：{exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(2) from exc
+        suite_setups.extend(suite.suite_setup)
+        suite_teardowns.extend(suite.suite_teardown)
+        for crel in suite.cases:
+            cpath = (sf.parent / crel).resolve()
+            try:
+                parsed = parse_case_file(cpath)
+            except CaseParseError as exc:
+                typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(2) from exc
+            cases.extend(_expand_parameters(parsed))
+
+    # 普通用例文件
+    for cp in case_files:
         try:
             parsed = parse_case_file(cp)
         except CaseParseError as exc:
@@ -157,6 +183,8 @@ def run(
     engine_cfg = EngineConfig(
         ports=tuple(ports),
         cases=tuple(cases),
+        suite_setup=tuple(suite_setups),
+        suite_teardown=tuple(suite_teardowns),
         step_timeout_default=app_cfg.step_timeout,
         pressure_pass_threshold=app_cfg.pressure_pass_rate_threshold,
         env_config=env_cfg,

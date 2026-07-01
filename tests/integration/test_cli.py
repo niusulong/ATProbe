@@ -88,3 +88,33 @@ steps:
         assert result.exit_code == 0
         # 三个实例都列出（dry-run 打印每个用例名）
         assert result.stdout.count("多参数测试") == 3
+
+
+class TestRunSuite:
+    def test_run_suite_executes_cases_in_order(self, tmp_path: Path) -> None:  # type: ignore[no-unbuilt-def]
+        # 建套件 + 两个用例
+        (tmp_path / "a.yaml").write_text("""
+name: 用例A
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""", encoding="utf-8")
+        (tmp_path / "b.yaml").write_text("""
+name: 用例B
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""", encoding="utf-8")
+        suite_file = tmp_path / "suite-test.yaml"
+        suite_file.write_text("""
+name: 测试套件
+cases:
+  - a.yaml
+  - b.yaml
+""", encoding="utf-8")
+        cfg = tmp_path / "atprobe.yaml"
+        cfg.write_text("ports: [COM3]\ncases_dir: .\n", encoding="utf-8")
+        result = runner.invoke(app, ["run", "--config", str(cfg), "--vsim", str(suite_file)])
+        assert result.exit_code == 0
+        assert "用例A" in result.stdout
+        assert "用例B" in result.stdout
