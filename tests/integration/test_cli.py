@@ -118,3 +118,32 @@ cases:
         assert result.exit_code == 0
         assert "用例A" in result.stdout
         assert "用例B" in result.stdout
+
+    def test_run_suite_with_tag_filter(self, tmp_path: Path) -> None:  # type: ignore[no-unbuilt-def]
+        (tmp_path / "a.yaml").write_text("""
+name: 用例A
+tags: [smoke]
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""", encoding="utf-8")
+        (tmp_path / "b.yaml").write_text("""
+name: 用例B
+tags: [regression]
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""", encoding="utf-8")
+        suite_file = tmp_path / "suite-test.yaml"
+        suite_file.write_text("""
+name: 测试套件
+cases:
+  - a.yaml
+  - b.yaml
+""", encoding="utf-8")
+        cfg = tmp_path / "atprobe.yaml"
+        cfg.write_text("ports: [COM3]\ncases_dir: .\n", encoding="utf-8")
+        result = runner.invoke(app, ["run", "--config", str(cfg), "--vsim", "--tag", "smoke", str(suite_file)])
+        assert result.exit_code == 0
+        assert "用例A" in result.stdout
+        assert "用例B" not in result.stdout  # 被 tag 过滤
