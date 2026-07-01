@@ -75,6 +75,8 @@ def run_pressure(
 
     # warmup + 正式轮统一循环，靠轮号区分是否计入
     for rnd in range(1, total + 1):
+        # 内置变量 loop_index（REQ-M2 §5.4，压测场景从 1 开始）
+        ctx.variables["loop_index"] = rnd
         if cancel is not None and cancel.cancelled:
             aborted = True
             break

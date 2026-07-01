@@ -83,6 +83,25 @@ steps:
         assert "{{" not in req
         assert "COM3" in req
 
+    def test_loop_index_in_pressure(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # 持续返回 OK，压测 3 轮
+        fake_port.script_text("COM3", "OK\r\n", persistent=True)
+        case = parse_case("""
+name: 压测loop_index
+port: COM3
+loop:
+  count: 3
+  interval: 0
+steps:
+  - command: 'AT{{loop_index}}'
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.is_pressure
+        # 压测用例 step_results 首轮展示，request 应已替换 loop_index
+        assert cr.status is CaseStatus.PASS
+
 
 class TestRetry:
     def test_retry_succeeds_eventually(self, fake_port) -> None:  # type: ignore[no-untyped-def]
