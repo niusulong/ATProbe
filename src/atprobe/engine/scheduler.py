@@ -182,8 +182,11 @@ class Engine:
     ) -> CaseResult:
         t0 = self._clock()
         ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+        # 参数化注入（M2 §10.2）：参数行注入用例级变量作用域（最高优先级）
+        if case.parameters:
+            for k, v in case.parameters[0].items():
+                ctx.variables[k] = v
 
-        # 参数化注入（M2 §10.2）—— 由上层展开，此处 case 已是单实例
         ports_used: set[str] = set()
         setup_results: list[StepResult] = []
         step_results: list[StepResult] = []
@@ -389,8 +392,11 @@ class Engine:
         error_msg: str, pressure: Any,
     ) -> CaseResult:
         duration_ms = (self._clock() - t0) * 1000.0
+        display_name = case.name
+        if case.param_index is not None:
+            display_name = f"{case.name}#{case.param_index}"
         return CaseResult(
-            case_name=case.name, case_file=case.source_file or "",
+            case_name=display_name, case_file=case.source_file or "",
             tags=case.tags, ports=tuple(sorted(ports_used)),
             status=status, is_pressure=case.is_pressure,
             setup_results=tuple(setup_results), step_results=tuple(step_results),
