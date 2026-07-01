@@ -65,6 +65,25 @@ steps:
         assert len(cr.step_results) == 1  # 第二步未执行
 
 
+class TestBuiltinVariables:
+    def test_timestamp_and_port_substituted(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "OK\r\n")
+        case = parse_case("""
+name: 内置变量测试
+port: COM3
+steps:
+  - command: 'AT{{timestamp}}-{{port}}'
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.status is CaseStatus.PASS
+        # request 应含替换后的值（timestamp 非空、port=COM3），原 {{}} 占位符已消失
+        req = cr.step_results[0].request
+        assert "{{" not in req
+        assert "COM3" in req
+
+
 class TestRetry:
     def test_retry_succeeds_eventually(self, fake_port) -> None:  # type: ignore[no-untyped-def]
         # 前 2 次 ERROR，第 3 次 OK
