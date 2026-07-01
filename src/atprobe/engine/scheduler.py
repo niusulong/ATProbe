@@ -123,6 +123,22 @@ class Engine:
         log_dir = Path(config.log_dir)
 
         try:
+            # 套件级前置（REQ-M2 §12.2）：cases 循环前执行一次。用独立 CaseContext
+            # （与用例变量池隔离）。cancel=cancel 响应停止；失败 → 不继续 cases（但仍执行 teardown）
+            for i, step in enumerate(config.suite_setup, start=1):
+                if self._stop_mode is StopMode.ALL:
+                    break
+                r = execute_step(
+                    step, index=i, phase="suite_setup",
+                    ctx=CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None),
+                    sender=sender, default_port=default_port,
+                    step_timeout_default=config.step_timeout_default,
+                    clock=self._clock, sleep=self._sleep, cancel=cancel,
+                )
+                self._emit_step(handler, r)
+                if r.abort_case:  # suite_setup 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
+                    break
+
             for idx, case in enumerate(config.cases, start=1):
                 if self._stop_mode is StopMode.ALL:
                     break
@@ -162,6 +178,23 @@ class Engine:
             # 停止原始日志记录器，确保缓冲落盘（仅 Engine 自建的才停，外部注入的由外部管理）
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
+
+        # 套件级后置（REQ-M2 §12.2）：cases 循环后执行一次。无条件执行，失败仅记警告
+        # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
+        # cancel=None（不响应取消）；StepResult 仅用于日志/事件，不进 aggregate。
+        suite_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+        for i, step in enumerate(config.suite_teardown, start=1):
+            try:
+                r = execute_step(
+                    step, index=i, phase="suite_teardown", ctx=suite_ctx,
+                    sender=sender, default_port=default_port,
+                    step_timeout_default=config.step_timeout_default,
+                    clock=self._clock, sleep=self._sleep, cancel=None,
+                    is_teardown=True,
+                )
+                self._emit_step(handler, r)
+            except Exception:  # noqa: BLE001 - suite_teardown 失败仅记录，不影响结果
+                pass
 
         summary = aggregate(case_results)
         env_snap = self._env_snapshot(config)

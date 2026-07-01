@@ -506,3 +506,30 @@ class TestParameterization:
         # 参数注入变量池（request 含替换后的值）
         assert "ATA" in result.case_results[0].step_results[0].request
         assert "ATB" in result.case_results[1].step_results[0].request
+
+
+class TestSuiteSetupTeardown:
+    """REQ-M2 §12.2：套件级前后置（cases 循环前/后各执行一次）."""
+
+    def test_suite_setup_runs_before_cases(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # suite_setup 用 AT+CFUN=1，case 用 AT。FakePortManager match 为字面子串（非正则）：
+        # match="AT+CFUN=1" 仅匹配 AT+CFUN=1；match="AT" 匹配 AT（按注册顺序，setup 脚本先匹配 CFUN=1）
+        fake_port.script_text("COM3", "OK\r\n", match="AT+CFUN=1", persistent=True)
+        fake_port.script_text("COM3", "OK\r\n", match="AT", persistent=True)
+        from atprobe.domain.case.models import Step
+
+        case = parse_case("""
+name: 用例A
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""")
+        cfg = EngineConfig(
+            ports=(PortConfig(name="COM3"),),
+            cases=(case,),
+            suite_setup=(Step(command="AT+CFUN=1"),),
+            suite_teardown=(Step(command="AT+CFUN=0"),),
+        )
+        result = _engine_with_fake(fake_port).start(cfg)
+        assert result.summary.passed == 1
