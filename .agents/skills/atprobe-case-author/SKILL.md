@@ -202,10 +202,16 @@ Neoway 业务码（如 `+TCPSETUP: ERROR`、`+IPSTATUS: 0,DISCONNECT`、`+PDPSTA
 怎么判断某步是业务码？看文档响应描述——若该指令的正常响应不以 `OK`/`ERROR`/`+CME ERROR`/`+CMS ERROR`
 结尾（如返回 `+IPSTATUS: 0,DISCONNECT` 这类状态码），即为业务码，需加 timeout。
 
-### suite 文件是索引不是可执行单元
+### suite 文件的两种运行方式
 
-`suite-<功能块>.yaml` 是文档索引，**不能** `run suite-xxx.yaml`（会报 `steps: Field required`）。
-运行方式是 `run <目录>`。目录扫描时框架会自动跳过 `suite-` 开头文件避免重复。
+`suite-<功能块>.yaml` 有两种运行方式，不要混淆：
+
+- **`run suite-xxx.yaml`**：按套件 `cases` 列表顺序执行用例，`suite_setup`/`suite_teardown` 生效。
+- **`run <目录>`**：执行目录下**所有用例**（按文件名排序），自动跳过 `suite-` 前缀文件——
+  此模式下套件文件只是索引文档，其 `cases` 列表**不**被读取。
+
+> 注意：不能把套件文件当普通用例直接解析（套件 schema 无 `steps`，会报 `steps: Field required`），
+> 但 `run suite-xxx.yaml` 会走套件路径正确处理。
 
 ## YAML 最小骨架
 

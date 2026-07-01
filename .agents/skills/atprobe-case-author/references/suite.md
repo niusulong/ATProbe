@@ -36,8 +36,14 @@ suite_setup → [用例setup → 用例steps → 用例teardown]×N → suite_te
 
 ## 运行方式
 
-**不能** `run suite-xxx.yaml`（套件是索引不是可执行单元，会报 `steps: Field required`）。
-运行方式是 `run <目录>`，框架目录扫描时自动跳过 `suite-` 开头文件避免重复。
+两种触发方式：
+
+- **`run suite-xxx.yaml`**（显式套件）：按套件 `cases` 列表的顺序载入并执行用例，套件前后置
+  （`suite_setup`/`suite_teardown`）在用例组前后各执行一次。
+- **`run <目录>`**（批量）：执行目录下所有用例文件（按文件名排序），框架自动跳过 `suite-` 前缀文件
+  避免重复。此模式下套件文件仅作人类阅读的索引，不读取其 `cases` 列表。
+
+`--tag`/`--exclude-tag` 筛选对两种方式都生效（按各用例自身的 tags 过滤）。
 
 ## 命名与目录结构
 
