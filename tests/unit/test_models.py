@@ -196,3 +196,15 @@ steps:
     def test_source_file_recorded(self) -> None:
         c = parse_case("name: x\nsteps:\n  - command: AT\n", source="foo.yaml")
         assert c.source_file == "foo.yaml"
+
+
+class TestCaseParamIndex:
+    def test_default_param_index_none(self) -> None:
+        from atprobe.domain.case.models import Case
+        c = Case(name="x", steps=[Step(command="AT")])
+        assert c.param_index is None
+
+    def test_param_index_settable(self) -> None:
+        from atprobe.domain.case.models import Case
+        c = Case(name="x", steps=[Step(command="AT")], param_index=2)
+        assert c.param_index == 2
