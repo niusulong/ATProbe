@@ -45,6 +45,11 @@ class EngineConfig:
     session_id: str = ""
     log_dir: str = "./logs"
     report_env_snapshot: bool = True
+    # 套件级前后置（REQ-M2 §12.2）：cases 循环前/后各执行一次。默认空（非套件执行）。
+    # Step 来自 domain.case.models，沿用 ports/cases 的前向引用约定（见文件顶部
+    # from __future__ import annotations，运行期注解为字符串，无循环 import 风险）。
+    suite_setup: tuple[Step, ...] = ()  # type: ignore[name-defined]  # noqa: F821
+    suite_teardown: tuple[Step, ...] = ()  # type: ignore[name-defined]  # noqa: F821
 
 
 # 默认端口选取（M3 §6.2：用例/步骤未指定 port 时用第一个端口）
