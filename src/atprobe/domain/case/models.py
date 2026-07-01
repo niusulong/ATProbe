@@ -282,6 +282,10 @@ class Case(_Frozen):
     # 来源文件路径（由 parser 填充，不来自 YAML）
     source_file: str | None = None
 
+    # 参数化展开实例序号（1-based，非参数化用例为 None）。由 run.py 载入时展开填充，
+    # 用于报告 #N 后缀（REQ-M2 §10.2）。YAML 中不出现此字段。
+    param_index: int | None = None
+
     @property
     def is_pressure(self) -> bool:
         """是否压测用例（§2.3）."""
