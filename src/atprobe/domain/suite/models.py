@@ -20,6 +20,8 @@ class Suite(_Frozen):
 
     name: str | None = None
     description: str | None = None
+    # 套件级元数据标签：用于分类/组织（`list suites` 展示），不参与用例筛选
+    # （筛选走各用例自身的 tags）。对应 REQ-M2 §12.1 的 tags 字段。
     tags: tuple[str, ...] = Field(default_factory=tuple)
     suite_setup: tuple[Step, ...] = ()
     suite_teardown: tuple[Step, ...] = ()

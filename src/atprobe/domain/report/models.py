@@ -167,3 +167,7 @@ class ExecutionResult:
     log_index: LogIndex = field(default_factory=LogIndex)
     # 本次执行使用的环境配置快照（可选，M7 §9 报告头展示，便于复现）
     env_snapshot: dict[str, dict[str, object]] = field(default_factory=dict)
+    # 套件级前后置步骤结果（REQ-M2 §12.2）。非套件执行为空。
+    # 失败的 suite_setup 会导致 cases 被跳过，此处保留结果供报告诊断。
+    suite_setup_results: tuple[StepResult, ...] = ()
+    suite_teardown_results: tuple[StepResult, ...] = ()

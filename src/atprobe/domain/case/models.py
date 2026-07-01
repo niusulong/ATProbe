@@ -283,7 +283,8 @@ class Case(_Frozen):
     source_file: str | None = None
 
     # 参数化展开实例序号（1-based，非参数化用例为 None）。由 run.py 载入时展开填充，
-    # 用于报告 #N 后缀（REQ-M2 §10.2）。YAML 中不出现此字段。
+    # 用于报告 #N 后缀（REQ-M2 §10.2）。
+    # 引擎内部字段：YAML 不应填写（填写只会在报告 name 后追加 #N，无其他副作用）。
     param_index: int | None = None
 
     @property

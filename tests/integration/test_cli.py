@@ -88,6 +88,10 @@ steps:
         assert result.exit_code == 0
         # 三个实例都列出（dry-run 打印每个用例名）
         assert result.stdout.count("多参数测试") == 3
+        # 参数化实例显示 #N 后缀（与实际执行/报告一致，issue #6）
+        assert "多参数测试#1" in result.stdout
+        assert "多参数测试#2" in result.stdout
+        assert "多参数测试#3" in result.stdout
 
 
 class TestRunSuite:

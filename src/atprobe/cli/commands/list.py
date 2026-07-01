@@ -68,10 +68,12 @@ def _list_suites(cases_dir: Path) -> None:
     typer.echo("可用套件:")
     count = 0
     for f in sorted(cases_dir.rglob("suite-*.yaml")):
-        name, desc, case_count = _parse_suite_meta(f)
+        name, desc, case_count, tags = _parse_suite_meta(f)
         rel = f.relative_to(cases_dir)
         display_name = name or f.stem
         parts = [f"  {rel}", display_name]
+        if tags:
+            parts.append(f"[{', '.join(tags)}]")
         if desc:
             parts.append(f"({desc})")
         if case_count is not None:
@@ -81,8 +83,8 @@ def _list_suites(cases_dir: Path) -> None:
     typer.echo(f"共 {count} 个套件")
 
 
-def _parse_suite_meta(path: Path) -> tuple[str | None, str | None, int | None]:
-    """轻量解析套件文件的 name/description/cases 数量（套件自有简单 schema，不走 Case 模型）."""
+def _parse_suite_meta(path: Path) -> tuple[str | None, str | None, int | None, tuple[str, ...]]:
+    """轻量解析套件文件的 name/description/cases 数量/tags（套件自有简单 schema，不走 Case 模型）."""
     from io import StringIO
 
     from ruamel.yaml import YAML
@@ -91,13 +93,15 @@ def _parse_suite_meta(path: Path) -> tuple[str | None, str | None, int | None]:
     try:
         raw = YAML(typ="safe").load(StringIO(path.read_text(encoding="utf-8")))
     except (YAMLError, OSError):
-        return None, None, None
+        return None, None, None, ()
     if not isinstance(raw, dict):
-        return None, None, None
+        return None, None, None, ()
     name = raw.get("name")
     desc = raw.get("description")
     cases = raw.get("cases")
     case_count = len(cases) if isinstance(cases, list) else None
+    raw_tags = raw.get("tags")
+    tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, list) else ()
     if isinstance(name, str) and name:
         name = name.strip() or None
     else:
@@ -106,7 +110,7 @@ def _parse_suite_meta(path: Path) -> tuple[str | None, str | None, int | None]:
         desc = None
     else:
         desc = desc.strip()
-    return name, desc, case_count
+    return name, desc, case_count, tags
 
 
 def _list_ports() -> None:
