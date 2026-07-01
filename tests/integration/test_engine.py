@@ -480,3 +480,29 @@ steps:
         assert cr.step_results[1].status is not StepStatus.SKIPPED
         # rssi 提取成功仍展示在 extracted_vars
         assert cr.step_results[0].extracted_vars.get("rssi") == "23"
+
+
+class TestParameterization:
+    def test_params_injected_and_index_suffix(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # 两个实例各返回对应响应（match 区分渲染后的 ATA / ATB）
+        fake_port.script_text("COM3", "OK\r\n", match="ATA", persistent=True)
+        fake_port.script_text("COM3", "OK\r\n", match="ATB", persistent=True)
+        from atprobe.domain.case.models import Case, Step
+
+        base = Case(
+            name="多参数", port="COM3",
+            steps=(Step(command="AT{{val}}", ),),
+            parameters=({"val": "A"}, {"val": "B"}),
+        )
+        # 手动展开（模拟 run.py 行为）
+        from atprobe.cli.commands.run import _expand_parameters
+
+        cases = _expand_parameters(base)
+        assert len(cases) == 2
+        result = _engine_with_fake(fake_port).start(_cfg(cases))
+        # 两个实例，name 带 #1 #2
+        names = [cr.case_name for cr in result.case_results]
+        assert "多参数#1" in names and "多参数#2" in names
+        # 参数注入变量池（request 含替换后的值）
+        assert "ATA" in result.case_results[0].step_results[0].request
+        assert "ATB" in result.case_results[1].step_results[0].request
