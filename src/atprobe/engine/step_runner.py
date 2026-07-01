@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from atprobe.domain.case.assessor import AssertionOutcome, assess_all
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
@@ -110,6 +111,13 @@ def execute_step(
     port = step.port or default_port
     timeout = step.timeout if step.timeout is not None else step_timeout_default
     input_type = InputType.DATA if step.data is not None else InputType.COMMAND
+
+    # ------------------------------------------------------------------
+    # 0. 内置变量注入（REQ-M2 §5.4）
+    # ------------------------------------------------------------------
+    ctx.variables["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ctx.variables["port"] = port
+    # loop_index 仅压测场景由 pressure.run_pressure 注入，常规场景不注入
 
     # ------------------------------------------------------------------
     # 1. when 条件检查（teardown 不支持 when）
