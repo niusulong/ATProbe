@@ -10,13 +10,6 @@
 
 ## 一、未实现功能（reference 有描述，代码尚未实现）
 
-### 1. 内置变量 `{{timestamp}}` / `{{port}}` / `{{loop_index}}` —— 未实现
-
-- **状态**：未实现。代码不注入任何内置变量，引用它们会抛 `UndefinedReferenceError`。
-- **代码证据**：`templater.py:56` 仅为 docstring 示例；引擎唯一写变量池处是 `step_runner.py:164`（只写 extract 结果），无内置变量注入；`pressure.py` 循环时 `rnd` 局部变量从不写入 `ctx.variables`。
-- **生成用例时**：不要使用 `{{timestamp}}`/`{{port}}`/`{{loop_index}}`。压测场景如需引用当前轮次，暂不可用。
-- **详见**：`variables.md`「内置变量」描述的目标设计。
-
 ### 2. 参数化 `parameters` 矩阵展开 —— 未实现（P1）
 
 - **状态**：未实现。`parameters` 字段能被 schema 接受（不会报错），但**执行时完全被忽略**——不会展开成 N 次执行，参数不注入变量池。
@@ -43,18 +36,4 @@
 - **代码证据**：`run.py:241` 目录扫描时 `if f.name.startswith("suite-"): continue` 跳过；suite 文件的 `cases:` 列表从不被解析展开。
 - **实际行为**：`run <目录>` = 跑目录下所有用例文件（按文件名排序），suite 文件仅作人类阅读的索引文档。
 - **生成用例时**：用例文件放进功能块目录即可被 `run <目录>` 执行，无需依赖 suite 文件的 cases 列表来注册。
-
-## 二、实现与文档描述不符（功能已实现，但行为与 reference 描述有差异）
-
-### 8. on_failure 的 skip 与 continue 行为相同 —— 与文档不符
-
-- **状态**：`control-flow.md` 区分 skip（跳过当前步骤）和 continue（标记失败继续），但**代码不区分**——两者都 `abort_case=False`，行为完全相同（继续后续步骤）。
-- **代码证据**：`step_runner.py:189` 仅判断 `strategy is FailureStrategy.ABORT`，非 ABORT 一律继续。
-- **生成用例时**：skip 和 continue 现可互换使用，但建议按文档语义写（后续代码完善后语义会区分）。
-
-### 9. extract 失败的"已提取但空值"在实际变量池中无法区分 —— 与文档不符
-
-- **状态**：`variables.md` 称 extract 失败"标记为已提取但空值，区别于未定义"，但**引擎丢弃了 matched 标志**——非匹配直接写 `""`，与未定义在实际变量池中无法区分。
-- **代码证据**：`extractor.py:31-32` 返回 `ExtractionResult(value="", matched=False)`；`step_runner.py:307` `values, _matched = extract_all(...)` 丢弃 `_matched`，只把 `""` 写入池。
-- **生成用例时**：不要依赖"提取失败 vs 未定义"的区分。用 `is null` 判断变量是否存在时，注意提取失败的变量是空字符串而非 null。
 
