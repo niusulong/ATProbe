@@ -124,59 +124,64 @@ class Engine:
 
         try:
             # 套件级前置（REQ-M2 §12.2）：cases 循环前执行一次。用独立 CaseContext
-            # （与用例变量池隔离）。cancel=cancel 响应停止；失败 → 不继续 cases（但仍执行 teardown）
+            # （与用例变量池隔离，但 setup 各步共享同一 ctx 以便 extract 传递）。
+            # cancel=cancel 响应停止；失败 → 不继续 cases（但仍执行 teardown）
+            suite_setup_failed = False
+            suite_setup_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
             for i, step in enumerate(config.suite_setup, start=1):
                 if self._stop_mode is StopMode.ALL:
+                    suite_setup_failed = True
                     break
                 r = execute_step(
-                    step, index=i, phase="suite_setup",
-                    ctx=CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None),
+                    step, index=i, phase="suite_setup", ctx=suite_setup_ctx,
                     sender=sender, default_port=default_port,
                     step_timeout_default=config.step_timeout_default,
                     clock=self._clock, sleep=self._sleep, cancel=cancel,
                 )
                 self._emit_step(handler, r)
                 if r.abort_case:  # suite_setup 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
+                    suite_setup_failed = True
                     break
 
-            for idx, case in enumerate(config.cases, start=1):
-                if self._stop_mode is StopMode.ALL:
-                    break
-                if self._stop_flag.is_set() and self._stop_mode is StopMode.CURRENT:
-                    self._stop_flag.clear()
-                    self._stop_mode = None
+            if not suite_setup_failed:
+                for idx, case in enumerate(config.cases, start=1):
+                    if self._stop_mode is StopMode.ALL:
+                        break
+                    if self._stop_flag.is_set() and self._stop_mode is StopMode.CURRENT:
+                        self._stop_flag.clear()
+                        self._stop_mode = None
 
-                if handler is not None:
-                    handler(
-                        CaseStartEvent(
-                            case_name=case.name, case_index=idx,
-                            total_cases=len(config.cases),
-                            case_type="pressure" if case.is_pressure else "regular",
+                    if handler is not None:
+                        handler(
+                            CaseStartEvent(
+                                case_name=case.name, case_index=idx,
+                                total_cases=len(config.cases),
+                                case_type="pressure" if case.is_pressure else "regular",
+                            )
                         )
-                    )
 
-                cr = self._run_case(
-                    case, idx, config, sender, port_manager, default_port,
-                    cancel, log_dir, session, handler,
-                )
-                case_results.append(cr)
-                if handler is not None:
-                    handler(
-                        CaseResultEvent(
-                            case_name=case.name, status=cr.status.value,
-                            duration_ms=cr.duration_ms, error_msg=cr.error_msg,
-                        )
+                    cr = self._run_case(
+                        case, idx, config, sender, port_manager, default_port,
+                        cancel, log_dir, session, handler,
                     )
+                    case_results.append(cr)
+                    if handler is not None:
+                        handler(
+                            CaseResultEvent(
+                                case_name=case.name, status=cr.status.value,
+                                duration_ms=cr.duration_ms, error_msg=cr.error_msg,
+                            )
+                        )
 
             # 套件级后置（REQ-M2 §12.2）：cases 循环后执行一次（在 finally 关闭端口之前，
             # 确保 teardown 命令发往仍打开的端口）。无条件执行，失败仅记警告
             # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
             # cancel=None（不响应取消）；StepResult 仅用于日志/事件，不进 aggregate。
-            suite_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+            suite_teardown_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
             for i, step in enumerate(config.suite_teardown, start=1):
                 try:
                     r = execute_step(
-                        step, index=i, phase="suite_teardown", ctx=suite_ctx,
+                        step, index=i, phase="suite_teardown", ctx=suite_teardown_ctx,
                         sender=sender, default_port=default_port,
                         step_timeout_default=config.step_timeout_default,
                         clock=self._clock, sleep=self._sleep, cancel=None,
@@ -244,7 +249,9 @@ class Engine:
                 setup_results.append(r.step_result)
                 ports_used.add(r.step_result.port)
                 self._emit_step(handler, r)
-                if r.status is StepStatus.FAIL:
+                # setup 步骤失败或被 skip（on_failure:skip）都视为前提未满足 → 跳过用例
+                # （REQ-M2 §7：setup 失败一律跳过整个用例；skip 说明该前提步骤未成功）
+                if r.status in (StepStatus.FAIL, StepStatus.SKIPPED):
                     setup_failed = True
                     break
                 # §4.2 连续断连安全阀：达到阈值则放弃用例

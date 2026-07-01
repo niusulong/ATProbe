@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from atprobe.domain.case.models import _Frozen, Step
+from atprobe.domain.case.models import Step, _Frozen
 
 
 class Suite(_Frozen):
