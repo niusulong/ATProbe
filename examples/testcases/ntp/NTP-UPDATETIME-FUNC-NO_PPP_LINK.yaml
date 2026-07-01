@@ -1,0 +1,22 @@
+name: UPDATETIME-无PPP业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 PPP 连接（同步 NTP 前提不满足）。
+  验证目标：AT+UPDATETIME=1,<ip>,<time> 同步模式在无 PPP 时 → 同步业务码 +UPDATETIME: No PPP Link（无 OK 前缀，必加 timeout）。
+  文档依据：据 ch25，无 PPP 返回 \r\n+UPDATETIME: No PPP Link\r\n（同步业务码，无 OK 尾随，框架不识别为终结，timeout 兜底）。
+tags: [NTP, UPDATETIME, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # ch25 UPDATETIME 同步模式无 PPP（同步业务码，timeout 兜底）
+  - command: 'AT+UPDATETIME=1,210.72.145.44,10'
+    timeout: 2.0
+    assert:
+      - { name: 无PPP业务码严格, matches: '^\r\n\+UPDATETIME: No PPP Link\r\n$' }
+      - { name: 非CME错误, not_contains: "+CME ERROR" }
+
+teardown:
+  - command: ATE0

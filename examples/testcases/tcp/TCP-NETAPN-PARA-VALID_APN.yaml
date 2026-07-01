@@ -1,0 +1,19 @@
+name: NETAPN-合法APN设置(严格字节级)
+description: |
+  场景前提：无卡无网。NETAPN 是字符串参数（APN/用户名/密码，均双引号），不改设备可变状态（APN 配置持久）。
+  验证目标：AT+NETAPN="CMNET","","" 合法设置 → 严格 \r\nOK\r\n。
+  文档依据：据 ch06 §6.1，设置成功响应为 \r\nOK\r\n；参数须用双引号包裹。
+tags: [TCP, NETAPN, PARA, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.1 NETAPN 合法设置（CMNET，空用户名密码，双引号）→ 严格 OK
+  - command: 'AT+NETAPN="CMNET","",""'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

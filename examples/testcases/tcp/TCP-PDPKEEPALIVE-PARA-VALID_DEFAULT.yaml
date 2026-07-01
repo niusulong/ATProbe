@@ -1,0 +1,25 @@
+name: PDPKEEPALIVE-合法设置(严格字节级)
+description: |
+  场景前提：无卡无网。PDPKEEPALIVE 改心跳配置，需 setup 查初始值 + teardown 恢复。
+  验证目标：AT+PDPKEEPALIVE=1,60 合法设置（开启，间隔60s）→ 严格 \r\nOK\r\n。
+  文档依据：据 ch06 §6.17，onoff 0-1，interval 1-65535；设置成功响应 \r\nOK\r\n。
+tags: [TCP, PDPKEEPALIVE, PARA, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+  - command: 'AT+PDPKEEPALIVE?'            # 查初始值
+    extract:
+      init_onoff: '\+PDPKEEPALIVE:\s*(\d+)'
+      init_interval: '\+PDPKEEPALIVE:\s*\d+,(\d+)'
+    assert: { contains: "OK" }
+
+steps:
+  # 6.17 PDPKEEPALIVE 合法设置（开启，60s）→ 严格 OK
+  - command: 'AT+PDPKEEPALIVE=1,60'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: 'AT+PDPKEEPALIVE={{init_onoff}},{{init_interval}}'   # 恢复初始值
+  - command: ATE0

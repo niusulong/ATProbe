@@ -1,0 +1,21 @@
+name: PDPSTATUS-查询PDP状态(严格字节级)
+description: |
+  场景前提：无卡无网，PDP 未激活（DISCONNECT）。
+  验证目标：AT+PDPSTATUS 查询 → 业务码 +PDPSTATUS: DISCONNECT（必加 timeout）。
+  文档依据：据 ch06 §6.18，未连接返回 \r\n+PDPSTATUS: DISCONNECT\r\n（业务码，无 OK 尾随）。
+tags: [TCP, PDPSTATUS, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.18 PDPSTATUS 查询状态（业务码不终结，timeout 兜底）
+  - command: 'AT+PDPSTATUS'
+    timeout: 1.2
+    assert:
+      - { name: PDPSTATUS业务码, matches: '^\r\n\+PDPSTATUS: DISCONNECT\r\n$' }
+
+teardown:
+  - command: ATE0

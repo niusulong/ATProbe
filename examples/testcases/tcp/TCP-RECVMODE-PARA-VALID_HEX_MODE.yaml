@@ -1,0 +1,25 @@
+name: RECVMODE-合法设置-直传HEX模式(严格字节级)
+description: |
+  场景前提：无卡无网。RECVMODE 改设备状态，需 setup 查初始值 + teardown 恢复。
+  验证目标：AT+RECVMODE=1,1 设置为直传 + HEX 上报模式 → 严格 \r\nOK\r\n。
+  文档依据：据 ch06 §6.5，n=1 直接串口输出，mode=1 HEX 上报；设置成功响应 \r\nOK\r\n。
+tags: [TCP, RECVMODE, PARA, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+  - command: 'AT+RECVMODE?'                 # 查初始值
+    extract:
+      init_n: '\+RECVMODE:\s*(\d)'
+      init_mode: '\+RECVMODE:\s*\d+,(\d)'
+    assert: { contains: "OK" }
+
+steps:
+  # 6.5 RECVMODE 合法设置（直传 n=1, HEX mode=1）→ 严格 OK
+  - command: 'AT+RECVMODE=1,1'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: 'AT+RECVMODE={{init_n}},{{init_mode}}'   # 恢复初始值
+  - command: ATE0

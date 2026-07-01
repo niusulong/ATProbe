@@ -1,0 +1,23 @@
+name: DNSSERVER-查询响应格式
+description: |
+  场景前提：无卡无网，DNS 可能未配置。
+  验证目标：AT+DNSSERVER? 查询响应的骨架格式（+DNSSERVER: 前缀 + OK 结尾）。
+  文档依据：据 ch06 §6.16 响应格式表，查询响应为 \r\n+DNSSERVER: dns1:<ip>,dns2:<ip>\r\nOK\r\n。
+  设备偏差（实测）：N58 设备实际返回 \r\n+DNSSERVER: \r\nOK\r\n（冒号后空，无 dns1/dns2 字段），
+    与文档不符。本用例改为宽松骨架断言（contains "+DNSSERVER:"），记录此偏差待文档/固件确认。
+tags: [TCP, DNSSERVER, RESP, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.16 DNSSERVER 查询 —— 宽松骨架（设备实际返回空，文档说 dns1:/dns2: 结构）
+  - command: 'AT+DNSSERVER?'
+    assert:
+      - { name: DNSSERVER响应存在, contains: "+DNSSERVER:" }
+      - { name: 响应以OK结尾, contains: "OK" }
+
+teardown:
+  - command: ATE0

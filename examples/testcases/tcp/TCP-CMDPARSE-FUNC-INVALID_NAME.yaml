@@ -1,0 +1,22 @@
+name: 指令名拼错-未识别错误码
+description: |
+  场景前提：无卡无网。本用例测模组指令识别机制（指令名拼错被拒）。
+  验证目标：AT+TCPSET=0,1.2.3.4,80（指令名不完整 TCPSET≠TCPSETUP）→ 被拒绝（宽松断言）。
+  文档依据：据 ch06 §6.3 示例，指令名拼错/不完整返回错误（文档未明确具体码值，非 +CME 数值），
+    故用宽松断言（contains ERROR / not_contains OK），不硬编码码值。
+tags: [TCP, CMDPARSE, FUNC, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 指令名不完整（TCPSET≠TCPSETUP）→ 未识别（宽松断言）
+  - command: 'AT+TCPSET=0,1.2.3.4,80'
+    assert:
+      - { name: 未识别被拒, not_contains: "OK" }
+      - { name: 返回错误, contains: "ERROR" }
+
+teardown:
+  - command: ATE0

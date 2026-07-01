@@ -1,0 +1,20 @@
+name: TCPKEEPALIVE-查询响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，TCP 心跳默认（mode=0,time=120,interval=75,keepcount=9）。
+  验证目标：AT+TCPKEEPALIVE? 查询响应的字节格式（四段 mode,time,interval,keepcount）。
+  文档依据：据 ch06 §6.19 响应格式表，查询响应为 \r\n+TCPKEEPALIVE: <mode>,<time>,<interval>,<keepcount>\r\nOK\r\n。
+tags: [TCP, TCPKEEPALIVE, RESP, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.19 TCPKEEPALIVE 查询 —— mode,time,interval,keepcount 四段
+  - command: 'AT+TCPKEEPALIVE?'
+    assert:
+      - { name: TCPKEEPALIVE严格格式, matches: '^\r\n\+TCPKEEPALIVE: [01],\d+,\d+,\d+\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

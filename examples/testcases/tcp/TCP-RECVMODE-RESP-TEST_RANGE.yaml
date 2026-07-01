@@ -1,0 +1,20 @@
+name: RECVMODE-测试命令响应格式(严格字节级)
+description: |
+  场景前提：无卡无网。
+  验证目标：AT+RECVMODE=? 测试命令的响应字节格式（取值范围列表）。
+  文档依据：据 ch06 §6.5，测试响应为 \r\n+RECVMODE: (0-1),(0-1)\r\nOK\r\n（n/mode 均范围 0-1）。
+tags: [TCP, RECVMODE, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.5 RECVMODE 测试命令 —— 取值范围列表
+  - command: 'AT+RECVMODE=?'
+    assert:
+      - { name: RECVMODE测试命令格式, matches: '^\r\n\+RECVMODE: \(0-1\),\(0-1\)\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

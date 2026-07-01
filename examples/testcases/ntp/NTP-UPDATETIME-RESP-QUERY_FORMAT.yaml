@@ -1,0 +1,20 @@
+name: UPDATETIME-查询设置响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，NTP 未设置（IP空, timeout=0, TZ="", DST=0）。
+  验证目标：AT+UPDATETIME? 查询响应的字节格式（serv_ip,time,TZ,DST 四段，冒号后1空格）。
+  文档依据：据 ch25 响应格式表，查询响应为 \r\n+UPDATETIME: <serv_ip>,<time>,<TZ>,<DST>\r\nOK\r\n（冒号后1空格）。
+tags: [NTP, UPDATETIME, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # ch25 UPDATETIME 查询设置 —— 四段，TZ 双引号
+  - command: 'AT+UPDATETIME?'
+    assert:
+      - { name: 查询设置严格格式, matches: '^\r\n\+UPDATETIME: [^,]*,\d+,"[EW0]?[0-9]*",[01]\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

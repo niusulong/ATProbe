@@ -1,0 +1,21 @@
+name: TCPSEND-未建链业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 TCP 链路。
+  验证目标：AT+TCPSEND=0,1 未建链发送 → 业务码 +TCPSEND: SOCKET ID OPEN FAILED（必加 timeout）。
+  文档依据：据 ch06 §6.4，链路未开时返回 \r\n+TCPSEND: SOCKET ID OPEN FAILED\r\n（业务码）。
+tags: [TCP, TCPSEND, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.4 TCPSEND 未建链业务码（业务码不终结，timeout 兜底）
+  - command: 'AT+TCPSEND=0,1'
+    timeout: 1.2
+    assert:
+      - { name: TCPSEND未建链业务码, matches: '^\r\n\+TCPSEND: SOCKET ID OPEN FAILED\r\n$' }
+
+teardown:
+  - command: ATE0

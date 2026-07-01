@@ -1,0 +1,22 @@
+name: NETAPN-参数格式错误(无引号)
+description: |
+  场景前提：无卡无网。
+  验证目标：AT+NETAPN=CMNET,, 参数未用双引号 → 拒绝（宽松断言，文档未明确错误码）。
+  文档依据：据 ch06 §6.1 示例，无引号参数被拒绝；文档未给出具体错误码（非 +CME ERROR 数值），
+    故用宽松断言（contains ERROR / not_contains OK），不硬编码码值。
+tags: [TCP, NETAPN, PARA, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.1 NETAPN 参数格式错误（无引号）→ 拒绝（宽松断言）
+  - command: 'AT+NETAPN=CMNET,,'
+    assert:
+      - { name: 被拒绝, not_contains: "OK" }
+      - { name: 返回错误, contains: "ERROR" }
+
+teardown:
+  - command: ATE0

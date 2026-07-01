@@ -1,0 +1,21 @@
+name: UDPSETUP-未建链业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 UDP 链路。
+  验证目标：AT+UDPSETUP=0,1.2.3.4,80 未建链（无网）→ 业务码 +UDPSETUP: ERROR（必加 timeout）。
+  文档依据：据 ch06 §6.9，参数错误/无法建链返回 \r\n+UDPSETUP: ERROR\r\n（业务码）。
+tags: [TCP, UDPSETUP, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.9 UDPSETUP 无网业务码（业务码不终结，timeout 兜底）
+  - command: 'AT+UDPSETUP=0,1.2.3.4,80'
+    timeout: 1.2
+    assert:
+      - { name: UDPSETUP业务ERROR严格, matches: '^\r\n\+UDPSETUP: ERROR\r\n$' }
+
+teardown:
+  - command: ATE0

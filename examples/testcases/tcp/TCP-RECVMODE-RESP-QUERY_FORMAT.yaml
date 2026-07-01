@@ -1,0 +1,20 @@
+name: RECVMODE-查询响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，模组默认接收模式。
+  验证目标：AT+RECVMODE? 查询响应的字节格式（冒号后1空格，n,mode 两段）。
+  文档依据：据 ch06 §6.5 响应格式表，查询响应为 \r\n+RECVMODE: <n>,<mode>\r\nOK\r\n。
+tags: [TCP, RECVMODE, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.5 RECVMODE 查询 —— 冒号后1空格，n,mode 两段（均在 0-1）
+  - command: 'AT+RECVMODE?'
+    assert:
+      - { name: RECVMODE严格格式, matches: '^\r\n\+RECVMODE: [01],[01]\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

@@ -1,0 +1,29 @@
+name: TCPKEEPALIVE-合法设置全参数(严格字节级)
+description: |
+  场景前提：无卡无网。TCPKEEPALIVE 改心跳配置（掉电不保存），需 setup 查初始值 + teardown 恢复。
+    注意：文档建议在 TCP 建链前设置；本用例无建链，安全。
+  验证目标：AT+TCPKEEPALIVE=1,120,75,9 合法设置全参数 → 严格 \r\nOK\r\n。
+  文档依据：据 ch06 §6.19，mode 0-1, time 30-7200, interval 1-1800, keepcount 1-15；
+    设置成功响应 \r\nOK\r\n。
+tags: [TCP, TCPKEEPALIVE, PARA, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+  - command: 'AT+TCPKEEPALIVE?'            # 查初始值（4 段）
+    extract:
+      init_mode: '\+TCPKEEPALIVE:\s*(\d+)'
+      init_time: '\+TCPKEEPALIVE:\s*\d+,(\d+)'
+      init_interval: '\+TCPKEEPALIVE:\s*\d+,\d+,(\d+)'
+      init_keepcount: '\+TCPKEEPALIVE:\s*\d+,\d+,\d+,(\d+)'
+    assert: { contains: "OK" }
+
+steps:
+  # 6.19 TCPKEEPALIVE 合法设置（全参数）→ 严格 OK
+  - command: 'AT+TCPKEEPALIVE=1,120,75,9'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: 'AT+TCPKEEPALIVE={{init_mode}},{{init_time}},{{init_interval}},{{init_keepcount}}'   # 恢复初始值
+  - command: ATE0

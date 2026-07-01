@@ -1,0 +1,18 @@
+name: 网络时间同步测试套件
+description: |
+  ch25 网络时间同步（AT+UPDATETIME）端到端测试集合（N58 COM5，无卡无网场景）。
+  覆盖两类验证（按新命名规范 4 段全大写，单一职责）：
+    1. RESP 响应格式（查询/测试/查询模式三种同步响应的字节格式）
+    2. FUNC 功能验证（同步前提不满足的同步业务码：无 PPP）
+  跳过：mode=1 异步成功路径（Update To）——框架在 OK 就终结步骤，异步结果捕获不到。
+  跳过：Domain Name Invalid 业务码——无 PPP 前提下该分支不可达（设备先返回 No PPP Link），
+       需有 PPP + 真实域名解析环境才能测到。
+tags: [NTP, regression]
+
+cases:
+  # RESP 类
+  - NTP-UPDATETIME-RESP-QUERY_FORMAT.yaml
+  - NTP-UPDATETIME-RESP-TEST_RANGE.yaml
+  - NTP-UPDATETIME-RESP-QUERY_LAST_TIME.yaml
+  # FUNC 类
+  - NTP-UPDATETIME-FUNC-NO_PPP_LINK.yaml

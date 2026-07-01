@@ -1,0 +1,21 @@
+name: IPSTATUS-查询未建链状态(严格字节级)
+description: |
+  场景前提：无卡无网，无 TCP 链路。
+  验证目标：AT+IPSTATUS=0 查询链路0状态 → 业务码 +IPSTATUS: 0,DISCONNECT（必加 timeout）。
+  文档依据：据 ch06 §6.14，未连接返回 \r\n+IPSTATUS: <n>,DISCONNECT\r\n（业务码，无 OK 尾随）。
+tags: [TCP, IPSTATUS, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.14 IPSTATUS 查询未建链状态（业务码不终结，timeout 兜底）
+  - command: 'AT+IPSTATUS=0'
+    timeout: 1.2
+    assert:
+      - { name: IPSTATUS未建链业务码, matches: '^\r\n\+IPSTATUS: 0,DISCONNECT\r\n$' }
+
+teardown:
+  - command: ATE0

@@ -1,0 +1,20 @@
+name: TCPKEEPALIVE-测试命令响应格式(严格字节级)
+description: |
+  场景前提：无卡无网。
+  验证目标：AT+TCPKEEPALIVE=? 测试命令的响应字节格式（四段取值范围）。
+  文档依据：据 ch06 §6.19，测试响应为 \r\n+TCPKEEPALIVE: (0-1),(30-7200),(1-1800),(1-15)\r\nOK\r\n。
+tags: [TCP, TCPKEEPALIVE, RESP, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.19 TCPKEEPALIVE 测试命令 —— 四段取值范围
+  - command: 'AT+TCPKEEPALIVE=?'
+    assert:
+      - { name: TCPKEEPALIVE测试命令格式, matches: '^\r\n\+TCPKEEPALIVE: \(0-1\),\(30-7200\),\(1-1800\),\(1-15\)\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

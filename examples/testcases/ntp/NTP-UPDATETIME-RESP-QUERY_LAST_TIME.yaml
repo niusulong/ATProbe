@@ -1,0 +1,22 @@
+name: UPDATETIME-查询模式响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，NTP 从未同步（时间为 0000-00-00,00:00:00）。
+  验证目标：AT+UPDATETIME=0 查询模式（上次同步时间点）的字节格式（冒号后无空格，直接接 "Last Update Time"）。
+  文档依据：据 ch25 响应格式表，mode=0 响应为 \r\n+UPDATETIME:Last Update Time yyyy-mm-dd,hh:mm:ss\r\nOK\r\n
+    （注意：冒号后无空格，直接接 "Last"，与其他模式冒号后1空格不同）。
+tags: [NTP, UPDATETIME, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # ch25 UPDATETIME 查询模式（mode=0）—— 冒号后无空格
+  - command: 'AT+UPDATETIME=0'
+    assert:
+      - { name: 查询模式严格格式, matches: '^\r\n\+UPDATETIME:Last Update Time \d{4}-\d{2}-\d{2},\d{2}:\d{2}:\d{2}\r\nOK\r\n$' }
+      - { name: 冒号后无空格反证, not_contains: "+UPDATETIME: Last" }
+
+teardown:
+  - command: ATE0

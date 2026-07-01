@@ -1,0 +1,21 @@
+name: UDPCLOSE-未建链业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 UDP 链路。
+  验证目标：AT+UDPCLOSE=0 关闭不存在的链路 → 业务码 +UDPCLOSE: ERROR（必加 timeout）。
+  文档依据：据 ch06 §6.13，坏链路号返回 \r\n+UDPCLOSE: ERROR\r\n（业务码）。
+tags: [TCP, UDPCLOSE, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.13 UDPCLOSE 未建链业务码（业务码不终结，timeout 兜底）
+  - command: 'AT+UDPCLOSE=0'
+    timeout: 1.2
+    assert:
+      - { name: UDPCLOSE业务ERROR严格, matches: '^\r\n\+UDPCLOSE: ERROR\r\n$' }
+
+teardown:
+  - command: ATE0

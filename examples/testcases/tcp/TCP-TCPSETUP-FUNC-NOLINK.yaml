@@ -1,0 +1,21 @@
+name: TCPSETUP-未建链业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 TCP 链路。对链路0建链会因无网失败。
+  验证目标：AT+TCPSETUP=0,1.2.3.4,80 未建链（无网）→ 业务码 +TCPSETUP: ERROR（非 OK/ERROR 结尾，必加 timeout）。
+  文档依据：据 ch06 §6.3，参数错误/无法建链返回 \r\n+TCPSETUP: ERROR\r\n（业务码，无 OK 尾随）。
+tags: [TCP, TCPSETUP, FUNC, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.3 TCPSETUP 无网业务码（业务码不终结，timeout 兜底）
+  - command: 'AT+TCPSETUP=0,1.2.3.4,80'
+    timeout: 1.2
+    assert:
+      - { name: TCPSETUP业务ERROR严格, matches: '^\r\n\+TCPSETUP: ERROR\r\n$' }
+
+teardown:
+  - command: ATE0

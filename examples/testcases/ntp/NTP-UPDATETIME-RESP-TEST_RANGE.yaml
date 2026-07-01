@@ -1,0 +1,20 @@
+name: UPDATETIME-测试命令响应格式(严格字节级)
+description: |
+  场景前提：无卡无网。
+  验证目标：AT+UPDATETIME=? 测试命令的响应字节格式（取值范围，mode/time/DST 有范围，serv_ip/TZ 空）。
+  文档依据：据 ch25 响应格式表，测试响应为 \r\n+UPDATETIME: (0-1),,(1-30),,(0-1)\r\nOK\r\n（冒号后1空格）。
+tags: [NTP, UPDATETIME, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # ch25 UPDATETIME 测试命令 —— 取值范围
+  - command: 'AT+UPDATETIME=?'
+    assert:
+      - { name: 测试命令严格格式, matches: '^\r\n\+UPDATETIME: \(0-1\),,\(1-30\),,\(0-1\)\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

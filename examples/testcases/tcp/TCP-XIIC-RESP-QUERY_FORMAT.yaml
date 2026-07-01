@@ -1,0 +1,21 @@
+name: XIIC-查询响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，PPP 未建立（state=0, IP=0.0.0.0）。
+  验证目标：AT+XIIC? 查询响应的字节格式——冒号后4空格右对齐填充（文档示例注释明确："1/0 前面有4个空格"）。
+  文档依据：据 ch06 §6.2 示例注释（"1 前面有4个空格"、"0 前面有4个空格"），+XIIC: 后接4个空格，
+    格式为 \r\n+XIIC:    <state>,<ip>\r\nOK\r\n。表格此处损坏（写1空格），以示例注释明确声明为准。
+tags: [TCP, XIIC, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.2 XIIC 查询 —— 冒号后4个空格（右对齐填充），state<逗号><ip>
+  - command: 'AT+XIIC?'
+    assert:
+      - { name: XIIC严格格式, matches: '^\r\n\+XIIC:    \d+,[\d.]+\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

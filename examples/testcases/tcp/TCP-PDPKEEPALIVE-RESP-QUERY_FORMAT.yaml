@@ -1,0 +1,20 @@
+name: PDPKEEPALIVE-查询响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，PDP 心跳默认关闭。
+  验证目标：AT+PDPKEEPALIVE? 查询响应的字节格式（onoff,interval 两段）。
+  文档依据：据 ch06 §6.17 响应格式表，查询响应为 \r\n+PDPKEEPALIVE: <onoff>,<interval>\r\nOK\r\n。
+tags: [TCP, PDPKEEPALIVE, RESP, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.17 PDPKEEPALIVE 查询 —— onoff,interval 两段
+  - command: 'AT+PDPKEEPALIVE?'
+    assert:
+      - { name: PDPKEEPALIVE严格格式, matches: '^\r\n\+PDPKEEPALIVE: [01],\d+\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

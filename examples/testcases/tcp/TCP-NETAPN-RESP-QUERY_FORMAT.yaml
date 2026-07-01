@@ -1,0 +1,20 @@
+name: NETAPN-查询响应格式(严格字节级)
+description: |
+  场景前提：无卡无网，模组上电默认状态（APN 已配置为 CMNET）。
+  验证目标：AT+NETAPN? 查询响应的字节格式（冒号后1空格，三段双引号字段）。
+  文档依据：据 ch06 §6.1 响应格式表，查询响应为 \r\n+NETAPN: "APN","user","pass"\r\nOK\r\n（冒号后1空格）。
+tags: [TCP, NETAPN, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.1 NETAPN 查询 —— 冒号后1空格，三段双引号字段
+  - command: 'AT+NETAPN?'
+    assert:
+      - { name: NETAPN严格格式, matches: '^\r\n\+NETAPN: "[^"]*","[^"]*","[^"]*"\r\nOK\r\n$' }
+
+teardown:
+  - command: ATE0

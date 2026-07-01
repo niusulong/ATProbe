@@ -1,0 +1,21 @@
+name: TCPACK-未建链业务码(严格字节级)
+description: |
+  场景前提：无卡无网，无 TCP 链路。
+  验证目标：AT+TCPACK=0 查询未建链 TCP 确认状态 → 业务码 +TCPACK: 0,DISCONNECT（必加 timeout）。
+  文档依据：据 ch06 §6.15，链路未建立返回 \r\n+TCPACK: <n>,DISCONNECT\r\n（业务码）。
+tags: [TCP, TCPACK, FUNC, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.15 TCPACK 未建链业务码（业务码不终结，timeout 兜底）
+  - command: 'AT+TCPACK=0'
+    timeout: 1.2
+    assert:
+      - { name: TCPACK未建链业务码, matches: '^\r\n\+TCPACK: 0,DISCONNECT\r\n$' }
+
+teardown:
+  - command: ATE0

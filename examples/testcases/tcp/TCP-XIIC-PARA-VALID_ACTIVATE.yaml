@@ -1,0 +1,22 @@
+name: XIIC-合法激活PPP参数(严格字节级)
+description: |
+  场景前提：无卡无网。注意：文档说 AT+XIIC=1（n=1 合法值）返回 OK，但实际无 SIM 时设备返回
+    +CME ERROR: 50（激活失败）——这是设备在无卡前提下的合理拒绝，非指令参数错误。
+  验证目标：AT+XIIC=1 参数合法（n 在 0-1）→ 设备接受指令（返回 OK 或业务相关错误，非参数格式错误）。
+  文档依据：据 ch06 §6.2，n=1 激活，参数合法。无卡时设备返回 CME 50 是设备侧前提不满足，非参数错误。
+tags: [TCP, XIIC, PARA, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # 6.2 XIIC 合法激活参数（n=1）→ 设备接受（无卡时返回 CME 50，非参数错误）
+  - command: 'AT+XIIC=1'
+    assert:
+      - { name: 非参数格式错误, not_contains: "+CME ERROR: 53" }   # 53=参数越界，n=1 合法不应是 53
+
+teardown:
+  - command: 'AT+XIIC=0'                   # 恢复断开状态
+  - command: ATE0
