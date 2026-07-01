@@ -241,6 +241,7 @@ teardown:
 
 写用例时按当前需要读对应机制说明，不必一次全读：
 
+- `references/implementation-status.md` —— **写用例前必读**（当前代码未实现 / 与文档描述不符的功能清单，避免写出跑不起来的用例）
 - `references/testcase-matrix.md` —— **第 1、2 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
 - `references/yaml-schema.md` —— **字段速查**（顶层 Case/Step 字段 + 断言操作符表 + extract/data 规则 + 严格字节级示例）
 - `references/variables.md` —— 用到**变量**时读（`{{var}}` 引用 / extract 提取 / 作用域 / 内置变量 / 跨端口共享）
@@ -249,3 +250,7 @@ teardown:
 - `references/pressure.md` —— 写**压测**用例时读（`loop` 循环 / 压测语义 / 统计维度）
 - `references/suite.md` —— 组织**套件**时读（`suite` 定义 / 执行顺序 / 目录结构）
 - `references/conventions.md` —— 随时查**书写规范**（正则单引号规范 / tags 系统 / name 唯一性 / 超时仅步骤级）
+
+> reference 文档（variables/parameters/suite 等）代表**目标设计**（源自 REQ-M2 需求，是后续完善的蓝图）；
+> `implementation-status.md` 反映**当前代码的真实状态**。两者若有出入，以 implementation-status.md 为准，
+> 不要使用其中标注为"未实现"的功能。
