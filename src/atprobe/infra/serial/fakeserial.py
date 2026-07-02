@@ -60,6 +60,8 @@ class FakePortManager:
         self._scripts: dict[str, list[_ScriptedResponse]] = {}
         # 记录所有发送过的命令（port, command）
         self.sent: list[tuple[str, str]] = []
+        # 记录启用 wait_urc 的调用（port, urc_pattern），供测试断言
+        self.wait_urc_calls: list[tuple[str, str]] = []
         self._urc_handlers: dict[str, list[URCHandler]] = field(default_factory=dict)  # type: ignore[assignment]
         self._urc_handlers = {}
         self._rx_observers: dict[str, list[Callable[[bytes], None]]] = {}
@@ -138,11 +140,16 @@ class FakePortManager:
         command: str,
         *,
         timeout: float | None = None,
+        wait_urc: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("FakeSerial 被取消")
         self.sent.append((port, command))
+        # wait_urc 由测试预设的 Response.text 直接体现（Fake 不做真实读线程/终结判定），
+        # 这里仅记录，便于测试断言调用方确实启用了 URC 等待模式。
+        if wait_urc is not None:
+            self.wait_urc_calls.append((port, wait_urc))
         scripts = self._scripts.get(port, [])
         # 找匹配的脚本（先 match 精确，再通配）
         idx = None

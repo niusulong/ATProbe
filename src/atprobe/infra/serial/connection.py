@@ -88,6 +88,10 @@ class SerialConnection:
         self._buffer_lock = threading.Lock()
         # 标记当前是否在「等待响应」状态
         self._awaiting = threading.Event()
+        # 异步指令 URC 等待状态（wait_urc 模式）：非 None 时 OK 不终结，须等匹配此正则的
+        # URC 才把整段响应（OK+URC）入队。由 send_command 进入时设置、退出时复位。
+        # 读线程在 _process_incoming 持有 _buffer_lock 时读写，无需额外锁。
+        self._wait_urc_re: re.Pattern[bytes] | None = None
 
         # URC 订阅
         self._urc_handlers: list[URCHandler] = []
@@ -213,9 +217,15 @@ class SerialConnection:
         command: str,
         *,
         timeout: float | None = None,
+        wait_urc: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
-        """发送命令（自动追加结束符）并等待完整响应."""
+        """发送命令（自动追加结束符）并等待完整响应.
+
+        wait_urc 非空时为异步指令模式：遇 OK 不返回，继续读到匹配 wait_urc 正则的
+        URC 立即返回（整段响应文本含 OK+URC）；timeout 内无 URC 则按超时返回（text
+        含已收到的 OK 段，status=TIMEOUT）。为空时 OK 即终结（原行为）。
+        """
         if not self._connected or self._serial is None:
             return Response(text="", status=ResponseStatus.ERROR, error="端口未连接")
 
@@ -223,9 +233,14 @@ class SerialConnection:
         terminator = self.config.terminator.value.encode("ascii")
         payload = command.encode("utf-8") + terminator
 
-        # 切换到「等待响应」状态，清空缓冲
+        # 切换到「等待响应」状态，清空缓冲；wait_urc 模式设置 URC 终结正则
         with self._buffer_lock:
             self._buffer.clear()
+            if wait_urc is not None:
+                self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
+        # 排空上次命令可能遗留的陈旧响应（超时/取消/断连窗口内入队但未被取走的）。
+        # 安全：此刻 _awaiting 尚未 set，读线程不会 put 新响应，只会清掉陈旧残留。
+        self._drain_response_q()
         self._awaiting.set()
 
         self._log_tx(payload)
@@ -235,30 +250,63 @@ class SerialConnection:
             self._serial.flush()  # type: ignore[union-attr]
         except (SerialException, OSError) as exc:
             self._awaiting.clear()
+            self._reset_wait_urc()
             return Response(text="", status=ResponseStatus.ERROR, error=f"发送失败：{exc}")
 
-        # 等待响应队列（带超时 + 取消轮询）
-        deadline = self._clock() + to
-        while True:
-            if cancel is not None and cancel.cancelled:
-                self._awaiting.clear()
-                return Response(text="", status=ResponseStatus.CANCELLED)
-            remaining = deadline - self._clock()
-            if remaining <= 0:
-                break
-            try:
-                resp = self._response_q.get(timeout=min(remaining, 0.2))
-                self._awaiting.clear()
-                return resp
-            except queue.Empty:
-                continue
-        # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
-        self._awaiting.clear()
+        try:
+            # 等待响应队列（带超时 + 取消轮询）
+            deadline = self._clock() + to
+            while True:
+                if cancel is not None and cancel.cancelled:
+                    self._awaiting.clear()
+                    self._drain_response_q()
+                    return Response(text="", status=ResponseStatus.CANCELLED)
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    # 末次非阻塞检查：消除「get 超时与 break 之间响应入队」的窗口。
+                    # 若此刻读线程/断连刚好 put 了响应，取之返回（更准确：设备确实
+                    # 回了/确实断了，而非笼统 TIMEOUT）；取不到才走超时。
+                    try:
+                        resp = self._response_q.get_nowait()
+                        self._awaiting.clear()
+                        return resp
+                    except queue.Empty:
+                        break
+                try:
+                    resp = self._response_q.get(timeout=min(remaining, 0.2))
+                    self._awaiting.clear()
+                    return resp
+                except queue.Empty:
+                    continue
+            # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
+            self._awaiting.clear()
+            with self._buffer_lock:
+                partial = bytes(self._buffer)
+                self._buffer.clear()
+            text = partial.decode("utf-8", errors="replace")
+            err = "响应超时" if wait_urc is None else "等待 URC 超时"
+            return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
+        finally:
+            # 无论正常返回/超时/异常，都复位 wait_urc 状态，避免污染下一条命令
+            self._reset_wait_urc()
+
+    def _reset_wait_urc(self) -> None:
+        """复位 wait_urc 状态（调用前后保持 _buffer_lock 一致性）."""
         with self._buffer_lock:
-            partial = bytes(self._buffer)
-            self._buffer.clear()
-        text = partial.decode("utf-8", errors="replace")
-        return Response(text=text, status=ResponseStatus.TIMEOUT, error="响应超时")
+            self._wait_urc_re = None
+
+    def _drain_response_q(self) -> None:
+        """排空响应队列残留，防止陈旧响应污染下次命令.
+
+        用于 send_command 入口（清掉上次命令在超时/取消/断连窗口内入队但未被取走的
+        响应）和 cancel/超时返回前（避免响应遗弃）。安全前提：调用方确保此刻读线程
+        不会 put 新响应（入口处 _awaiting 尚未 set；返回前已 clear）。
+        """
+        while True:
+            try:
+                self._response_q.get_nowait()
+            except queue.Empty:
+                break
 
     # ------------------------------------------------------------------
     # §3.2 数据流发送（分块）—— 供 DataStreamSender 调用的底层写
@@ -337,14 +385,44 @@ class SerialConnection:
         with self._buffer_lock:
             self._buffer.extend(chunk)
             data = bytes(self._buffer)
+            wait_urc_re = self._wait_urc_re
 
         # 按行处理
         awaiting = self._awaiting.is_set()
-        # 寻找最后一个终结行
         lines = data.split(b"\n")
         # 最后一行可能不完整
         *complete_lines, tail = lines
 
+        # --------------------------------------------------------------
+        # wait_urc 模式（异步指令）：OK 仅受理不终结，须等匹配 wait_urc 正则的
+        # URC 才把整段响应（OK+URC）作为 COMPLETE 入队。
+        # --------------------------------------------------------------
+        if wait_urc_re is not None and awaiting:
+            for line in complete_lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # 目标 URC 匹配：整段响应（含 OK）入队终结
+                if wait_urc_re.search(line):
+                    # URC 行也按常规分流给订阅者（§6.4）
+                    self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+                    with self._buffer_lock:
+                        resp_bytes = bytes(self._buffer)
+                        self._buffer = bytearray(tail)
+                    resp_text = resp_bytes.decode("utf-8", errors="replace")
+                    self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
+                    return
+                # OK/ERROR 等终结行：仅受理不终结，继续等 URC（已累积进 buffer）
+                if _TERMINATOR_RE.match(stripped):
+                    continue
+                # 其它 URC 行：分流给订阅者，继续累积
+                if _URC_LINE_RE.match(line):
+                    self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+            return
+
+        # --------------------------------------------------------------
+        # 常规模式（wait_urc 未启用）：OK 即终结
+        # --------------------------------------------------------------
         found_terminator = False
         for line in complete_lines:
             stripped = line.strip()

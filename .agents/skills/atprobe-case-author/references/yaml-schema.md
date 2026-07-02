@@ -29,6 +29,7 @@ parameters: [dict]           # 可选，参数化矩阵
   timeout: float             # 可选，>0，秒；响应终结判定超时
   interval: int              # 可选，>=0，ms
   port: str                  # 可选，覆盖默认端口
+  wait_urc: str              # 可选，正则；异步指令 OK 后等匹配此 URC 才终结（与 poll 互斥）
   extract: {name: regex}     # 可选，变量提取
   assert: Assert             # 可选，断言（列表式或单键式）
   on_failure: abort|skip|continue  # 可选，步骤级失败策略
@@ -115,6 +116,18 @@ poll: { timeout: 10000, interval: 500 }  # 在 timeout 内每 interval ms 轮询
 ```yaml
 timeout: 1.2   # 秒。响应终结判定超时；业务码响应（不以 OK/ERROR 结尾）必加此项
 ```
+
+### wait_urc（异步指令：OK 后等 URC 终结）
+
+```yaml
+wait_urc: '\+CTM2M:dereg,0,\d+'   # 正则。异步指令遇 OK 不终结，等匹配此 URC 才返回
+timeout: 10                       # OK+URC 总等待上限（秒）
+```
+
+异步指令（OK 仅受理、URC 才是结果）专用。开启后 `Response.text` 含整段 `OK\r\n\r\n+URC...`，
+断言可整体匹配（含 MsgID 一致性 `\1` 反向引用）。URC 匹配即立即返回，不空等 timeout；
+timeout 内无 URC → status=TIMEOUT（断言照常跑）。与 `poll` 互斥，可与 `retry` 共存。
+详见 SKILL.md「异步指令陷阱」。
 
 ### on_failure（失败策略）
 

@@ -216,6 +216,81 @@ steps:
         assert cr.status is CaseStatus.FAIL
 
 
+class TestWaitUrc:
+    """wait_urc：异步指令 OK 仅受理，须等 URC 才终结（URC 进 Response.text）.
+
+    FakeSerial 直接返回预设 Response、不走 _process_incoming，故预设 text 含 OK+URC
+    即可验证引擎透传链路 + 断言正确性。connection 层的「OK 后继续读 URC」核心逻辑
+    由 tests/unit/test_connection_wait_urc.py 专项覆盖。
+    """
+
+    def test_wait_urc_basic(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # 预设：受理行 + OK + 成功 URC（异步指令典型序列）
+        fake_port.script_text(
+            "COM3",
+            "\r\nOK\r\n\r\n+CTM2M:dereg,0,5\r\n",
+            match="AT+CTM2MDEREG",
+        )
+        case = parse_case(r"""
+name: wait-urc-basic
+port: COM3
+steps:
+  - command: AT+CTM2MDEREG
+    wait_urc: '\+CTM2M:dereg,0,\d+'
+    timeout: 10
+    assert:
+      - { name: 整段含OK与URC, matches: '^\r\nOK\r\n\r\n\+CTM2M:dereg,0,\d+\r\n$' }
+      - { name: 成功码为0, contains: "dereg,0," }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.status is CaseStatus.PASS
+        # 确认 wait_urc 确实透传到 send_command
+        assert len(fake_port.wait_urc_calls) == 1
+        assert fake_port.wait_urc_calls[0][0] == "COM3"
+
+    def test_wait_urc_msgid_consistency(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # 受理行 id 与 URC id 一致，用 \1 反向引用校验
+        fake_port.script_text(
+            "COM3",
+            "\r\n+CTM2MSEND:5\r\nOK\r\n\r\n+CTM2M:send,0,5\r\n",
+            match="AT+CTM2MSEND",
+        )
+        case = parse_case(r"""
+name: wait-urc-msgid
+port: COM3
+steps:
+  - command: AT+CTM2MSEND=...
+    wait_urc: '\+CTM2M:send,0,\d+'
+    timeout: 10
+    assert:
+      - { name: 受理与URC的MsgID一致, matches: '^\r\n\+CTM2MSEND:(\d+)\r\nOK\r\n\r\n\+CTM2M:send,0,\1\r\n$' }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.status is CaseStatus.PASS
+
+    def test_wait_urc_response_without_assert_still_captures_text(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        # 无断言也应正常完成，response.text 含 URC
+        fake_port.script_text(
+            "COM3",
+            "\r\nOK\r\n\r\n+CTM2M:reg,0\r\n",
+            match="AT+CTM2MREG",
+        )
+        case = parse_case(r"""
+name: wait-urc-noassert
+port: COM3
+steps:
+  - command: AT+CTM2MREG
+    wait_urc: '\+CTM2M:reg,0'
+    timeout: 10
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        cr = result.case_results[0]
+        assert cr.status is CaseStatus.PASS
+        assert "+CTM2M:reg,0" in cr.step_results[0].response
+
+
 class TestWhen:
     def test_when_false_skips(self, fake_port) -> None:  # type: ignore[no-untyped-def]
         fake_port.script_text("COM3", "+CSQ: 5\r\nOK\r\n", match="AT+CSQ")

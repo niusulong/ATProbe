@@ -146,6 +146,7 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         command: str,
         *,
         timeout: float | None = None,
+        wait_urc: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
         conn = self._connections.get(port)
@@ -153,17 +154,17 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             return Response(text="", status=ResponseStatus.ERROR, error=f"端口 {port} 未打开")
 
         if not conn.is_connected:
-            # 触发重连（用例级重试由上层 M3 决定，此处只尝试恢复连接）
+            # 触发重连（用例级重试由上层 M3 决策，此处只尝试恢复连接）
             if not self._reconnect(port):
                 return Response(
                     text="", status=ResponseStatus.ERROR, error=f"端口 {port} 重连失败"
                 )
 
-        resp = conn.send_command(command, timeout=timeout, cancel=cancel)
+        resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
         # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）
         if resp.status is ResponseStatus.ERROR and "断连" in resp.error:
             if self._reconnect(port):
-                resp = conn.send_command(command, timeout=timeout, cancel=cancel)
+                resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
         return resp
 
     # ------------------------------------------------------------------

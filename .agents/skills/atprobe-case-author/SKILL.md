@@ -202,6 +202,51 @@ Neoway 业务码（如 `+TCPSETUP: ERROR`、`+IPSTATUS: 0,DISCONNECT`、`+PDPSTA
 怎么判断某步是业务码？看文档响应描述——若该指令的正常响应不以 `OK`/`ERROR`/`+CME ERROR`/`+CMS ERROR`
 结尾（如返回 `+IPSTATUS: 0,DISCONNECT` 这类状态码），即为业务码，需加 timeout。
 
+### 异步指令陷阱（OK 仅受理 ≠ 成功；用 wait_urc）
+
+异步指令（如 `AT+CTM2MREG`、`AT+CTM2MDEREG`、`AT+CTM2MSEND`、`AT+CTM2MUPDATE`）的响应
+分两段：先返回 `OK`（仅表示**指令被受理**），随后异步上报 URC 才是真正结果（如
+`+CTM2M:reg,0`、`+CTM2M:dereg,0,<id>`、`+CTM2M:send,0,<id>`）。
+
+**陷阱**：框架默认遇 `OK` 即终结该步（`connection.py` 的 OK 终结判定）。若不显式声明，
+`OK` 之后的 URC 不会进入 `Response.text`，用例**无法对 URC 的字节格式**（冒号无空格、
+成功码 `=0`、`<id>` 一致性等）**做断言**——而那正是异步指令测试的核心价值。
+
+**对策**：在这类指令的步骤上加 `wait_urc: '<URC 正则>'`。开启后框架行为变为——遇 `OK` 不终结，
+继续读到**匹配该正则的 URC 立即返回**（不空等 timeout），整段 `Response.text` 含 `OK\r\n\r\n+URC...`，
+断言正则可整体匹配 OK+URC。`wait_urc` 是正则字符串，精准指定预期 URC，避免被无关 URC 干扰。
+
+```yaml
+# 异步指令典型写法：AT+CTM2MDEREG
+steps:
+  - command: AT+CTM2MDEREG
+    wait_urc: '\+CTM2M:dereg,0,\d+'        # 等待这条 URC 才算终结
+    timeout: 10                            # OK+URC 总等待上限（秒）
+    assert:
+      # 整段响应（OK+URC）字节级断言——这才是异步指令测试的价值
+      - { name: 整段格式, matches: '^\r\nOK\r\n\r\n\+CTM2M:dereg,0,\d+\r\n$' }
+      - { name: 成功码为0, contains: "dereg,0," }
+```
+
+受理行含 `<id>`、URC 也含 `<id>` 时，用 `\1` 反向引用校验 MsgID 一致性：
+
+```yaml
+  - command: AT+CTM2MSEND=...
+    wait_urc: '\+CTM2M:send,0,\d+'
+    timeout: 10
+    assert:
+      # 受理行 id 与 URC id 必须一致（\1 反向引用）
+      - { matches: '^\r\n\+CTM2MSEND:(\d+)\r\nOK\r\n\r\n\+CTM2M:send,0,\1\r\n$' }
+```
+
+**约束**：
+- `wait_urc` 与 `poll` **互斥**（poll 轮询同步查询也能确认异步末态，语义重叠，二选一）。
+- `wait_urc` 可与 `retry` 共存（retry 包裹「发→等 URC→断言」的完整单次尝试）。
+- 框架行为细节：OK 后 `_process_incoming` 继续累积，URC 正则**匹配即立即入队返回**
+  （不空等）；timeout 内无 URC → status=TIMEOUT（text 含已收到的 OK 段，断言照常跑）。
+- **纯被动 URC**（无指令前导，如平台主动下行的 `+CTM2MRECV`）本机制不直接支持——它依赖
+  「前面发了指令并收到 OK」的前提。测纯被动 URC 需另设计 URC 监听用例类型。
+
 ### suite 文件的两种运行方式
 
 `suite-<功能块>.yaml` 有两种运行方式，不要混淆：

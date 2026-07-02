@@ -116,6 +116,7 @@ class ICommandSender(Protocol):
         command: str,
         *,
         timeout: float | None = None,
+        wait_urc: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
         """发送命令（不含结束符，由实现按 PortConfig.terminator 自动追加）并等待完整响应.
@@ -124,6 +125,8 @@ class ICommandSender(Protocol):
             port: 目标端口名（须已连接）。
             command: 命令文本（不含结束符）。
             timeout: 单次响应超时（秒）；None 用端口默认。
+            wait_urc: 异步指令 URC 终结正则（可空）。非空时遇 OK 不返回，继续读到
+                匹配此正则的 URC 立即返回（整段响应文本含 OK+URC）；为空时 OK 即终结。
             cancel: 取消令牌；触发后阻塞立即返回 Response(status=CANCELLED)。
         """
         ...

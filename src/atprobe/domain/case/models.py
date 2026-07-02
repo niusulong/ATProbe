@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import Annotated
 
@@ -199,6 +200,9 @@ class Step(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
     interval: int | None = Field(default=None, ge=0)
     port: str | None = None
+    # 异步指令：OK 仅受理，须等待匹配此正则的 URC 上报才算真正终结。
+    # 开启后串口层遇 OK 不返回，继续读到 URC 匹配立即返回（整段 text 含 OK+URC）。
+    wait_urc: str | None = Field(default=None)
 
     # 输出处理
     extract: dict[str, str] | None = None
@@ -215,6 +219,15 @@ class Step(BaseModel):
         # retry 与 poll 互斥（§3.1）
         if self.retry is not None and self.poll is not None:
             raise ValueError("retry 与 poll 互斥，不可同时指定")
+        # wait_urc 与 poll 互斥：poll 已可轮询同步查询确认异步状态，语义重叠
+        if self.wait_urc is not None and self.poll is not None:
+            raise ValueError("wait_urc 与 poll 互斥，不可同时指定")
+        # wait_urc 正则合法性预校验（解析期拦截无效正则，优于运行期才发现）
+        if self.wait_urc is not None:
+            try:
+                re.compile(self.wait_urc)
+            except re.error as exc:
+                raise ValueError(f"wait_urc 正则无效：{exc}") from exc
         return self
 
     @property

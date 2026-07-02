@@ -111,6 +111,7 @@ def execute_step(
     """执行单个步骤（§3.1）."""
     port = step.port or default_port
     timeout = step.timeout if step.timeout is not None else step_timeout_default
+    wait_urc = step.wait_urc  # None=不启用（OK 即终结）；非空=异步指令等 URC 终结
     input_type = InputType.DATA if step.data is not None else InputType.COMMAND
 
     # ------------------------------------------------------------------
@@ -153,12 +154,12 @@ def execute_step(
     try:
         if step.poll is not None and not is_teardown:
             attempt, poll_iters = _run_poll(
-                step, request, port, timeout, ctx, sender, clock, sleep, cancel
+                step, request, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
             )
             retry_count = 0
         else:
             attempt, retry_count = _run_retry(
-                step, request, port, timeout, ctx, sender, clock, sleep, cancel
+                step, request, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
             )
             poll_iters = 0
     except OperationCancelled:
@@ -221,6 +222,7 @@ def _run_retry(
     request: str,
     port: str,
     timeout: float,
+    wait_urc: str | None,
     ctx: CaseContext,
     sender: ICommandSender,
     clock: Callable[[], float],
@@ -237,7 +239,7 @@ def _run_retry(
             raise OperationCancelled("步骤被取消")
         if attempt_no > 0 and retry is not None:
             sleep(retry.interval / 1000.0)
-        attempt = _single_attempt(step, request, port, timeout, ctx, sender, clock, cancel)
+        attempt = _single_attempt(step, request, port, timeout, wait_urc, ctx, sender, clock, cancel)
         total_duration += attempt.duration_ms
         # 合并耗时到 attempt
         attempt.duration_ms = total_duration
@@ -256,6 +258,7 @@ def _run_poll(
     request: str,
     port: str,
     timeout: float,
+    wait_urc: str | None,
     ctx: CaseContext,
     sender: ICommandSender,
     clock: Callable[[], float],
@@ -273,7 +276,7 @@ def _run_poll(
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("poll 被取消")
         iterations += 1
-        attempt = _single_attempt(step, request, port, timeout, ctx, sender, clock, cancel)
+        attempt = _single_attempt(step, request, port, timeout, wait_urc, ctx, sender, clock, cancel)
         total_duration += attempt.duration_ms
         attempt.duration_ms = total_duration
 
@@ -305,6 +308,7 @@ def _single_attempt(
     request: str,
     port: str,
     timeout: float,
+    wait_urc: str | None,
     ctx: CaseContext,
     sender: ICommandSender,
     clock: Callable[[], float],
@@ -312,7 +316,7 @@ def _single_attempt(
 ) -> _SingleAttempt:
     t0 = clock()
     matched: dict[str, bool] = {}
-    resp = sender.send_command(port, request, timeout=timeout, cancel=cancel)
+    resp = sender.send_command(port, request, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
     dt = (clock() - t0) * 1000.0
 
     extracted: dict[str, str] = {}

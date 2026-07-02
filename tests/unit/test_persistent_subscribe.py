@@ -172,7 +172,7 @@ class TestEnginePreservesExternalPorts:
             self._connected = True
             self._serial = None
 
-        def _fake_send(self, command, *, timeout=None, cancel=None):
+        def _fake_send(self, command, *, timeout=None, wait_urc=None, cancel=None):
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
         with mock.patch.object(conn_mod.SerialConnection, "open", _fake_open), \

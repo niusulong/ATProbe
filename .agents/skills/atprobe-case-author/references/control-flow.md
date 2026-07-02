@@ -130,6 +130,29 @@ steps:
 5. 报告中展示轮询次数和总耗时。
 6. **poll 与 retry 互斥**（语义重叠，避免双重循环）。
 
+## wait_urc：等异步 URC 终结（与 poll 对比）
+
+异步指令（如 `AT+CTM2MREG`）返回 `OK` 仅表受理，真正结果是后续上报的 URC。`wait_urc`
+声明本步的真正终结是某条 URC（正则匹配），而非 `OK`。详见 SKILL.md「异步指令陷阱」。
+
+```yaml
+steps:
+  - command: AT+CTM2MDEREG
+    wait_urc: '\+CTM2M:dereg,0,\d+'   # 等这条 URC 才终结
+    timeout: 10
+    assert: { matches: '^\r\nOK\r\n\r\n\+CTM2M:dereg,0,\d+\r\n$' }
+```
+
+**poll 与 wait_urc 选哪个？**
+
+| 维度 | poll | wait_urc |
+|---|---|---|
+| 适用 | 有同步查询指令（如 `AT+CTM2MREG?`）可查末态 | 需断言 URC 字节格式本身（冒号空格、成功码、id） |
+| 机制 | 重复发查询指令轮询 `until` 条件 | 一次发指令，被动等 URC 上报 |
+| URC 进 text | 否（只看查询响应） | 是（整段 OK+URC 进 text，可字节级断言） |
+
+二者**互斥**（不能同一步同时用）。需断言 URC 格式 → `wait_urc`；只需确认操作完成 → `poll`。
+
 ## setup / teardown 对控制流的限制
 
 | 修饰符 | setup | steps | teardown |
@@ -137,6 +160,7 @@ steps:
 | `when` | ✅（条件不满足则跳过该 setup 步骤） | ✅ | ❌（仅 teardown 不支持） |
 | `retry` | ✅ | ✅ | ✅（失败仅记警告，retry 耗尽也不影响用例结果） |
 | `poll` | ✅（setup 中较少用） | ✅ | ❌ |
+| `wait_urc` | ✅ | ✅ | ❌ |
 | `on_failure` | ❌（setup 失败一律跳过整个用例） | ✅ | ❌（teardown 失败仅记警告） |
 
 - setup 任一步骤失败（含 retry 耗尽）→ 跳过整个用例（标记"跳过"非"失败"），但 teardown 仍执行。

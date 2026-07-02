@@ -33,6 +33,40 @@ class TestStepValidation:
                 poll=PollConfig(until="x == \"y\"", timeout=5),
             )
 
+    def test_wait_urc_defaults_none(self) -> None:
+        """wait_urc 缺省 None（向后兼容，OK 即终结）."""
+        s = Step(command="AT")
+        assert s.wait_urc is None
+
+    def test_wait_urc_parsed(self) -> None:
+        """wait_urc 正则字符串正常解析."""
+        s = Step(command="AT+CTM2MDEREG", wait_urc=r"\+CTM2M:dereg,0,\d+")
+        assert s.wait_urc == r"\+CTM2M:dereg,0,\d+"
+
+    def test_wait_urc_with_retry_allowed(self) -> None:
+        """wait_urc 与 retry 可共存（retry 包裹「发→等URC→断言」单次尝试）."""
+        s = Step(
+            command="AT+X",
+            wait_urc=r"\+X:ok",
+            retry=RetryConfig(count=2, interval=500),
+        )
+        assert s.wait_urc is not None
+        assert s.retry is not None
+
+    def test_wait_urc_and_poll_mutually_exclusive(self) -> None:
+        """wait_urc 与 poll 互斥（语义重叠）."""
+        with pytest.raises(Exception):
+            Step(
+                command="AT+X",
+                wait_urc=r"\+X:ok",
+                poll=PollConfig(until="x == \"y\"", timeout=5),
+            )
+
+    def test_wait_urc_invalid_regex_rejected(self) -> None:
+        """wait_urc 无效正则在模型校验期拦截（而非运行期）."""
+        with pytest.raises(Exception):
+            Step(command="AT+X", wait_urc="[")
+
     def test_data_file_or_inline_exclusive(self) -> None:
         with pytest.raises(Exception):
             DataInput(file="a.bin", inline="b")

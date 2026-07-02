@@ -75,6 +75,7 @@ class VsimPortManager(FakePortManager):
         command: str,
         *,
         timeout: float | None = None,
+        wait_urc: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
         if cancel is not None and cancel.cancelled:
@@ -82,6 +83,8 @@ class VsimPortManager(FakePortManager):
 
             raise OperationCancelled("Vsim 被取消")
         self.sent.append((port, command))
+        # wait_urc 由 AtResponder 生成的响应文本体现，此处仅接受以保持接口一致
+        _ = wait_urc
         frame = self._responder.respond(command)
         if not frame:
             return Response(text="", status=ResponseStatus.ERROR, error="空指令")
