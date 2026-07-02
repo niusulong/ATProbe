@@ -101,6 +101,47 @@ teardown:
 
 测模组指令识别机制（指令名拼错 → CME 58）这类不专属某指令的用例，用特殊指令段 `CMDPARSE`，每功能块最多一个文件：`<功能块>-CMDPARSE-FUNC-INVALID_NAME.yaml`。
 
+### 测试参数 env 化（服务器地址/端口/域名禁止硬编码）
+
+> **凡是用例里要连的服务器地址、端口、域名、平台参数——一律用 env 变量引用，禁止写死。**
+> 这些值在不同测试环境间会变（换服务器、换平台、换网络），写死就得改每个用例；用变量则只改一处。
+
+框架支持**环境配置点号引用**（`{{group.param}}`）：承载跨用例共享、可修改的固化参数，
+定义在配置文件的 `env_config`（如 `examples/env.yaml`），用例通过 `{{group.param}}` 引用。
+机制详见 `references/variables.md`「环境配置」节。
+
+**规则**：用例 command 里凡出现服务器 IP / 域名 / 端口 / 平台参数（ProductID 等），**必须**写成
+对应的 env 变量，不得硬编码字面值。
+
+```yaml
+# ✅ 正确：服务器地址/端口用 env 变量，换环境只改 env.yaml
+steps:
+  - command: 'AT+TCPSETUP=0,{{tcp.host}},{{tcp.port}}'
+    wait_urc: '\+TCPSETUP: \d+,(OK|FAIL)'
+    assert: { contains: "OK" }
+  - command: 'AT+CTM2MREG={{ctwing.product_id}},{{ctwing.device_name}}'
+    assert: { contains: "OK" }
+```
+
+```yaml
+# ❌ 错误：硬编码地址端口，换环境就要改用例
+steps:
+  - command: 'AT+TCPSETUP=0,192.168.1.100,8080'
+```
+
+**例外——故意非法的边界测试值保留硬编码**：参数越界 / 格式错误 / 未建链等用例里，故意用非法值
+触发错误（如 `AT+TCPSETUP=0,1.2.3.4,80` 触发业务码、`AT+TCPSETUP=6,...` 链路号越界）——这类值
+**不是真实服务器地址**，是测试构造的非法输入，必须硬编码（用 env 反而错，env 存的是合法地址）。
+
+**env.yaml 按业务分组、清晰标识**：每个业务（tcp/ctwing/ntp/ftp/mqtt 等）独立一组，组内
+`host`/`port` 及该业务专属参数（如 ctwing 的 `product_id`）放一起，加注释说明用途。
+`port` 一律用引号字符串（`'8080'`），避免 YAML 把纯数字端口误解析。新增业务时在 env.yaml 加新组，
+不要塞进已有组。
+
+**引用未定义 env 项会报错**：`{{xxx.yyy}}` 在 env.yaml 找不到对应组/项时，模板渲染会抛
+`UndefinedReferenceError`（用例加载即失败，不会静默跑错）。所以新增用例用到的 env 项，
+必须先在 env.yaml 定义。
+
 ## 核心理念：文档是唯一标准，纯文档生成严格断言
 
 **测试的根本目的是验证设备实际运行是否与文档一致**——所以断言的依据必须是**文档**，而非设备实测。
