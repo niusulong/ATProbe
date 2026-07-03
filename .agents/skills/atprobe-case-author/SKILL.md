@@ -106,9 +106,8 @@ teardown:
 > **凡是用例里要连的服务器地址、端口、域名、平台参数——一律用 env 变量引用，禁止写死。**
 > 这些值在不同测试环境间会变（换服务器、换平台、换网络），写死就得改每个用例；用变量则只改一处。
 
-框架支持**环境配置点号引用**（`{{group.param}}`）：承载跨用例共享、可修改的固化参数，
-定义在配置文件的 `env_config`（如 `examples/env.yaml`），用例通过 `{{group.param}}` 引用。
-机制详见 `references/variables.md`「环境配置」节。
+框架支持**环境配置点号引用**（`{{group.param}}`，如 `{{tcp.host}}`、`{{ctwing.product_id}}`），
+承载跨用例共享、可修改的固化参数。机制详解见 `references/variables.md`「环境配置」节。
 
 **规则**：用例 command 里凡出现服务器 IP / 域名 / 端口 / 平台参数（ProductID 等），**必须**写成
 对应的 env 变量，不得硬编码字面值。
@@ -133,19 +132,8 @@ steps:
 触发错误（如 `AT+TCPSETUP=0,1.2.3.4,80` 触发业务码、`AT+TCPSETUP=6,...` 链路号越界）——这类值
 **不是真实服务器地址**，是测试构造的非法输入，必须硬编码（用 env 反而错，env 存的是合法地址）。
 
-**env.yaml 按业务分组、清晰标识**：每个业务（tcp/ctwing/ntp/ftp/mqtt 等）独立一组，组内
-`host`/`port` 及该业务专属参数（如 ctwing 的 `product_id`）放一起，加注释说明用途。
-`port` 一律用引号字符串（`'8080'`），避免 YAML 把纯数字端口误解析。新增业务时在 env.yaml 加新组，
-不要塞进已有组。
-
-**引用未定义 env 项会报错**：`{{xxx.yyy}}` 在 env.yaml 找不到对应组/项时，模板渲染会抛
-`UndefinedReferenceError`（用例加载即失败，不会静默跑错）。所以新增用例用到的 env 项，
-必须先在 env.yaml 定义。
-
-**参数清单参考 `references/env-params.md`**：该文件按业务分组（pdp/dns/tcp/ssl/http/ftp/ntp/
-mqtt/aliyun/aws/ctwing/pipecloud/fota/sms/netshare/device 等）列出全指令集每个功能块需要的
-env 字段、语义、占位值。生成用例前先查它，知道某功能块该用哪些 `{{group.param}}`。该文件还
-含一份全占位值的 env.yaml 模板，新项目可复制初始化。
+**全指令集 env 参数清单见 `references/env-params.md`**：按业务分组列出每个功能块需要的 env 字段、
+语义、占位值，并含 env.yaml 模板与「参数对齐工作流」。生成用例前先查它。
 
 ## 核心理念：文档是唯一标准，纯文档生成严格断言
 
@@ -202,31 +190,14 @@ env 字段、语义、占位值。生成用例前先查它，知道某功能块�
 
 ### 2. env 参数对齐（生成用例前必做）
 
-生成用例前，先对齐环境参数，确保用例里的服务器地址/端口/鉴权等用 `{{group.param}}` 引用而非硬编码：
+生成用例前，先对齐环境参数，确保用例里的服务器地址/端口/鉴权等用 `{{group.param}}` 引用而非硬编码。
+**详细流程见 `references/env-params.md`「参数对齐工作流」节**，核心是：
 
-**(a) 查参数清单**：读 `references/env-params.md`，掌握本次涉及的功能块需要哪些 env 参数组与字段。
+1. 读 `references/env-params.md` 查本次功能块需要哪些 env 参数；读项目 env.yaml 掌握已有真实值。
+2. 用例用 `{{group.param}}` 引用；缺失项按清单命名规则记入「待补充 env 项清单」。
+3. 生成结束时输出清单（只列缺失项，不覆盖已有值，不含真实值），供用户补到项目 env.yaml。
 
-**(b) 读项目 env.yaml**：读取目标工作区的 env 配置文件（配置 `env_config` 指向，如 `examples/env.yaml`），
-掌握已有参数组与真实值。
-
-**(c) 比对、记增量**：逐个用例需要的 env 项，对照项目 env.yaml：
-- **已在 env.yaml** → 用例直接用 `{{group.param}}` 引用真实值。
-- **不在 env.yaml，但参数清单有** → 按清单命名规则（组名.字段名）在用例里引用，并记入「待补充 env 项清单」。
-- **清单也没有（全新业务）** → 按 `<业务>.<字段>` 约定命名（host/port 等通用名复用），引用并记入待补充；
-  同时提示用户：参数清单（env-params.md）需新增该业务组——**由用户决定是否把新增项同步回 skill 参考文档**。
-
-**(d) 输出**：生成结束时，输出 **「env.yaml 待补充项清单」**（只有需新增的组/字段，不覆盖已有值，不含真实值），
-供用户补到项目 env.yaml。格式示例：
-```
-本次生成用到以下 env 项，请确认项目 env.yaml 已定义（缺失的需补充真实值）：
-  ctwing.host         # 已存在 ✓
-  ctwing.product_id   # 已存在 ✓
-  ctwing.device_secret # 缺失，需补充（设备密钥）
-  ssl.cacert          # 缺失，需补充（CA 证书文件名）
-```
-
-> 注意：skill **不直接改写项目 env.yaml 的真实值**，只输出待补充项清单。env-params.md 是 skill
-> 自带的参数清单（占位值），项目 env.yaml 是真实值——两者分离，详见「测试参数 env 化」节。
+> skill **不直接改写项目 env.yaml 的真实值**。env-params.md（占位清单）与项目 env.yaml（真实值）分离。
 
 ### 3. 按矩阵逐指令生成用例（严格断言 + 单一职责）
 
@@ -240,6 +211,7 @@ env 字段、语义、占位值。生成用例前先查它，知道某功能块�
 - 查询/响应类（RESP）按文档响应格式写 `matches: '^\r\n<格式>\r\nOK\r\n$'`（空格用字面空格，`\r\n` 显式）
 - 设置/参数类（PARA）成功路径写 `assert: { matches: '^\r\nOK\r\n$' }`；边界路径按文档错误码写 `matches: '^\r\n\+CME ERROR: <码>\r\n$'`
 - 功能类（FUNC）按文档描述的业务结果/业务码写 `matches`，业务码响应加 `timeout: 1.2`（见下文"业务码超时陷阱"）
+- **异步指令**（文档标「主动上报」，或响应先 OK 后跟 URC）用 `wait_urc` 等 URC 终结（见下文"异步指令陷阱"）
 - 每个步骤前加 YAML 注释（`# x.x 指令名`）便于对照（注意：Step 不支持 `name` 字段）
 - 文档未写明字节细节时——问用户（原则见「核心理念」，不参考其他项目规律）
 
@@ -252,7 +224,16 @@ env 字段、语义、占位值。生成用例前先查它，知道某功能块�
 
 ### 4. 自查用例完整性（交付前）
 
-生成完所有用例后，对照 `references/testcase-matrix.md` 末尾的「自查清单」逐项核对，确保：
+生成完所有用例后，做两件事：
+
+**① 跑验证脚本**（一键校验全部生成的用例，复用框架校验逻辑）：
+```bash
+uv run python .agents/skills/atprobe-case-author/scripts/validate-cases.py <生成的用例目录> --env <env.yaml路径>
+```
+脚本校验：YAML 解析/schema、extract/assert/wait_urc 正则编译、env 引用存在性、文件名四段规范。
+全部通过才交付。
+
+**② 对照 `references/testcase-matrix.md` 末尾「自查清单」逐项核对**，确保：
 - 每个指令支持的形态都有对应类型用例，无遗漏
 - 每个数值参数都有越界用例（若文档给了范围）
 - 动作指令有 FUNC-NORMAL（成功）和 FUNC-NOLINK/PRECONDITION_FAIL（前提失败）
