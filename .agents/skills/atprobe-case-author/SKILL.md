@@ -142,6 +142,11 @@ steps:
 `UndefinedReferenceError`（用例加载即失败，不会静默跑错）。所以新增用例用到的 env 项，
 必须先在 env.yaml 定义。
 
+**参数清单参考 `references/env-params.md`**：该文件按业务分组（pdp/dns/tcp/ssl/http/ftp/ntp/
+mqtt/aliyun/aws/ctwing/pipecloud/fota/sms/netshare/device 等）列出全指令集每个功能块需要的
+env 字段、语义、占位值。生成用例前先查它，知道某功能块该用哪些 `{{group.param}}`。该文件还
+含一份全占位值的 env.yaml 模板，新项目可复制初始化。
+
 ## 核心理念：文档是唯一标准，纯文档生成严格断言
 
 **测试的根本目的是验证设备实际运行是否与文档一致**——所以断言的依据必须是**文档**，而非设备实测。
@@ -195,7 +200,35 @@ steps:
 
 **不该问的场景**（文档已明确）：文档明确写出的取值范围/参数格式/响应格式、文档明确标注的指令形态支持情况——这些直接用。
 
-### 2. 按矩阵逐指令生成用例（严格断言 + 单一职责）
+### 2. env 参数对齐（生成用例前必做）
+
+生成用例前，先对齐环境参数，确保用例里的服务器地址/端口/鉴权等用 `{{group.param}}` 引用而非硬编码：
+
+**(a) 查参数清单**：读 `references/env-params.md`，掌握本次涉及的功能块需要哪些 env 参数组与字段。
+
+**(b) 读项目 env.yaml**：读取目标工作区的 env 配置文件（配置 `env_config` 指向，如 `examples/env.yaml`），
+掌握已有参数组与真实值。
+
+**(c) 比对、记增量**：逐个用例需要的 env 项，对照项目 env.yaml：
+- **已在 env.yaml** → 用例直接用 `{{group.param}}` 引用真实值。
+- **不在 env.yaml，但参数清单有** → 按清单命名规则（组名.字段名）在用例里引用，并记入「待补充 env 项清单」。
+- **清单也没有（全新业务）** → 按 `<业务>.<字段>` 约定命名（host/port 等通用名复用），引用并记入待补充；
+  同时提示用户：参数清单（env-params.md）需新增该业务组——**由用户决定是否把新增项同步回 skill 参考文档**。
+
+**(d) 输出**：生成结束时，输出 **「env.yaml 待补充项清单」**（只有需新增的组/字段，不覆盖已有值，不含真实值），
+供用户补到项目 env.yaml。格式示例：
+```
+本次生成用到以下 env 项，请确认项目 env.yaml 已定义（缺失的需补充真实值）：
+  ctwing.host         # 已存在 ✓
+  ctwing.product_id   # 已存在 ✓
+  ctwing.device_secret # 缺失，需补充（设备密钥）
+  ssl.cacert          # 缺失，需补充（CA 证书文件名）
+```
+
+> 注意：skill **不直接改写项目 env.yaml 的真实值**，只输出待补充项清单。env-params.md 是 skill
+> 自带的参数清单（占位值），项目 env.yaml 是真实值——两者分离，详见「测试参数 env 化」节。
+
+### 3. 按矩阵逐指令生成用例（严格断言 + 单一职责）
 
 **先读 `references/testcase-matrix.md`**，按"形态 × 必备模板"矩阵为**每个指令**逐个生成用例文件。关键改变：
 
@@ -217,7 +250,7 @@ steps:
 
 完整 YAML schema、字段语义见 `references/yaml-schema.md`。涉及变量引用、条件执行、参数化、压测、套件时，按需读对应机制 reference（见文末「何时读 references」）。
 
-### 3. 自查用例完整性（交付前）
+### 4. 自查用例完整性（交付前）
 
 生成完所有用例后，对照 `references/testcase-matrix.md` 末尾的「自查清单」逐项核对，确保：
 - 每个指令支持的形态都有对应类型用例，无遗漏
@@ -333,10 +366,11 @@ teardown:
 
 写用例时按当前需要读对应机制说明，不必一次全读：
 
-- `references/testcase-matrix.md` —— **第 1、2 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
+- `references/testcase-matrix.md` —— **第 1、3 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
+- `references/env-params.md` —— **第 2 步必读**（全指令集 env 参数清单 + env.yaml 模板，env 参数对齐用）
 - `references/yaml-schema.md` —— **字段速查**（顶层 Case/Step 字段 + 断言操作符表 + extract/data 规则 + 严格字节级示例）
-- `references/variables.md` —— 用到**变量**时读（`{{var}}` 引用 / extract 提取 / 作用域 / 内置变量 / 跨端口共享）
-- `references/control-flow.md` —— 用到**条件或重试**时读（`when` 条件跳过 / if-else 模拟 / `on_failure` / `retry` / `poll`）
+- `references/variables.md` —— 用到**变量**时读（`{{var}}` 引用 / extract 提取 / 作用域 / 内置变量 / 跨端口共享 / env 点号引用）
+- `references/control-flow.md` —— 用到**条件或重试**时读（`when` 条件跳过 / if-else 模拟 / `on_failure` / `retry` / `poll` / `wait_urc`）
 - `references/parameters.md` —— 写**参数化**用例时读（`parameters` 矩阵展开多次执行）
 - `references/pressure.md` —— 写**压测**用例时读（`loop` 循环 / 压测语义 / 统计维度）
 - `references/suite.md` —— 组织**套件**时读（`suite` 定义 / 执行顺序 / 目录结构）
