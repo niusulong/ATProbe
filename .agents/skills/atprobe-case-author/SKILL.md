@@ -1,17 +1,20 @@
 ---
 name: atprobe-case-author
 description: |
-  从 AT 指令集文档（docs/at-ref/*.md）生成 ATProbe 工具可直接运行的端到端测试用例（YAML）。
-  当用户提到「基于指令集/命令手册写测试用例」「把 chXX 文档转成测试用例」「生成 AT 指令的 YAML 测试」
-  「补 XX 指令的测试」「为 ATProbe 写端到端用例」，或给出一个指令文档路径要求生成测试时，使用本 skill。
-  纯文档驱动：直接依据指令集文档生成严格字节级断言（回车换行、空格、错误码），不与实际设备交互。
-  测试的核心目的是验证设备实际运行与文档一致——一切以文档为标准。文档信息不完整或存疑时逐步与用户确认。
+  从 AT 指令集文档（通常 docs/at-ref/*.md，或用户指定的文档目录）生成 ATProbe 工具可直接运行的
+  端到端测试用例（YAML）。当用户提到「基于指令集/命令手册写测试用例」「把 chXX 文档转成测试用例」
+  「生成 AT 指令的 YAML 测试」「补 XX 指令的测试」「为 ATProbe 写端到端用例」，或给出一个指令文档
+  路径要求生成测试时，使用本 skill。纯文档驱动：直接依据指令集文档生成严格字节级断言（回车换行、
+  空格、错误码），不与实际设备交互。测试的核心目的是验证设备实际运行与文档一致——一切以文档为标准。
+  文档信息不完整或存疑时逐步与用户确认。
 ---
 
 # ATProbe 测试用例生成
 
-把 `docs/at-ref/chXX-*.md` 指令集文档转成 `examples/testcases/<功能块>/*.yaml`，可直接用
-`uv run python -m atprobe run <路径> --config <配置>` 运行。
+把指令集文档（`docs/at-ref/chXX-*.md` 或用户指定的文档目录）转成测试用例 YAML
+（约定输出到 `examples/testcases/<功能块>/*.yaml`，或用户指定的用例目录），可直接用
+`uv run python -m atprobe run <路径> --config <配置>` 运行。本 skill 不假设特定工作区——
+文档目录、用例输出目录、env 配置路径均由用户的工作区决定。
 
 ## 命名与结构规范（写任何用例前必读）
 
@@ -21,7 +24,7 @@ description: |
 ### 文件命名（4 段，全大写）
 
 ```
-examples/testcases/<功能块>/<功能块>-<指令>-<类型>-<变体>.yaml
+<用例目录>/<功能块>/<功能块>-<指令>-<类型>-<变体>.yaml
 ```
 
 | 段 | 规则 | 示例 |
@@ -165,7 +168,7 @@ steps:
 
 ### 1. 读指令集文档 + 确定功能块名 + 标注待澄清项
 
-读 `docs/at-ref/chXX-*.md`，做三件事：
+读指令集文档（`docs/at-ref/chXX-*.md` 或用户指定的文档目录），做三件事：
 
 **(a) 确定功能块名**（用于目录名和文件名第一段）：
 - 读文档第 1 行标题 `# 第 X 章 <功能名>`，取"第 X 章"之后的功能名。
@@ -228,10 +231,12 @@ steps:
 
 **① 跑验证脚本**（一键校验全部生成的用例，复用框架校验逻辑）：
 ```bash
-uv run python .agents/skills/atprobe-case-author/scripts/validate-cases.py <生成的用例目录> --env <env.yaml路径>
+uv run python <skill目录>/scripts/validate-cases.py <生成的用例目录> --env <env.yaml路径>
 ```
+（`<skill目录>` 是本 skill 所在路径，如 `.agents/skills/atprobe-case-author`；`<env.yaml路径>`
+是目标工作区的 env 配置。若工作区尚无 env.yaml，从 `assets/env.yaml.example` 复制初始化。）
 脚本校验：YAML 解析/schema、extract/assert/wait_urc 正则编译、env 引用存在性、文件名四段规范。
-全部通过才交付。
+atprobe 未安装时自动降级为基础校验（YAML 语法 + 正则 + 文件名）并提示安装。全部通过才交付。
 
 **② 对照 `references/testcase-matrix.md` 末尾「自查清单」逐项核对**，确保：
 - 每个指令支持的形态都有对应类型用例，无遗漏
@@ -323,7 +328,7 @@ description: |
   验证目标：<本用例验证什么>。
   文档依据：<断言依据文档哪节响应格式描述，如"据文档6.x节，响应为 \r\n+CMD: <value>\r\nOK\r\n">
 tags: [TCP, RECVMODE, RESP, p0]
-port: COM5    # 可选，仅日志标注；实际发送端口由配置文件 ports[0] 决定
+port: COM5    # 可选，仅日志标注；实际发送端口由配置文件 ports[0] 决定（按工作区实际端口填）
 
 setup:
   - command: ATE0

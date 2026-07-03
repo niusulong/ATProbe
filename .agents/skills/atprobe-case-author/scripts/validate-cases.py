@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ATProbe 测试用例批量验证脚本（skill bundled script）.
+"""ATProbe 测试用例批量验证脚本（skill bundled script，可在任意工作区运行）.
 
 扫描目录下所有用例 YAML（跳过 suite- 前缀），逐个校验：
   1. YAML 解析 + schema 校验（复用框架 parse_case）
@@ -8,12 +8,18 @@
   4. 文件名四段规范（<功能块>-<指令>-<类型>-<变体>.yaml，全大写）
   5. tags 前三段规范（[功能块, 指令, 类型]）
 
-用法：
-  uv run python .agents/skills/atprobe-case-author/scripts/validate-cases.py <用例目录> [--env <env.yaml>]
+用法（在任意工作区，用相对/绝对路径指向本脚本）：
+  uv run python <skill所在>/scripts/validate-cases.py <用例目录> [--env <env.yaml>]
+  或 atprobe 已 pip 安装：python <skill>/scripts/validate-cases.py <用例目录> --env env.yaml
 
-退出码：0 全部通过；1 有错误。错误逐条打印（文件: 错误描述）。
+环境要求：
+  - 完整校验（schema + env）：当前 Python 环境需能 import atprobe（pip install / uv tool install）。
+  - atprobe 未安装时自动降级为基础校验（YAML 语法 + 正则编译 + 文件名），并提示安装。
 
-设计原则：复用框架已有 API（parse_case / find_references / load_env_config），不重新实现校验逻辑。
+退出码：0 全部通过；1 有错误；2 环境错误。
+
+设计原则：复用框架已有 API（parse_case / find_references / load_env_config），不重新实现校验；
+不假设脚本所在路径与 atprobe 仓库的关系（可在任意工作区/任意安装方式下运行）。
 """
 
 from __future__ import annotations
@@ -23,14 +29,21 @@ import re
 import sys
 from pathlib import Path
 
-# 确保能导入 atprobe 包（脚本可能在任意 cwd 运行）
-_REPO_ROOT = Path(__file__).resolve().parents[4]  # scripts/ -> skill -> .agents -> repo
-if str(_REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "src"))
+# 优先用已安装的 atprobe（不假设仓库路径——本 skill 可在任意工作区运行）。
+# 导入失败说明当前 Python 环境没装 atprobe，给清晰的安装指引后退出。
+try:
+    from atprobe.domain.case.parser import CaseParseError, parse_case
+    from atprobe.domain.case.templater import find_references
+    from atprobe.infra.config.envconfig import EnvConfig, load_env_config_file
 
-from atprobe.domain.case.parser import CaseParseError, parse_case  # noqa: E402
-from atprobe.domain.case.templater import find_references  # noqa: E402
-from atprobe.infra.config.envconfig import EnvConfig, load_env_config_file  # noqa: E402
+    _HAS_ATPROBE = True
+except ImportError:
+    _HAS_ATPROBE = False
+    CaseParseError = None  # type: ignore[assignment,misc]
+    parse_case = None  # type: ignore[assignment]
+    find_references = None  # type: ignore[assignment]
+    EnvConfig = None  # type: ignore[assignment,misc]
+    load_env_config_file = None  # type: ignore[assignment]
 
 
 # 文件名四段规范：<功能块>-<指令>-<类型>-<变体>.yaml，全大写字母/数字/下划线
@@ -144,6 +157,107 @@ def validate_file(path: Path, env: EnvConfig | None, block_name: str | None) -> 
     return errs, env_missing
 
 
+# ---------------------------------------------------------------------------
+# 降级模式：atprobe 未安装时，纯标准库做基础校验（不依赖框架 schema）
+# ---------------------------------------------------------------------------
+def _run_basic_only(case_dir: Path) -> int:
+    """无 atprobe 时的基础校验：YAML 语法 + 文件名规范 + 所有字符串值里的正则编译检查。
+
+    较粗糙（不能解析 Case 模型，靠遍历 YAML dict 找正则字段），但能拦住大部分低级错误。
+    """
+    try:
+        from ruamel.yaml import YAML
+        from ruamel.yaml.error import YAMLError
+    except ImportError:
+        print("错误：降级校验需要 ruamel.yaml（atprobe 的依赖），请先安装 atprobe。", file=sys.stderr)
+        return 2
+
+    yaml_loader = YAML(typ="safe")
+    # 用正则匹配 YAML 值里的正则特征（含 \+ \d \r \n 等）——粗筛，可能漏报但不误报
+    re_value = re.compile(r"[\\\.()\[\]\d\*]")
+
+    yaml_files = sorted(p for p in case_dir.rglob("*.yaml") if not p.name.startswith("suite-"))
+    total_errs = 0
+    for path in yaml_files:
+        file_errs: list[str] = []
+        # 文件名
+        file_errs.extend(_check_filename(path, path.parent.name.upper() if path.parent.name else None))
+        # YAML 语法
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = yaml_loader.load(text)
+        except YAMLError as exc:
+            file_errs.append(f"YAML 语法错误: {exc}")
+            data = None
+        # 正则编译（粗筛：遍历 extract/wait_urc/matches 的值尝试编译）
+        if isinstance(data, dict):
+            _basic_check_regexes_in_dict(data, file_errs)
+        if file_errs:
+            total_errs += len(file_errs)
+            try:
+                rel = path.relative_to(Path.cwd())
+            except ValueError:
+                rel = path
+            print(f"\n✗ {rel}")
+            for e in file_errs:
+                print(f"    - {e}")
+
+    print(f"\n{'=' * 40}")
+    if total_errs == 0:
+        print(f"✓ 基础校验通过（降级模式，未做 schema/env 校验）")
+        return 0
+    print(f"✗ 失败: {total_errs} 个错误（降级模式）")
+    return 1
+
+
+def _basic_check_regexes_in_dict(data: dict, errs: list[str]) -> None:
+    """遍历 YAML dict，对 extract/wait_urc/matches 字段值尝试正则编译。"""
+    if not isinstance(data, dict):
+        return
+    for step_phase in ("setup", "steps", "teardown"):
+        steps = data.get(step_phase)
+        if not isinstance(steps, list):
+            continue
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            # extract
+            ext = step.get("extract")
+            if isinstance(ext, dict):
+                for k, v in ext.items():
+                    if isinstance(v, str) and "\\" in v:
+                        try:
+                            re.compile(v)
+                        except re.error as exc:
+                            errs.append(f"{step_phase}[{i}] extract.{k} 正则无效: {exc}")
+            # wait_urc
+            wu = step.get("wait_urc")
+            if isinstance(wu, str):
+                try:
+                    re.compile(wu)
+                except re.error as exc:
+                    errs.append(f"{step_phase}[{i}] wait_urc 正则无效: {exc}")
+            # assert (列表或单条)
+            ast = step.get("assert")
+            _basic_check_assert_regex(ast, f"{step_phase}[{i}]", errs)
+
+
+def _basic_check_assert_regex(ast, prefix: str, errs: list[str]) -> None:
+    if isinstance(ast, dict):
+        ast = [ast]
+    if not isinstance(ast, list):
+        return
+    for j, a in enumerate(ast):
+        if not isinstance(a, dict):
+            continue
+        m = a.get("matches")
+        if isinstance(m, str):
+            try:
+                re.compile(m)
+            except re.error as exc:
+                errs.append(f"{prefix} assert[{j}].matches 正则无效: {exc}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ATProbe 测试用例批量验证")
     ap.add_argument("directory", help="用例目录（递归扫描 *.yaml，跳过 suite- 前缀）")
@@ -154,6 +268,18 @@ def main() -> int:
     if not case_dir.is_dir():
         print(f"错误：目录不存在: {case_dir}", file=sys.stderr)
         return 2
+
+    # atprobe 未安装时降级：只能做不依赖框架的校验（文件名/正则/YAML 语法），
+    # 跳过 schema 校验与 env 引用校验，并提示安装。
+    if not _HAS_ATPROBE:
+        print(
+            "⚠ 未安装 atprobe，降级为基础校验（文件名/正则/YAML 语法），"
+            "跳过 schema 与 env 引用校验。\n"
+            "  完整校验请安装：uv tool install atprobe 或 pip install atprobe，"
+            "或用 uv run python <脚本>",
+            file=sys.stderr,
+        )
+        return _run_basic_only(case_dir)
 
     env: EnvConfig | None = None
     if args.env:
@@ -182,7 +308,12 @@ def main() -> int:
         errs, missing = validate_file(path, env, block_name)
         if errs:
             total_errs += len(errs)
-            print(f"\n✗ {path.relative_to(_REPO_ROOT) if _REPO_ROOT in path.parents else path}")
+            # 显示相对当前工作目录的路径（更短更清晰），不可相对则用绝对路径
+            try:
+                rel = path.relative_to(Path.cwd())
+            except ValueError:
+                rel = path
+            print(f"\n✗ {rel}")
             for e in errs:
                 print(f"    - {e}")
         if missing:

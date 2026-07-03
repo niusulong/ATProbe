@@ -57,17 +57,17 @@ steps:
 ```yaml
 name: 双模块-TCP通信测试
 steps:
-  # 步骤1：COM3（服务端）建立服务器并查询IP
+  # 步骤1：端口A（服务端）建立服务器并查询IP
   - command: AT+CIPSERVER=1,8080
-    port: COM3
+    port: COM3  # 按工作区实际端口填（示例）
     assert: { contains: "OK" }
   - command: AT+CIFSR
-    port: COM3
+    port: COM3  # 按工作区实际端口填（示例）
     extract: { server_ip: '(\d+\.\d+\.\d+\.\d+)' }   # 提取IP写入用例变量池
 
-  # 步骤2：COM5（客户端）连接服务端，引用变量池中的IP
+  # 步骤2：另一端口（客户端）连接服务端，引用变量池中的IP
   - command: 'AT+CIPSTART="TCP","{{server_ip}}",8080'
-    port: COM5
+    port: COM5  # 按工作区实际端口填（示例）
     assert: { contains: "CONNECT" }
 ```
 

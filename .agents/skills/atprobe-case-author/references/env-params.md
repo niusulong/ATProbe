@@ -15,7 +15,9 @@
 - `port` **一律用引号字符串**（`'1883'`），避免 YAML 把纯数字端口误解析。
 - 业务专属字段（topic、product_id、url、cert 文件名等）只放对应业务组，不进通用组。
 - 敏感值（password / secret / 密钥）用 `<占位...>` 标注，真实值只在项目 env.yaml，不进版本库的明文。
-- 章节号对应 `docs/at-ref/chXX-*.md`（以实际文档章节为准）。
+- 章节号对应指令集文档（`docs/at-ref/chXX-*.md` 或目标工作区的等价文档目录，以实际为准）。
+- **本 skill 自带 env.yaml 模板**：`assets/env.yaml.example`（全占位值）。目标工作区无 env.yaml 时，
+  复制它到工作区的 env 配置路径（配置 `env_config` 指向），替换占位值为真实值即可。
 
 ---
 
@@ -24,8 +26,8 @@
 生成用例前对齐环境参数，确保用例里的地址/端口/鉴权用 `{{group.param}}` 引用而非硬编码：
 
 1. **查参数清单**：读本文件下方「按业务分组的参数清单」，掌握本次涉及的功能块需要哪些 env 参数组与字段。
-2. **读项目 env.yaml**：读取目标工作区的 env 配置（配置 `env_config` 指向，如 `examples/env.yaml`），
-   掌握已有参数组与真实值。
+2. **读项目 env.yaml**：读取目标工作区的 env 配置（配置 `env_config` 指向，常见命名 `env.yaml`；
+   若工作区没有，从本 skill 的 `assets/env.yaml.example` 复制初始化），掌握已有参数组与真实值。
 3. **比对、记增量**：逐个用例需要的 env 项，对照项目 env.yaml：
    - **已在 env.yaml** → 用例直接用 `{{group.param}}` 引用真实值。
    - **不在 env.yaml，但清单有** → 按清单命名（组名.字段名）在用例里引用，记入「待补充 env 项清单」。
