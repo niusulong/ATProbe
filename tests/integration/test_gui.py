@@ -1675,3 +1675,45 @@ class TestLibraryManagerDialogNoFormPanel:
         grp = dlg._library.find_group(proj_name, grp_name)  # noqa: SLF001
         assert grp is not None and "AT+CBC" in grp.commands
 
+
+class TestEngineErrorToUI:
+    """日志功能：引擎线程异常时经 progress 信号推 UI（engine_error）弹窗提示。"""
+
+    def test_engine_error_emits_critical_dialog(self, qapp, monkeypatch):  # type: ignore[no-untyped-def]
+        """_on_progress 收到 ('engine_error', msg) → 弹 critical 对话框，含错误和日志路径提示."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        critical_calls: list[str] = []
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda parent, title, msg: critical_calls.append(msg))
+
+        win = MainWindow()
+        win.show()
+        qapp.processEvents()
+
+        # 模拟引擎线程 emit 了 engine_error
+        win.progress.emit(("engine_error", "执行异常：模拟的引擎错误"))
+        qapp.processEvents()
+
+        # 应弹 critical 对话框，文案含错误摘要 + 日志路径提示
+        assert critical_calls, "engine_error 应触发 QMessageBox.critical"
+        assert any("执行异常" in c and "日志" in c for c in critical_calls), \
+            f"弹窗应含错误摘要+日志提示，实际: {critical_calls}"
+
+
+class TestHelpMenuLogDir:
+    """帮助菜单含「打开日志目录」项。"""
+
+    def test_help_menu_has_open_log_action(self, qapp):  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+        win = MainWindow()
+        help_menu = None
+        for action in win.menuBar().actions():
+            if action.text() == "帮助(&H)":
+                help_menu = action.menu()
+                break
+        assert help_menu is not None
+        texts = [a.text() for a in help_menu.actions()]
+        assert "打开日志目录" in texts
+
