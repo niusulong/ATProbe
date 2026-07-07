@@ -7,6 +7,17 @@ import sys
 
 def run_gui(argv: list[str] | None = None) -> int:
     """启动 GUI（延迟导入 PySide6，使 CLI 无 GUI 依赖时也能运行）."""
+    # 最早接入日志：确保后续所有 import 与启动流程的异常都被记录
+    # （诊断 Win10 分发后卡住的关键——异常落盘而非静默消失）
+    import logging
+
+    from atprobe.infra.logging_config import install_excepthook, setup_logging
+
+    log_path = setup_logging(level=logging.INFO)
+    logger = logging.getLogger("atprobe.app")
+    install_excepthook()
+    logger.info("ATProbe GUI 启动，日志: %s", log_path)
+
     from PySide6.QtCore import QSettings
     from PySide6.QtGui import QIcon, QPixmap
     from PySide6.QtWidgets import QApplication
