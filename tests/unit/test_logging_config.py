@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from pathlib import Path
 
 
 def test_setup_logging_configures_root_logger(tmp_path, monkeypatch):
@@ -73,3 +74,54 @@ def test_thread_excepthook_logs_exception(tmp_path, monkeypatch):
         for h in root.handlers[:]:
             h.close()
             root.removeHandler(h)
+
+
+def test_setup_logging_falls_back_to_temp_on_permission_error(monkeypatch):
+    """logs/ 创建失败（权限/路径非法）时降级到系统 temp 目录。"""
+    import tempfile
+
+    from atprobe.infra import logging_config
+
+    # 跨平台稳定：直接让 Path.mkdir 抛 OSError，避免不同平台对非法路径行为差异
+    def _raise_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError("模拟无权限")
+
+    monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        log_path = logging_config.setup_logging(level=logging.INFO)
+        # 降级到 temp
+        assert str(log_path).startswith(tempfile.gettempdir())
+        assert log_path.name == "atprobe.log"
+    finally:
+        for h in root.handlers[:]:
+            h.close()
+            root.removeHandler(h)
+        for h in saved_handlers:
+            root.addHandler(h)
+        root.setLevel(saved_level)
+
+
+def test_setup_logging_is_idempotent(monkeypatch, tmp_path):
+    """重复调 setup_logging 不重复挂 handler。"""
+    from atprobe.infra import logging_config
+
+    monkeypatch.setattr(logging_config, "_log_dir", lambda: tmp_path / "logs")
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        logging_config.setup_logging(level=logging.INFO)
+        count_after_first = len(root.handlers)
+        logging_config.setup_logging(level=logging.INFO)
+        count_after_second = len(root.handlers)
+        assert count_after_second == count_after_first  # 不重复挂
+    finally:
+        for h in root.handlers[:]:
+            h.close()
+            root.removeHandler(h)
+        for h in saved_handlers:
+            root.addHandler(h)
+        root.setLevel(saved_level)
