@@ -1701,3 +1701,19 @@ class TestEngineErrorToUI:
         assert any("执行异常" in c and "日志" in c for c in critical_calls), \
             f"弹窗应含错误摘要+日志提示，实际: {critical_calls}"
 
+
+class TestHelpMenuLogDir:
+    """帮助菜单含「打开日志目录」项。"""
+
+    def test_help_menu_has_open_log_action(self, qapp):  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+        win = MainWindow()
+        help_menu = None
+        for action in win.menuBar().actions():
+            if action.text() == "帮助(&H)":
+                help_menu = action.menu()
+                break
+        assert help_menu is not None
+        texts = [a.text() for a in help_menu.actions()]
+        assert "打开日志目录" in texts
+
