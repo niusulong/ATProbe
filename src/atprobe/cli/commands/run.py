@@ -59,8 +59,18 @@ def run(
     baud: int | None = typer.Option(
         None, "--baud", help="覆盖所有端口的波特率（默认 115200 或配置文件 default.baud）"
     ),
+    debug: bool = typer.Option(False, "--debug", help="开启详细日志（DEBUG 级，记录串口/引擎细节）"),
 ) -> None:
     """执行测试用例/套件/目录."""
+    # 日志初始化（CLI 最早接入；--debug 提到 DEBUG 级，记录串口/引擎细节）
+    import logging
+
+    from atprobe.infra.logging_config import setup_logging
+
+    setup_logging(level=logging.DEBUG if debug else logging.INFO)
+    if debug:
+        logging.getLogger("atprobe").info("--debug 模式：详细日志已开启")
+
     # 1. 加载配置
     # 用户显式 --config 按其值（相对 cwd）；否则打包态优先找 exe 同级 atprobe.yaml，
     # 找不到回退 cwd（开发态 cwd=仓库根，与 exe 同级等价）。
