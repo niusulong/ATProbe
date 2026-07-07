@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,8 @@ from atprobe.infra.serial.interfaces import CancelToken
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.reporting.html import HtmlReporter
 from atprobe.reporting.interfaces import ReportOutput
+
+_log = logging.getLogger("atprobe.engine_gui")
 
 
 class MainWindow(QMainWindow):
@@ -643,14 +646,27 @@ class MainWindow(QMainWindow):
 
         def _run() -> None:
             assert self._engine is not None
-            result = self._engine.start(cfg, handler=lambda ev: self.progress.emit(ev))
+            try:
+                result = self._engine.start(cfg, handler=lambda ev: self.progress.emit(ev))
+            except Exception as exc:
+                # 引擎线程异常兜底：写完整 traceback 日志 + 推 UI 即时提示。
+                # 此前异常静默死亡 → UI 表现为"卡住"；现在用户能看到"出错了"并查日志。
+                _log.exception("引擎执行异常")
+                self.progress.emit(("engine_error", f"执行异常：{exc}"))
+                self._set_engine_status("ERROR", self._tokens["danger"])
+                return
             if no_report:
                 self.progress.emit(("done_noreport", "", result.summary.passed, result.summary.failed))
                 return
             # 生成报告
-            rdir = resolve_workspace_path(self._app_config.report_dir) / session / "report.html"
-            HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
-            self.progress.emit(("done", str(rdir), result.summary.passed, result.summary.failed))
+            try:
+                rdir = resolve_workspace_path(self._app_config.report_dir) / session / "report.html"
+                HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
+                self.progress.emit(("done", str(rdir), result.summary.passed, result.summary.failed))
+            except Exception as exc:
+                _log.exception("报告生成异常")
+                self.progress.emit(("engine_error", f"报告生成异常：{exc}"))
+                self._set_engine_status("ERROR", self._tokens["danger"])
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -719,6 +735,19 @@ class MainWindow(QMainWindow):
     # 进度事件处理（主线程，经信号投递）
     # ------------------------------------------------------------------
     def _on_progress(self, ev: object) -> None:
+        # 引擎异常（线程内 try/except 捕获后推来）：状态栏变红 + 弹窗提示看日志
+        if isinstance(ev, tuple) and ev and ev[0] == "engine_error":
+            msg = ev[1] if len(ev) > 1 else "未知错误"  # type: ignore[union-attr]
+            self._set_engine_status("ERROR", self._tokens["danger"])
+            from atprobe.infra.logging_config import _log_dir
+
+            try:
+                log_file: Path | None = _log_dir() / "atprobe.log"
+            except Exception:  # noqa: BLE001
+                log_file = None
+            log_hint = f"\n\n详见日志：{log_file}" if log_file else "\n\n详见日志"
+            QMessageBox.critical(self, "执行异常", f"{msg}{log_hint}")
+            return
         # 终止事件：done（生成报告）/ done_noreport（不生成报告）
         if isinstance(ev, tuple) and ev and ev[0] in ("done", "done_noreport"):
             tag, report_path, passed, failed = ev  # type: ignore[misc]
