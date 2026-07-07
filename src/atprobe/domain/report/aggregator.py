@@ -33,12 +33,20 @@ def aggregate(
     if by_tag:
         for c in case_results:
             for tag in c.tags:
-                bucket = tag_stats.setdefault(tag, {"total": 0, "passed": 0, "failed": 0})
+                # 完整四态计数，避免 SKIPPED/INTERRUPTED 用例在按标签查看时"消失"
+                # （之前只有 total/passed/failed，导致 passed+failed < total）
+                bucket = tag_stats.setdefault(
+                    tag, {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "interrupted": 0}
+                )
                 bucket["total"] += 1
                 if c.status is CaseStatus.PASS:
                     bucket["passed"] += 1
                 elif c.status is CaseStatus.FAIL:
                     bucket["failed"] += 1
+                elif c.status is CaseStatus.SKIPPED:
+                    bucket["skipped"] += 1
+                elif c.status is CaseStatus.INTERRUPTED:
+                    bucket["interrupted"] += 1
 
     return Summary(
         start_time=start_time,

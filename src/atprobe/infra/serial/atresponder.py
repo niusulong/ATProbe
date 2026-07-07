@@ -31,7 +31,10 @@ class AtResponder:
         self.cmgf = 0
         self.cereg_n = 0  # CEREG 上报开关
         # 指令分发表
-        self._handlers: dict[str, Callable[[str], list[str]]] = {
+        # handler 返回约定（list[str] | None）：
+        #   list[str]  正文行，respond() 追加 OK（空 list = 仅 OK 的正常响应）
+        #   None       解析失败/参数非法，respond() 返回 ERROR（对齐真实模组的错误拒绝）
+        self._handlers: dict[str, Callable[[str], list[str] | None]] = {
             "AT": self._h_at,
             "ATI": self._h_ati,
             "AT&V": self._h_ati,
@@ -55,54 +58,58 @@ class AtResponder:
         }
 
     # -- 各指令处理器：返回正文行（不含 OK/ERROR） ---------------------
-    def _h_at(self, _cmd: str) -> list[str]:
+    def _h_at(self, _cmd: str) -> list[str] | None:
         return []  # 仅 OK
 
-    def _h_ati(self, _cmd: str) -> list[str]:
+    def _h_ati(self, _cmd: str) -> list[str] | None:
         return ["ATProbe Virtual Module", "Revision: vsim-1.0", "IMEI: 012345678901234"]
 
-    def _h_csq(self, _cmd: str) -> list[str]:
+    def _h_csq(self, _cmd: str) -> list[str] | None:
         ber = 99  # BER 未知
         return [f"+CSQ: {self.rssi},{ber}"]
 
-    def _h_cereg_query(self, _cmd: str) -> list[str]:
+    def _h_cereg_query(self, _cmd: str) -> list[str] | None:
         # +CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
         return [f"+CEREG: {self.cereg_n},{self.cereg}"]
 
-    def _h_cereg_set(self, cmd: str) -> list[str]:
+    def _h_cereg_set(self, cmd: str) -> list[str] | None:
         # AT+CEREG=<n>
         try:
             n = int(cmd.split("=", 1)[1].split(",")[0])
             self.cereg_n = n
         except (IndexError, ValueError):
-            return []  # 落到 ERROR
+            return None  # 参数非法 → ERROR（真实模组对格式错误指令返回错误）
         return []  # OK
 
-    def _h_cpin(self, _cmd: str) -> list[str]:
+    def _h_cpin(self, _cmd: str) -> list[str] | None:
         return ["+CPIN: READY"]
 
-    def _h_cgdcont(self, _cmd: str) -> list[str]:
+    def _h_cgdcont(self, _cmd: str) -> list[str] | None:
         return [
             '+CGDCONT: 1,"IP","cmnet","","0.0.0.0",0,0',
             '+CGDCONT: 2,"IPV4V6","ims","","0.0.0.0",0,0',
         ]
 
-    def _h_cgatt(self, _cmd: str) -> list[str]:
+    def _h_cgatt(self, _cmd: str) -> list[str] | None:
         return ["+CGATT: 1"]
 
-    def _h_cmgf(self, cmd: str) -> list[str]:
+    def _h_cmgf(self, cmd: str) -> list[str] | None:
         try:
             self.cmgf = int(cmd.split("=", 1)[1])
         except (IndexError, ValueError):
-            return []
+            return None  # 参数非法 → ERROR
         return []
 
-    def _h_ok(self, _cmd: str) -> list[str]:
+    def _h_ok(self, _cmd: str) -> list[str] | None:
         return []
 
     # -- 主分发：返回完整应答字节 --------------------------------------
     def respond(self, cmd: str) -> bytes:
-        """根据指令返回完整应答帧（含结尾 OK/ERROR）."""
+        """根据指令返回完整应答帧（含结尾 OK/ERROR）.
+
+        handler 返回 ``None`` 表示解析失败/参数非法 → 返回 ERROR；返回 ``list``（含
+        空 list）表示正常 → 追加 OK。从而区分「合法空响应」与「错误拒绝」。
+        """
         c = cmd.strip().upper()
         if not c:
             return b""

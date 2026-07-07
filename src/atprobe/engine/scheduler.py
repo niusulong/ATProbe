@@ -88,6 +88,10 @@ class Engine:
         self._stop_flag.clear()
         self._stop_mode = None
 
+        # 记录执行起始时间（单调钟算耗时 + 墙钟记时间区间，供报告追溯）
+        t_start = self._clock()
+        dt_start = datetime.now()
+
         # 原始日志记录器：未注入则自建（REQ-M1 §7，运行时自动落盘 TX/RX 字节流）
         if self._owns_raw_logger and self._raw_logger is None:
             self._raw_logger = RawLogger()
@@ -206,7 +210,15 @@ class Engine:
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
 
-        summary = aggregate(case_results)
+        # 计算本次执行的耗时与时间区间（P1-1：之前始终为空/0，报告无法追溯执行时刻）
+        dt_end = datetime.now()
+        duration_ms = (self._clock() - t_start) * 1000.0
+        summary = aggregate(
+            case_results,
+            start_time=dt_start.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time=dt_end.strftime("%Y-%m-%d %H:%M:%S"),
+            duration_ms=duration_ms,
+        )
         env_snap = self._env_snapshot(config)
         # suite 前后置结果（try 块内收集；非套件执行或提前异常时为空）
         ss_results = tuple(locals().get("suite_setup_results", ()))
@@ -464,5 +476,6 @@ class Engine:
         return {g: dict(p) for g, p in env.groups().items()}
 
     def _error_result(self, config: EngineConfig, msg: str) -> ExecutionResult:
+        # 把启动错误原因写入 result.error，供 CLI/GUI 展示（否则用户看不到为何失败）
         summary = Summary(start_time="", end_time="", duration_ms=0.0)
-        return ExecutionResult(summary=summary, case_results=())
+        return ExecutionResult(summary=summary, case_results=(), error=msg)

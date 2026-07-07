@@ -171,3 +171,6 @@ class ExecutionResult:
     # 失败的 suite_setup 会导致 cases 被跳过，此处保留结果供报告诊断。
     suite_setup_results: tuple[StepResult, ...] = ()
     suite_teardown_results: tuple[StepResult, ...] = ()
+    # 启动级错误（如端口全部打开失败）：非空表示执行未能开始，
+    # CLI 据此输出原因到 stderr，GUI 据此弹窗。空字符串表示无启动错误。
+    error: str = ""

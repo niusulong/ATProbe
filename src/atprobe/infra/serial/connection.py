@@ -450,6 +450,11 @@ class SerialConnection:
                     stripped = line.strip()
                     if stripped:
                         self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+                # 已处理的完整行从 buffer 截断，只保留最后一个不完整行（tail）。
+                # 否则设备持续发 URC/心跳而无人调用 send_command 时，buffer 会无限累积
+                # 所有历史字节，长会话内存缓慢增长甚至 OOM。
+                with self._buffer_lock:
+                    self._buffer = bytearray(tail)
 
     def _dispatch_urc(self, text: str) -> None:
         evt = URCEvent(port=self.config.name, text=text, timestamp="")

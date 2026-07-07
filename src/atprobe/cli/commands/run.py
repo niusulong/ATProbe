@@ -243,6 +243,11 @@ def run(
 
     result = engine.start(engine_cfg, handler=handler)
 
+    # 启动级错误（如端口全部打开失败）：输出原因到 stderr，否则用户只能看到退出码 1 却不知为何
+    if result.error:
+        typer.secho(f"执行失败：{result.error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
     # 8. 控制台汇总 + 报告
     from atprobe.reporting.console import ConsoleReporter
 
@@ -269,7 +274,12 @@ def _resolve_case_paths(paths: list[Path], app_cfg: AppConfig) -> list[Path]:
     seen: set[Path] = set()
     for p in paths:
         if p.is_dir():
-            for f in sorted(p.rglob("*.yaml")):
+            # 同时覆盖 .yaml 与 .yml 两种后缀，与单文件分支接受的后缀保持一致
+            # （否则目录下的 .yml 用例与 suite-*.yml 会被静默漏扫）
+            for f in sorted(
+                [*p.rglob("*.yaml"), *p.rglob("*.yml")],
+                key=lambda x: str(x),
+            ):
                 if f.name.startswith("suite-"):
                     continue
                 if f.resolve() not in seen:

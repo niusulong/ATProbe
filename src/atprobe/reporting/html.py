@@ -41,7 +41,11 @@ class HtmlReporter(IReporter):
         s = result.summary
         if s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0:
             overall = ("全部通过", "pass")
-        elif s.passed == 0:
+        elif s.total_cases > 0 and s.passed == 0 and s.failed == 0:
+            # 全部跳过/中断（无通过、无失败）：既非"全部通过"也非"全部失败"
+            overall = ("全部跳过", "neutral")
+        elif s.failed > 0 and s.passed == 0:
+            # 有失败且无通过 → 全部失败（必须有 failed>0，否则全部跳过会被误判）
             overall = ("全部失败", "fail")
         else:
             overall = ("部分通过", "partial")

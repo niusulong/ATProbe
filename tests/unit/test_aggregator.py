@@ -50,8 +50,26 @@ class TestAggregate:
             _cr("b", CaseStatus.FAIL, ("network",)),
             _cr("c", CaseStatus.PASS, ("sms",)),
         ])
-        assert s.by_tag["network"] == {"total": 2, "passed": 1, "failed": 1}
-        assert s.by_tag["sms"] == {"total": 1, "passed": 1, "failed": 0}
+        # 完整四态计数（含 skipped/interrupted），数字自洽：total = passed+failed+skipped+interrupted
+        assert s.by_tag["network"] == {
+            "total": 2, "passed": 1, "failed": 1, "skipped": 0, "interrupted": 0
+        }
+        assert s.by_tag["sms"] == {
+            "total": 1, "passed": 1, "failed": 0, "skipped": 0, "interrupted": 0
+        }
+
+    def test_by_tag_includes_skipped_and_interrupted(self) -> None:
+        """P2-3：SKIPPED/INTERRUPTED 用例必须在 by_tag 中可见，不再"消失"."""
+        s = aggregate([
+            _cr("a", CaseStatus.SKIPPED, ("network",)),
+            _cr("b", CaseStatus.INTERRUPTED, ("network",)),
+        ])
+        st = s.by_tag["network"]
+        assert st["total"] == 2
+        assert st["skipped"] == 1
+        assert st["interrupted"] == 1
+        assert st["passed"] == 0
+        assert st["failed"] == 0
 
     def test_no_by_tag_when_disabled(self) -> None:
         s = aggregate([_cr("a", CaseStatus.PASS, ("t",))], by_tag=False)

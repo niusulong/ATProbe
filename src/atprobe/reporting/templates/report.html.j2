@@ -368,7 +368,7 @@
   <h2 class="section">按标签分组 <span class="count">{{ summary.by_tag|length }}</span></h2>
   <table class="tag-table">
     <thead>
-      <tr><th>TAG</th><th style="text-align:right;">总数</th><th style="text-align:right;">通过</th><th style="text-align:right;">失败</th><th style="text-align:right;">通过率</th></tr>
+      <tr><th>TAG</th><th style="text-align:right;">总数</th><th style="text-align:right;">通过</th><th style="text-align:right;">失败</th><th style="text-align:right;">跳过</th><th style="text-align:right;">中断</th><th style="text-align:right;">通过率</th></tr>
     </thead>
     <tbody>
       {% for tag, st in summary.by_tag.items() %}
@@ -377,6 +377,8 @@
         <td class="num">{{ st.total }}</td>
         <td class="num pass">{{ st.passed }}</td>
         <td class="num fail">{{ st.failed }}</td>
+        <td class="num">{{ st.skipped }}</td>
+        <td class="num">{{ st.interrupted }}</td>
         <td class="num">{{ ((st.passed / st.total * 100.0)|round(1)) if st.total else 0 }}%</td>
       </tr>
       {% endfor %}

@@ -654,3 +654,54 @@ steps:
         # cases 被 suite_setup 失败跳过：0 通过
         assert result.summary.passed == 0
         assert len(result.case_results) == 0
+
+
+class TestErrorPropagation:
+    """P0-1：端口全部打开失败时，错误原因应写入 result.error（而非丢失）."""
+
+    def test_port_open_failure_error_message_preserved(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.fail_open("COM3")  # 单端口打开失败 = 全部失败
+        case = parse_case("""
+name: t
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        # error 字段非空，且含端口打开失败原因（之前完全丢失）
+        assert result.error
+        assert "端口打开失败" in result.error
+
+    def test_normal_execution_has_empty_error(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "OK\r\n")
+        case = parse_case("""
+name: t
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        assert result.error == ""
+
+
+class TestTimestampsRecorded:
+    """P1-1：聚合 Summary 应记录真实的时间戳与耗时（之前始终为空/0）."""
+
+    def test_start_end_time_and_duration_recorded(self, fake_port) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "OK\r\n")
+        case = parse_case("""
+name: t
+port: COM3
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""")
+        result = _engine_with_fake(fake_port).start(_cfg([case]))
+        s = result.summary
+        # 之前 start_time 恒为 ""，duration_ms 恒为 0.0
+        assert s.start_time != ""
+        assert s.end_time != ""
+        assert s.duration_ms >= 0.0  # fake sleep=lambda:None，耗时极小但应被计算
+

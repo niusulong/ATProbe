@@ -2,12 +2,13 @@
 
 面板作为普通 QWidget 嵌入手动调试页左侧（QSplitter），单击命令叶子经
 send_requested(str) 信号通知宿主页发送。增删改经两种入口：
-  - 侧栏面板（发送界面）：右键菜单（修改/删除/新增下级）+ 双击修改，改动即时落盘。
-  - 管理对话框（添加界面）：左树双击修改 + 右键增删，确定时统一落盘。
+  - 侧栏面板（发送界面）：仅右键菜单（修改/删除/新增下级），改动即时落盘。
+    不响应双击——发送界面快速连发命令时双击易误触「修改」弹窗，中断发送节奏。
+  - 管理对话框（管理界面）：双击修改 + 右键增删，确定时统一落盘。
 
 交互统一：节点内嵌「＋」按钮（项目节点→加功能组、功能组节点→加命令），
-无需预选；双击任意节点改、右键删/增。删除项目/功能组（有子节点）弹确认，
-删命令直接执行。
+无需预选；侧栏仅右键增删改、对话框双击改+右键增删。删除项目/功能组（有子
+节点）弹确认，删命令直接执行。
 
 解耦：面板不认识手动调试页，只 emit send_requested；宿主页连接该信号发送。
 """
@@ -320,7 +321,8 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.itemClicked.connect(self._on_click)
-        self.tree.itemDoubleClicked.connect(self._on_double_click)
+        # 不连接双击：发送界面快速连发命令时双击易误触「修改」弹窗，中断发送节奏。
+        # 修改/重命名/增删统一经右键菜单（customContextMenuRequested）完成。
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self.tree, 1)
@@ -370,7 +372,12 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
                     gitem.addChild(citem)
                 pitem.addChild(gitem)
             self.tree.addTopLevelItem(pitem)
-        self.tree.expandAll()
+        # 默认折叠（仅展开顶层项目节点，功能组/命令收起）——避免命令多时一上来就
+        # 铺满全屏；用户按需点开。如需全展开可逐项点击展开。
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top is not None:
+                top.setExpanded(True)
 
     def _save_library(self) -> None:
         """原子写回 self._path 后刷新树（面板是持久态，改动需即时落盘）."""

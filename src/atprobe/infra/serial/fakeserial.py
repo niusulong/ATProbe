@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from atprobe.infra.serial.config import PortConfig, Terminator
@@ -62,8 +62,7 @@ class FakePortManager:
         self.sent: list[tuple[str, str]] = []
         # 记录启用 wait_urc 的调用（port, urc_pattern），供测试断言
         self.wait_urc_calls: list[tuple[str, str]] = []
-        self._urc_handlers: dict[str, list[URCHandler]] = field(default_factory=dict)  # type: ignore[assignment]
-        self._urc_handlers = {}
+        self._urc_handlers: dict[str, list[URCHandler]] = {}
         self._rx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._tx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._fail_open: set[str] = set()

@@ -276,6 +276,9 @@ def _run_poll(
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("poll 被取消")
         iterations += 1
+        # 注：首轮立即查询（sleep 在循环末尾）。这是有意设计——poll 典型场景是
+        # 「发指令后等设备产生结果」，首轮立即查询可在结果已就绪时省掉一个 interval
+        # 的等待；上一条命令的残留响应已由 send_command 入口的 _drain_response_q 清排。
         attempt = _single_attempt(step, request, port, timeout, wait_urc, ctx, sender, clock, cancel)
         total_duration += attempt.duration_ms
         attempt.duration_ms = total_duration
