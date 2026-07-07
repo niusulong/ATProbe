@@ -256,7 +256,7 @@ class Engine:
         status = CaseStatus.PASS
 
         # 绑定用例日志文件
-        self._bind_case_logs(case, port_manager, log_dir, session)
+        self._bind_case_logs(case, port_manager, log_dir, session, default_port)
 
         try:
             # §3.2 流程A setup
@@ -387,12 +387,14 @@ class Engine:
         pm = PortManager(raw_logger=self._raw_logger, clock=self._clock, sleep=self._sleep)
         return pm, pm
 
-    def _bind_case_logs(self, case: Case, port_manager: Any, log_dir: Path, session: str) -> None:
+    def _bind_case_logs(
+        self, case: Case, port_manager: Any, log_dir: Path, session: str, default_port: str
+    ) -> None:
         if self._raw_logger is None or port_manager is None:
             return
         if not hasattr(port_manager, "set_case_log"):
             return
-        for pc in self._case_ports(case):
+        for pc in self._case_ports(case, default_port):
             lf = self._raw_logger.begin_case(log_dir, session, pc, case.name)
             port_manager.set_case_log(pc, lf)
 
@@ -401,10 +403,17 @@ class Engine:
             return
         # 清理由 _run_case 在下次 _bind 时覆盖；此处不强制清
 
-    def _case_ports(self, case: Case) -> list[str]:
+    def _case_ports(self, case: Case, default_port: str = "") -> list[str]:
+        """收集本用例实际执行会用到的端口（用于绑定用例级原始日志）.
+
+        以 ``default_port``（执行配置端口，如 GUI 选的 / CLI --port）为基础，叠加步骤
+        显式指定的 ``step.port``。**不使用 ``case.port``**——它在执行流里不影响实际发送
+        端口（步骤用 ``step.port or default_port``），若用它会导致日志目录建到错误端口
+        名下（如用例硬编码 COM5，实际执行 COM28 时日志目录错建为 COM5 且可能失败）。
+        """
         ports: list[str] = []
-        if case.port:
-            ports.append(case.port)
+        if default_port:
+            ports.append(default_port)
         for s in case.steps:
             if s.port and s.port not in ports:
                 ports.append(s.port)

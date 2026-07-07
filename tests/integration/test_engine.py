@@ -705,3 +705,36 @@ steps:
         assert s.end_time != ""
         assert s.duration_ms >= 0.0  # fake sleep=lambda:None，耗时极小但应被计算
 
+
+class TestCaseLogUsesExecutionPort:
+    """日志端口修复：用例级原始日志应建在实际执行端口（default_port）下，
+    而非用例 YAML 硬编码的 case.port（否则端口名错误、且可能对未打开端口建目录失败）."""
+
+    def test_log_dir_uses_default_port_not_case_port(self, fake_port, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        fake_port.script_text("COM3", "OK\r\n", match="AT", persistent=True)
+        case = parse_case("""
+name: 端口修复测试
+port: COM5
+steps:
+  - command: AT
+    assert: { contains: "OK" }
+""")
+        # 实际执行端口 = COM3（config.ports），用例 case.port=COM5 应被忽略用于日志
+        cfg = EngineConfig(
+            ports=(PortConfig(name="COM3"),),
+            cases=(case,),
+            step_timeout_default=5.0,
+            log_dir=str(tmp_path),
+        )
+        result = _engine_with_fake(fake_port).start(cfg)
+        assert result.summary.passed == 1
+
+        # 日志目录应建在 COM3（实际执行端口）下，而非 COM5（用例硬编码）
+        sessions = list(tmp_path.glob("*"))
+        assert sessions, "应创建 session 目录"
+        session_dir = sessions[0]
+        port_dirs = [p.name for p in session_dir.iterdir() if p.is_dir()]
+        assert "COM3" in port_dirs, f"日志应在 COM3 下，实际端口目录: {port_dirs}"
+        assert "COM5" not in port_dirs, f"不应在 COM5（用例硬编码）下建日志，实际: {port_dirs}"
+
+
