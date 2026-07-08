@@ -598,6 +598,15 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
     # 文件操作
     # ------------------------------------------------------------------
     def _on_load_file(self) -> None:
+        """加载文件 → 导入到当前库（语义：内容覆盖当前活动库，提交目标不变）.
+
+        只替换内存工作副本 self._library，不改 self._path（提交目标始终是打开
+        对话框时的活动库文件）。点「确定」时 dump_library 写回当前活动库 →
+        面板 reload_library 读到新内容 → 生效。取消则丢弃（对话框工作副本语义）。
+
+        之前的 bug：_on_load_file 把 self._path 改成被加载文件路径 → _on_accept
+        写回被加载文件（无意义/只读失败），且取消时完全丢弃 → 加载不生效。
+        """
         f, _ = QFileDialog.getOpenFileName(self, "加载命令库", "", "YAML (*.yaml *.yml)")
         if not f:
             return
@@ -606,8 +615,8 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
         except QuickCmdStoreError as exc:
             QMessageBox.critical(self, "加载失败", str(exc))
             return
-        self._path = Path(f)
-        self._file_label.setText(self._path.name)
+        # 不改 self._path：提交目标仍是当前活动库；仅提示用户已导入该文件的内容
+        self._file_label.setText(f"已导入：{Path(f).name}（保存到 {self._path.name}）")
         self._refresh_tree()
 
     def _on_save_as(self) -> None:
