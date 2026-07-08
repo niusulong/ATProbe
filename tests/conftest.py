@@ -43,3 +43,15 @@ def ok_response() -> Response:
 @pytest.fixture
 def examples_dir() -> Path:
     return Path(__file__).parent.parent / "examples"
+
+
+# ---------------------------------------------------------------------------
+# Qt 应用实例夹具：供需要构造 QWidget 的单测/集成测试共用。
+# 模块级单例（QApplication 全进程唯一），避免每个测试文件各自定义导致冲突。
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def qapp():  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app

@@ -87,6 +87,9 @@ class MainWindow(QMainWindow):
         self._cancel: CancelToken | None = None
         self._monitor_handle: object | None = None
         self._monitor_sink: Any = None
+        # 环境配置页引用：开启时由内存 EnvConfig 供 run_cases 实时生效（所见即所跑）；
+        # 关闭后置 None，run_cases 回退到磁盘读取。
+        self._env_widget: Any = None
 
         self._init_sidebar()
         self._init_tabs()
@@ -451,12 +454,19 @@ class MainWindow(QMainWindow):
         binding = TabBinding(type_name=type_name, params=params or {})
         widget = view.create_widget(binding, self)
         widget.setProperty("tab_type", type_name)  # 记录类型，供单例去重
+        # 环境配置页：登记引用，供 run_cases 读取内存 EnvConfig 实时生效
+        if type_name == "env_config":
+            self._env_widget = widget
         title = view.display_name
         idx = self.tabs.addTab(widget, title)
         self.tabs.setCurrentIndex(idx)
 
     def _close_tab(self, idx: int) -> None:
         # 执行中的选项卡关闭前确认（§2.3）
+        widget = self.tabs.widget(idx)
+        # 环境配置页关闭：解除引用，run_cases 回退磁盘读取
+        if widget is not None and widget.property("tab_type") == "env_config":
+            self._env_widget = None
         self.tabs.removeTab(idx)
 
     def _on_sidebar_double_click(self, item: QListWidgetItem) -> None:
@@ -637,12 +647,29 @@ class MainWindow(QMainWindow):
                 return
 
         env = None
-        env_path = Path(self._app_config.env_config)
-        if env_path.exists():
-            try:
-                env = load_env_config_file(env_path)
-            except Exception:  # noqa: BLE001
-                env = None
+        env_widget = self._env_widget
+        if env_widget is not None:
+            # 环境配置页已开：内存 EnvConfig 是唯一活跃来源（所见即所跑）。
+            # dirty 则先隐式存盘，保证内存=磁盘一致（单一数据源，避免关 tab 后回退磁盘突变）。
+            env_widget.save_if_dirty()
+            env = env_widget.current_env()
+        else:
+            # 环境配置页未开：从磁盘读 env.yaml。
+            # 用 env_config_path()（含内置 env.yaml 回退），而非裸 app_config 路径：
+            # 打包态用户路径可能不存在，裸路径会让 env=None → 所有 {{group.param}} 静默失败。
+            env_path_str = self.env_config_path()
+            if env_path_str is not None:
+                env_path = Path(env_path_str)
+                try:
+                    env = load_env_config_file(env_path)
+                except Exception as exc:  # noqa: BLE001
+                    # 不再静默吞：env 解析失败会让所有点号引用变未定义，必须提示用户。
+                    QMessageBox.warning(
+                        self, "环境配置加载失败",
+                        f"加载环境配置失败，用例中的 {{{{group.param}}}} 引用可能无法替换：\n"
+                        f"{env_path}\n\n{exc}\n\n请检查该 YAML 语法（应为两级 group.param 映射）。",
+                    )
+                    env = None
 
         # session_id 加随机后缀，避免连续快速运行按秒冲突覆盖报告
         import secrets

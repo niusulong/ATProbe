@@ -116,3 +116,50 @@ def test_resolve_workspace_path_nested_relative():
     """多层相对路径正确拼接（examples/testcases）。"""
     p = resources.resolve_workspace_path("./examples/testcases")
     assert p == resources.user_workspace() / "examples" / "testcases"
+
+
+# ---------------------------------------------------------------------------
+# builtin_resource 打包态优先级：外露可写副本 > _internal 只读副本
+# （issue: 用户编辑 <app_root>/examples/env.yaml 但工具读 _internal/examples/env.yaml）
+# ---------------------------------------------------------------------------
+def test_builtin_resource_frozen_prefers_exposed_copy(tmp_path):
+    """打包态：exposed <app_root>/examples/env.yaml 与 _internal/examples/env.yaml
+    同时存在时，必须返回 exposed 副本（用户可写那一份）。"""
+    # 模拟打包目录结构
+    app_root = tmp_path
+    exposed = app_root / "examples" / "env.yaml"
+    exposed.parent.mkdir(parents=True)
+    exposed.write_text("user-edited", encoding="utf-8")
+    internal = app_root / "_internal" / "examples" / "env.yaml"
+    internal.parent.mkdir(parents=True)
+    internal.write_text("builtin-readonly", encoding="utf-8")
+
+    (app_root / "ATProbe.exe").write_text("")
+    with patch.object(resources.sys, "frozen", True, create=True), \
+         patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")):
+        p = resources.builtin_resource("env.yaml")
+        assert p == exposed
+        assert p.read_text(encoding="utf-8") == "user-edited"
+
+
+def test_builtin_resource_frozen_falls_back_to_internal(tmp_path):
+    """打包态：exposed 副本不存在时，回退到 _internal 只读副本。"""
+    app_root = tmp_path
+    internal = app_root / "_internal" / "examples" / "env.yaml"
+    internal.parent.mkdir(parents=True)
+    internal.write_text("builtin-readonly", encoding="utf-8")
+
+    (app_root / "ATProbe.exe").write_text("")
+    with patch.object(resources.sys, "frozen", True, create=True), \
+         patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")):
+        p = resources.builtin_resource("env.yaml")
+        assert p == internal
+
+
+def test_builtin_resource_frozen_missing_raises(tmp_path):
+    """打包态：两份都不存在 → FileNotFoundError。"""
+    (tmp_path / "ATProbe.exe").write_text("")
+    with patch.object(resources.sys, "frozen", True, create=True), \
+         patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
+        with pytest.raises(FileNotFoundError):
+            resources.builtin_resource("nope.yaml")

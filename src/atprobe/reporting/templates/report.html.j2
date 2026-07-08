@@ -470,13 +470,18 @@
               </td>
               <td class="dur">{{ sr.duration_ms|round(0) }}ms</td>
             </tr>
-            {% if sr.status.value == 'FAIL' and sr.response %}
+            {% if sr.status.value == 'FAIL' and (sr.response or sr.error_msg) %}
             <tr>
               <td colspan="7" style="padding:0 0 8px;">
+                {% if sr.error_msg %}
+                <div class="error-msg">⚠ {{ sr.error_msg }}</div>
+                {% endif %}
+                {% if sr.response %}
                 <details>
                   <summary>response · click to expand</summary>
                   <div class="resp">{{ sr.response }}</div>
                 </details>
+                {% endif %}
               </td>
             </tr>
             {% endif %}

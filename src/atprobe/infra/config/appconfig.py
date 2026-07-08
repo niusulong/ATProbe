@@ -33,9 +33,12 @@ class AppConfig:
     step_timeout: float = 5.0
     baud: int = 115200
     log_level: str = "progress"
-    cases_dir: str = "./testcases"
+    # 默认指向 <app_root>/examples/ 下（与打包外露布局、build.py expose_user_assets 一致）。
+    # 用户未提供 atprobe.yaml 时，这些默认值仍能命中用户可写的 examples 副本，
+    # 而非回退到 _internal 只读副本。
+    cases_dir: str = "./examples/testcases"
     report_dir: str = "./reports"
-    env_config: str = "./env.yaml"
+    env_config: str = "./examples/env.yaml"
     console_color: bool = True
     command_truncate: int = 40
     log_dir: str = "./logs"

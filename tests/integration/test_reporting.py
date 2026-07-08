@@ -79,6 +79,31 @@ class TestHtmlReporter:
         assert "PASS" in html
         assert "FAIL" in html
 
+    def test_step_error_msg_rendered_on_fail(self, tmp_path: Path) -> None:
+        # 模板渲染失败等场景：步骤 FAIL 但无 response，error_msg 必须显示在报告里，
+        # 否则用户只看到 "FAIL / 0ms / 无断言" 而不知原因（回归 issue: 变量未定义诊断丢失）。
+        step = StepResult(
+            step_index=1, phase="setup", input_type=InputType.COMMAND,
+            command="AT+HTTPCREATE=0,{{http.https_ipv6_url}}", port="COM28",
+            status=StepStatus.FAIL, request="", response="",
+            error_msg="模板渲染失败：'http.https_ipv6_url'",
+            duration_ms=0.0,
+        )
+        case = CaseResult(
+            case_name="变量未定义用例", case_file="c.yaml", tags=(),
+            ports=("COM28",), status=CaseStatus.SKIPPED,
+            setup_results=(step,), duration_ms=0.0,
+            error_msg="setup 失败",
+        )
+        summary = aggregate([case])
+        result = ExecutionResult(summary=summary, case_results=(case,))
+        html_path = tmp_path / "err.html"
+        HtmlReporter().render(result, ReportOutput(html_path=html_path, to_console=False))
+        html = html_path.read_text(encoding="utf-8")
+        # step 级诊断信息必须可见
+        assert "模板渲染失败" in html
+        assert "https_ipv6_url" in html
+
     def test_pressure_case_rendered(self, tmp_path: Path) -> None:
         step_stats = (StepPressureStats(step_index=1, command="AT", success_count=95, fail_count=0, min_ms=80, max_ms=210, avg_ms=95, p95_ms=130, p99_ms=180),)
         ps = PressureStats(total_rounds=100, warmup_rounds=5, counted_rounds=95, success_rounds=95, failed_rounds=0, success_rate=100.0, pass_threshold=95.0, passed=True, step_stats=step_stats)
