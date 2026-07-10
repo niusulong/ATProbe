@@ -97,3 +97,39 @@ def make_icon(name: str, color: str = "#cbd5e1") -> QIcon:
     painter.end()
     pix.setDevicePixelRatio(2.0)
     return QIcon(pix)
+
+
+# ---------------------------------------------------------------------------
+# AT 字母标品牌图标（应用 logo / 窗口图标 / 侧栏品牌头）.
+# 设计：仪器青渐变圆角方底 + 深墨 stroke 几何 "AT"，呼应导航图标的 stroke 风格
+# 与精密仪器芯片徽标质感。矢量 SVG，任意尺寸（任务栏 16px → 应用图标 256px）清晰。
+# ---------------------------------------------------------------------------
+_LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="atp-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5dd8cc"/>
+      <stop offset="1" stop-color="#3bb5a9"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#atp-bg)"/>
+  <g fill="none" stroke="#06140f" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 45 L22 20 L31 45"/>
+    <path d="M17.5 37 L26.5 37"/>
+    <path d="M36 20 L52 20"/>
+    <path d="M44 20 L44 45"/>
+  </g>
+</svg>"""
+
+
+def make_logo(size: int = 64) -> QIcon:
+    """渲染 AT 字母标品牌图标为指定尺寸的 QIcon（矢量，任意尺寸清晰）."""
+    renderer = QSvgRenderer(QByteArray(_LOGO_SVG.encode("utf-8")))
+    pix = QPixmap(QSize(size, size) * 2)  # ×2 抗锯齿
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(painter)
+    painter.end()
+    pix.setDevicePixelRatio(2.0)
+    return QIcon(pix)

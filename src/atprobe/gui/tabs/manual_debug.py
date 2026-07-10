@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
-from atprobe.gui.theme import get_tokens
+from atprobe.gui.theme import MONO_FONT, get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
 from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 from atprobe.infra.serial.config import Terminator
@@ -793,24 +793,34 @@ class ManualDebugWidget(QWidget):
             Path(path).write_text(text, encoding="utf-8")
 
     def _append_line(self, direction: str, text: str, color: str) -> None:
-        """向响应区追加带方向色的行（TX 蓝 / RX 深色，时间戳弱化）.
+        """向响应区追加一行 —— 仪器屏风格（精密仪器主题 signature）.
 
-        视觉语言对齐 HTML 报告的终端美学：
-        - 方向标记 (TX>/RX>) 等宽加粗、方向色
-        - 时间戳弱化为 secondary 灰，小一号
-        - 内容用方向色，强化"谁说的"
+        双信号通道色块（致敬示波器 CH1/CH2）：
+        - 方向标做成通道色块（TX 青底 / RX 琥珀底，深墨字），替代旧的 TX>/RX> 纯文字
+        - 时间码弱化为 secondary 灰 + 精简到毫秒（仪器时间码感）
+        - 内容用方向色，强化「谁在说」
         """
         import html as _html
         from datetime import datetime
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间码
         safe = _html.escape(text, quote=False)
+        dir_safe = _html.escape(direction, quote=False)
         muted = self._tokens["text.secondary"]
+        on_accent = self._tokens["text.on.accent"]
+        # 通道色块（Qt rich text 不支持 padding/border-radius/letter-spacing；
+        # 用 background-color + &nbsp; 手动留白模拟内边距，font-weight + 小字号做标签感。
+        # 硬朗矩形契合仪器面板标签质感）
+        channel = (
+            f'<span style="background-color:{color};color:{on_accent};'
+            f'font-size:10px;font-weight:700;">'
+            f'&nbsp;{dir_safe}&nbsp;</span>'
+        )
         self.response_view.append(
-            f'<div style="font-family:\'JetBrains Mono\',\'Cascadia Code\',Consolas,monospace;'
-            f'font-size:12px;margin:1px 0;">'
-            f'<span style="color:{muted};font-size:11px;">{ts}</span> '
-            f'<b style="color:{color};">{direction}&gt;</b> '
+            f'<div style="font-family:{MONO_FONT};font-size:12px;margin:2px 0;'
+            f'line-height:1.5;white-space:pre-wrap;">'
+            f'<span style="color:{muted};font-size:10px;">{ts}</span>&nbsp;&nbsp;'
+            f'{channel} '
             f'<span style="color:{color};">{safe}</span>'
             f'</div>'
         )

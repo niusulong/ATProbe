@@ -100,6 +100,13 @@ class MainWindow(QMainWindow):
         self.update_download_progress.connect(self._on_download_progress)
         self.update_download_done.connect(self._on_download_done)
         self._update_in_progress = False
+        # LED 信号灯呼吸动效（仅 RUNNING 状态闪烁，体现「引擎在跑」的活力）
+        self._led_state = "IDLE"
+        self._led_color = self._tokens["neutral"]
+        self._led_blink_phase = True
+        self._led_timer = QTimer(self)
+        self._led_timer.setInterval(600)
+        self._led_timer.timeout.connect(self._blink_led)
 
     # ------------------------------------------------------------------
     # 外壳初始化
@@ -161,7 +168,8 @@ class MainWindow(QMainWindow):
         sb = QStatusBar()
         # 状态点 + 文字：用富文本圆点，颜色随引擎状态变化（语义色，主题自适应）
         self._status_engine = QLabel(
-            f'● <span style="color:{self._tokens["neutral"]}">引擎 IDLE</span>'
+            f'<span style="color:{self._tokens["neutral"]};font-size:13px;">●</span> '
+            f'<span style="color:{self._tokens["text.secondary"]}">引擎 IDLE</span>'
         )
         self._status_engine.setTextFormat(Qt.TextFormat.RichText)
         self._status_ports = QLabel("端口: 0")
@@ -182,8 +190,36 @@ class MainWindow(QMainWindow):
         self._status_clock.setText(datetime.now().strftime("%H:%M:%S"))
 
     def _set_engine_status(self, state: str, color: str) -> None:
-        """更新状态栏的引擎状态（带语义色圆点）。"""
-        self._status_engine.setText(f'● <span style="color:{color}">引擎 {state}</span>')
+        """更新引擎状态并驱动 LED 信号灯.
+
+        RUNNING 时 LED 呼吸闪烁（亮/暗相位交替，体现「引擎在跑」的活力）；
+        其它状态常亮（IDLE 中性 / FINISHED 绿 / ERROR 红）。
+        """
+        self._led_state = state
+        self._led_color = color
+        if state == "RUNNING":
+            self._led_blink_phase = True
+            self._led_timer.start()
+        else:
+            self._led_timer.stop()
+            self._led_blink_phase = True  # 常亮相位
+        self._render_engine_status()
+
+    def _render_engine_status(self) -> None:
+        """按当前 LED 相位渲染状态栏（圆点色 + 中性灰文字）."""
+        color = self._led_color
+        # RUNNING 暗相位：状态色加低透明（Qt6 支持 #RRGGBBAA），形成呼吸
+        if self._led_state == "RUNNING" and not self._led_blink_phase:
+            color = self._led_color + "33"
+        self._status_engine.setText(
+            f'<span style="color:{color};font-size:13px;">●</span> '
+            f'<span style="color:{self._tokens["text.secondary"]}">引擎 {self._led_state}</span>'
+        )
+
+    def _blink_led(self) -> None:
+        """LED 呼吸：切换亮/暗相位并重渲染."""
+        self._led_blink_phase = not self._led_blink_phase
+        self._render_engine_status()
 
     def _init_menubar(self) -> None:
         """构造菜单栏：视图（主题切换）+ 帮助（检查更新/关于）."""

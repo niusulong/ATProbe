@@ -29,18 +29,23 @@ def run_gui(argv: list[str] | None = None) -> int:
     # 显式设置组织名，使 QSettings() 默认路径稳定（Windows: HKCU\Software\ATProbe\ATProbe）
     app.setOrganizationName("ATProbe")
 
-    # 应用窗口图标：从包内 resources/app_icon.png 加载（打包后经 spec collect_data_files 收集）
+    # 应用窗口图标：AT 字母标（矢量 SVG，任意尺寸清晰，主题色统一）
+    # 失败回退包内静态 PNG（打包后经 spec collect_data_files 收集）
     try:
-        from importlib import resources
+        from atprobe.gui.icons import make_logo
 
-        res_dir = resources.files("atprobe.resources")
-        icon_path = res_dir / "app_icon.png"
-        if icon_path.is_file():
-            pix = QPixmap(str(icon_path))
-            if not pix.isNull():
-                app.setWindowIcon(QIcon(pix))
+        app.setWindowIcon(make_logo(64))
     except Exception:  # noqa: BLE001
-        pass  # 图标缺失不影响功能
+        try:
+            from importlib import resources
+
+            icon_path = resources.files("atprobe.resources") / "app_icon.png"
+            if icon_path.is_file():
+                pix = QPixmap(str(icon_path))
+                if not pix.isNull():
+                    app.setWindowIcon(QIcon(pix))
+        except Exception:  # noqa: BLE001
+            pass  # 图标缺失不影响功能
 
     from atprobe.gui.theme import apply_theme
 

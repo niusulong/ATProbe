@@ -7,7 +7,9 @@
 QSS 无 CSS 变量，因此由 ``_build_qss`` 这个唯一构建函数在构建期把语义/组件令牌
 插值进 QSS 字符串。组件代码只引用语义令牌，不直接读原始值。
 
-配色对标 GitHub / VS Code 现代风格（降饱和，非 Material 2014 高饱和）。
+配色为「精密仪器」主题（v0.7 视觉重塑）：深石板蓝面板 + 仪器青(P_CYAN)/信号
+琥珀(P_AMBER) 双信号色（TX/RX = 示波器 CH1/CH2 隐喻）+ 柔和状态语义色。
+致敬示波器/协议分析仪的硬件测试血统，替代原 GitHub Primer 蓝。
 语义色与 M4 报告一致：PASS 绿 / FAIL 红 / SKIPPED 黄 / INTERRUPTED 灰。
 """
 
@@ -60,13 +62,23 @@ P_GRAY_1000 = "#0d1117"
 P_WHITE = "#ffffff"
 P_BLACK = "#010409"
 
-# 蓝（主色）
+# 蓝（历史主色，保留供浅色备选）
 P_BLUE_000 = "#ddf4ff"
 P_BLUE_500 = "#0969da"
 P_BLUE_600 = "#0860ca"
 P_BLUE_500_DK = "#2f81f7"  # 深色主题主色
 P_BLUE_600_DK = "#388bfd"  # 深色主题悬停
 P_BLUE_TINT_DK = "#1f6feb22"  # 深色主色浅底（带透明）
+
+# 仪器青（signal cyan —— TX 通道/CH1/主操作，「精密仪器」主题主信号色）
+P_CYAN_000 = "#cdf5f0"
+P_CYAN_500 = "#1a9e92"        # 浅色主题主信号（深一档保对比）
+P_CYAN_500_DK = "#4fd1c5"     # 深色主信号（CH1/TX/accent/品牌头）
+P_CYAN_600_DK = "#5dd8cc"     # 深色悬停
+P_CYAN_TINT_DK = "#4fd1c522"  # 深色主色浅底（带透明）
+
+# 信号琥珀（signal amber —— RX 通道/CH2，与仪器青构成双信号色签名）
+P_AMBER_600_DK = "#e8b465"    # 深色 RX/CH2（比 P_AMBER_500_DK 更亮的仪器琥珀）
 
 # 语义色阶
 P_GREEN_000 = "#dafbe1"
@@ -107,10 +119,11 @@ SPACE: dict[str, str] = {
 RADIUS: dict[str, str] = {
     "none": "0", "sm": "4px", "md": "6px", "lg": "8px", "xl": "12px", "full": "9999px",
 }
-# 等宽字体栈（仅用于数据/日志/AT 指令区）
-MONO_FONT = "'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
-# 比例字体栈（UI 文案）
-UI_FONT = "'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif"
+# 等宽字体栈（数据/命令/响应终端 —— 工具视觉主角，仪器铭牌/终端美学）
+# IBM Plex Mono 带工程仪器血统，作为 JetBrains Mono 的补充兜底
+MONO_FONT = "'JetBrains Mono', 'IBM Plex Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
+# 比例字体栈（UI 文案）—— IBM Plex Sans 工程血统，区别于泛泛的 Segoe UI
+UI_FONT = "'IBM Plex Sans', 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif"
 
 # ===========================================================================
 # 第 2 层：SEMANTIC TOKENS —— 语义别名（按用途命名），每个主题一份映射。
@@ -118,81 +131,89 @@ UI_FONT = "'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial
 # ===========================================================================
 
 LIGHT_TOKENS: dict[str, str] = {
-    # 背景（app 比卡片深一档，制造「卡片浮起」的层次感）
-    "bg.app": "#e8ecf0",
+    # 背景（昼间仪器：冷灰白 + 卡片浮起）
+    "bg.app": "#eef1f4",
     "bg.surface": P_WHITE,
-    "bg.subtle": P_BG_SUBTLE_LIGHT,
-    "bg.inset": P_BG_INSET_LIGHT,
-    "bg.accent.subtle": P_BLUE_000,
-    # 文字
-    "text.primary": P_TEXT_PRIMARY_LIGHT,
-    "text.secondary": P_TEXT_SECONDARY_LIGHT,
-    "text.disabled": P_GRAY_300,
-    "text.on.accent": P_WHITE,
+    "bg.subtle": "#e6eaef",
+    "bg.inset": "#f4f6f8",        # 数据屏（浅灰凹陷）
+    "bg.accent.subtle": P_CYAN_000,
+    # 文字（深石板墨，呼应深色主题的蓝灰血统）
+    "text.primary": "#1a2530",
+    "text.secondary": "#5d6b7a",
+    "text.disabled": "#b0bac4",
+    "text.on.accent": "#06140f",
     # 边框
-    "border.default": P_GRAY_200,
-    "border.muted": P_BORDER_MUTED_LIGHT,
-    "border.subtle": P_BORDER_SUBTLE_LIGHT,
-    # 主色
-    "accent": P_BLUE_500,
-    "accent.hover": P_BLUE_600,
-    "accent.bg": P_BLUE_000,
-    # 状态语义（降饱和）
-    "success": P_GREEN_500,
-    "success.bg": P_GREEN_000,
-    "danger": P_RED_500,
-    "danger.bg": P_RED_000,
-    "warning": P_AMBER_500,
-    "warning.bg": P_AMBER_000,
-    "neutral": P_GRAY_500,
-    "neutral.bg": P_GRAY_100,
-    # 领域语义（串口数据方向）
-    "data.tx": P_BLUE_500,
-    "data.rx": P_TEXT_PRIMARY_LIGHT,
-    # 侧栏品牌区（比 surface 更深的栏背景，制造「导航 vs 内容」分区）
-    "sidebar.bg": "#1f2937",
-    "sidebar.header.bg": "#111827",
-    "sidebar.header.text": P_WHITE,
-    "sidebar.item.text": "#cbd5e1",
-    "sidebar.item.text.selected": P_WHITE,
+    "border.default": "#d4dae1",
+    "border.muted": "#e1e6ec",
+    "border.subtle": "#eef1f4",
+    # 主色 = 仪器青
+    "accent": P_CYAN_500,
+    "accent.hover": P_CYAN_600_DK,
+    "accent.bg": P_CYAN_000,
+    # 状态语义
+    "success": "#2f9e6e",
+    "success.bg": "#e3f5ec",
+    "danger": "#d04545",
+    "danger.bg": "#fce8e8",
+    "warning": "#b07d2e",
+    "warning.bg": "#fbeed4",
+    "neutral": "#5d6b7a",
+    "neutral.bg": "#e6eaef",
+    # 领域语义（双信号色，浅底用深一档保证对比）
+    "data.tx": "#1a9e92",
+    "data.rx": "#b07d2e",
+    # 侧栏（昼间仍偏深，保持「控制面板」分区）
+    "sidebar.bg": "#1a2530",
+    "sidebar.header.bg": "#0f1721",
+    "sidebar.header.text": P_CYAN_500_DK,
+    "sidebar.item.text": "#b0bac4",
+    "sidebar.item.text.selected": "#cbd5dc",
     # 阴影
-    "shadow.md": "rgba(31,35,40,0.08)",
-    "shadow.lg": "rgba(31,35,40,0.12)",
+    "shadow.md": "rgba(26,37,48,0.08)",
+    "shadow.lg": "rgba(26,37,48,0.12)",
 }
 
 DARK_TOKENS: dict[str, str] = {
-    "bg.app": "#060a10",
-    "bg.surface": "#161b22",
-    "bg.subtle": P_GRAY_950,
-    "bg.inset": P_BLACK,
-    "bg.accent.subtle": P_BLUE_TINT_DK,
-    "text.primary": "#e6edf3",
-    "text.secondary": "#8b949e",
-    "text.disabled": "#484f58",
-    "text.on.accent": P_WHITE,
-    "border.default": "#30363d",
-    "border.muted": "#21262d",
-    "border.subtle": P_GRAY_950,
-    "accent": P_BLUE_500_DK,
-    "accent.hover": P_BLUE_600_DK,
-    "accent.bg": P_BLUE_TINT_DK,
-    "success": P_GREEN_500_DK,
-    "success.bg": P_GREEN_TINT_DK,
-    "danger": P_RED_500_DK,
-    "danger.bg": P_RED_TINT_DK,
-    "warning": P_AMBER_500_DK,
-    "warning.bg": P_AMBER_TINT_DK,
-    "neutral": "#8b949e",
-    "neutral.bg": P_NEUTRAL_TINT_DK,
-    "data.tx": "#58a6ff",
-    "data.rx": "#e6edf3",
-    "sidebar.bg": "#0b1117",
-    "sidebar.header.bg": "#000000",
-    "sidebar.header.text": "#f3f4f6",
-    "sidebar.item.text": "#9ca3af",
-    "sidebar.item.text.selected": P_WHITE,
-    "shadow.md": "rgba(1,4,9,0.3)",
-    "shadow.lg": "rgba(1,4,9,0.5)",
+    # 背景（仪器面板层次：app 外壳 → 卡片浮起 → inset 屏幕凹陷最深）
+    "bg.app": "#0d141b",          # 深石板蓝（仪器外壳）
+    "bg.surface": "#161e27",      # 卡片/面板
+    "bg.subtle": "#1c2530",       # 次表面
+    "bg.inset": "#0a1016",        # 数据屏凹陷（比外壳更深）
+    "bg.accent.subtle": P_CYAN_TINT_DK,
+    # 文字（冷白系，不刺眼）
+    "text.primary": "#d4dde6",
+    "text.secondary": "#7d8a99",
+    "text.disabled": "#4a5563",
+    "text.on.accent": "#06140f",  # 青底用深墨（仪器感）
+    # 边框
+    "border.default": "#2a3441",
+    "border.muted": "#1f2832",
+    "border.subtle": "#161e27",
+    # 主色 = 仪器青（CH1/TX/选中/主操作，统一「主动信号」语言）
+    "accent": P_CYAN_500_DK,
+    "accent.hover": P_CYAN_600_DK,
+    "accent.bg": P_CYAN_TINT_DK,
+    # 状态语义（柔和，不刺眼）
+    "success": "#5ec98a",
+    "success.bg": "#5ec98a22",
+    "danger": "#ef6b6b",
+    "danger.bg": "#ef6b6b22",
+    "warning": P_AMBER_600_DK,
+    "warning.bg": "#e8b46522",
+    "neutral": "#7d8a99",
+    "neutral.bg": "#7d8a9922",
+    # 领域语义（双信号色签名：CH1 青 / CH2 琥珀）
+    "data.tx": P_CYAN_500_DK,
+    "data.rx": P_AMBER_600_DK,
+    # 侧栏（仪器暗区控制面板，比内容区更深）
+    "sidebar.bg": "#0a0f15",
+    "sidebar.header.bg": "#060a0e",
+    "sidebar.header.text": P_CYAN_500_DK,  # 品牌头仪器青，像铭牌发光字
+    "sidebar.item.text": "#7d8a99",
+    "sidebar.item.text.selected": "#cbd5dc",  # 侧栏图标色（深底/青底均可见）
+    # 阴影
+    "shadow.md": "rgba(0,0,0,0.35)",
+    "shadow.lg": "rgba(0,0,0,0.5)",
 }
 
 
@@ -479,9 +500,10 @@ def _build_qss(t: dict[str, str]) -> str:
         background: {t['sidebar.header.bg']};
         color: {t['sidebar.header.text']};
         padding: 18px 16px;
-        font-size: 15px;
+        font-family: {MONO_FONT};
+        font-size: 16px;
         font-weight: 700;
-        letter-spacing: 1px;
+        letter-spacing: 2px;
         border: none;
     }}
     /* 导航列表 —— 深色栏上的浅色项 */
