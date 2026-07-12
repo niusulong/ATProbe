@@ -50,3 +50,38 @@ class TestAtResponderValidStillOk:
 
     def test_unknown_command_returns_error(self) -> None:
         assert b"ERROR" in _frame("AT+UNKNOWN=1")
+
+
+class TestAtResponderEchoControl:
+    """ATE0/ATE1 控制回显：默认（ATE1）回显指令；ATE0 后不回显。
+
+    对齐真实模组行为（3GPP TS 27.007 §5.1）：多数用例 setup 首步发 ATE0 关回显，
+    随后断言不含回显前缀。vsim 遵循 ATE0 才能整条用例跑通（自动测试基础）。
+    """
+
+    def test_default_echo_on(self) -> None:
+        # 默认 ATE1：响应回显收到的指令（回显行 + OK 行，每行 \r\n）
+        r = AtResponder()
+        out = r.respond("ATE1")
+        assert out == b"\r\nATE1\r\nOK\r\n"
+
+    def test_ate0_disables_echo(self) -> None:
+        # ATE0 关回显：其自身的响应不再回显，后续指令也不回显
+        r = AtResponder()
+        assert r.respond("ATE0") == b"\r\nOK\r\n"
+        # 后续指令不回显
+        assert r.respond("AT+CSQ") == b"\r\n+CSQ: 23,99\r\nOK\r\n"
+        assert r.respond("AT") == b"\r\nOK\r\n"
+
+    def test_ate1_re_enables_echo(self) -> None:
+        r = AtResponder()
+        r.respond("ATE0")
+        r.respond("ATE1")
+        # ATE1 后回显恢复
+        assert r.respond("AT+CSQ") == b"\r\nAT+CSQ\r\n+CSQ: 23,99\r\nOK\r\n"
+
+    def test_ate0_no_echo_on_error(self) -> None:
+        # ATE0 后，错误响应也不回显
+        r = AtResponder()
+        r.respond("ATE0")
+        assert r.respond("AT+UNKNOWN=1") == b"\r\nERROR\r\n"

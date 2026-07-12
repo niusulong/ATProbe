@@ -69,6 +69,7 @@ def update(
             dest,
             filename=DEFAULT_CONFIG.asset_name_for(info.version),
             expected_size=info.zip_size,
+            expected_sha256=info.sha256,  # B9：SHA256 内容校验（None 时降级为仅校验 size）
             progress_cb=_print_progress,
         )
     except DownloadCancelled:

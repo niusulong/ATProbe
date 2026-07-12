@@ -47,9 +47,7 @@ def send_data_stream(
             if cancel is not None and cancel.cancelled:
                 from atprobe.infra.serial.exceptions import OperationCancelled
 
-                raise OperationCancelled(
-                    f"数据流发送被取消（已发送 {offset}/{n} 字节）"
-                )
+                raise OperationCancelled(f"数据流发送被取消（已发送 {offset}/{n} 字节）")
             end = min(offset + spec.chunk_size, n)
             _write_with_cancel(conn, data[offset:end], cancel)
             chunk_idx += 1
@@ -62,9 +60,7 @@ def send_data_stream(
         _write_with_cancel(conn, term, cancel)
 
 
-def _write_with_cancel(
-    conn: SerialConnection, data: bytes, cancel: CancelToken | None
-) -> None:
+def _write_with_cancel(conn: SerialConnection, data: bytes, cancel: CancelToken | None) -> None:
     if cancel is not None and cancel.cancelled:
         from atprobe.infra.serial.exceptions import OperationCancelled
 

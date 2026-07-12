@@ -52,7 +52,9 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
     if not data:
         return cfg
     try:
-        raw = _yaml.load(StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8")))
+        raw = _yaml.load(
+            StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8"))
+        )
     except YAMLError as exc:
         line = getattr(getattr(exc, "problem_mark", None), "line", None)
         loc = f"第 {line + 1} 行" if line is not None else "未知行"

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import typer
 
-from atprobe.domain.case.models import Case
+from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import CaseParseError, parse_case_file
 from atprobe.domain.suite import SuiteParseError, parse_suite_file
 from atprobe.engine import Engine, EngineConfig
@@ -40,7 +40,9 @@ from atprobe.reporting.interfaces import ReportOutput
 
 def run(
     paths: list[Path] = typer.Argument(None, help="用例/套件/目录路径（省略则用配置 cases_dir）"),
-    port: list[str] = typer.Option([], "--port", "-p", help="端口复合表达式 COM3:115200:8N1，可重复"),
+    port: list[str] = typer.Option(
+        [], "--port", "-p", help="端口复合表达式 COM3:115200:8N1，可重复"
+    ),
     tag: list[str] = typer.Option([], "--tag", "-t", help="标签过滤（并集），可重复"),
     exclude_tag: list[str] = typer.Option([], "--exclude-tag", help="排除标签"),
     config: Path | None = typer.Option(None, "--config", "-c", help="配置文件路径"),
@@ -51,15 +53,22 @@ def run(
     report_dir: Path | None = typer.Option(None, "--report-dir", help="报告输出目录"),
     log_level: str = typer.Option("progress", "--log-level", help="progress / debug"),
     vsim: bool = typer.Option(
-        False, "--vsim",
+        False,
+        "--vsim",
         help="进程内虚拟模组模式（无需开发板/虚拟串口，用例直接驱动内置 AT 应答器）",
     ),
-    vsim_rssi: int = typer.Option(23, "--vsim-rssi", help="虚拟模组 CSQ 信号 0..31（--vsim 时生效）"),
-    vsim_cereg: int = typer.Option(1, "--vsim-cereg", help="虚拟模组 CEREG 状态 0..5（--vsim 时生效）"),
+    vsim_rssi: int = typer.Option(
+        23, "--vsim-rssi", help="虚拟模组 CSQ 信号 0..31（--vsim 时生效）"
+    ),
+    vsim_cereg: int = typer.Option(
+        1, "--vsim-cereg", help="虚拟模组 CEREG 状态 0..5（--vsim 时生效）"
+    ),
     baud: int | None = typer.Option(
         None, "--baud", help="覆盖所有端口的波特率（默认 115200 或配置文件 default.baud）"
     ),
-    debug: bool = typer.Option(False, "--debug", help="开启详细日志（DEBUG 级，记录串口/引擎细节）"),
+    debug: bool = typer.Option(
+        False, "--debug", help="开启详细日志（DEBUG 级，记录串口/引擎细节）"
+    ),
 ) -> None:
     """执行测试用例/套件/目录."""
     # 日志初始化（CLI 最早接入；--debug 提到 DEBUG 级，记录串口/引擎细节）
@@ -96,7 +105,11 @@ def run(
     elif app_cfg.ports:
         ports = list(app_cfg.ports)
     else:
-        typer.secho("错误：未指定端口（--port 或配置文件 ports，或用 --vsim）", fg=typer.colors.RED, err=True)
+        typer.secho(
+            "错误：未指定端口（--port 或配置文件 ports，或用 --vsim）",
+            fg=typer.colors.RED,
+            err=True,
+        )
         raise typer.Exit(2)
     if not ports:
         typer.secho("错误：端口列表为空", fg=typer.colors.RED, err=True)
@@ -118,9 +131,9 @@ def run(
     suite_files = [p for p in case_paths if p.name.startswith("suite-")]
     case_files = [p for p in case_paths if not p.name.startswith("suite-")]
 
-    cases: list = []
-    suite_setups: list = []
-    suite_teardowns: list = []
+    cases: list[Case] = []
+    suite_setups: list[Step] = []
+    suite_teardowns: list[Step] = []
     # 套件：解析 suite，按 cases 列表载入用例（相对套件文件所在目录）
     for sf in suite_files:
         try:
@@ -151,7 +164,8 @@ def run(
     # 4. 标签过滤（§3.4：多 --tag 并集；--exclude-tag 排除）
     if tag or exclude_tag:
         cases = [
-            c for c in cases
+            c
+            for c in cases
             if (not tag or any(t in c.tags for t in tag))
             and not any(t in c.tags for t in exclude_tag)
         ]
@@ -233,13 +247,21 @@ def run(
             if log_level == "debug" or ev.status != "PASS":
                 typer.echo(
                     format_step_line(
-                        phase=ev.phase, port=ev.port, command=ev.command,
-                        status=ev.status, duration_ms=ev.duration_ms,
-                        truncate=app_cfg.command_truncate, color=color, error_msg=ev.error_msg,
+                        phase=ev.phase,
+                        port=ev.port,
+                        command=ev.command,
+                        status=ev.status,
+                        duration_ms=ev.duration_ms,
+                        truncate=app_cfg.command_truncate,
+                        color=color,
+                        error_msg=ev.error_msg,
                     )
                 )
-                # debug 级额外打印原始响应文本（\r\n 转义为可见 <CR><LF>，便于核对字节格式）
-                if log_level == "debug" and ev.response:
+                # 原始响应文本（\r\n 转义为可见 <CR><LF>，便于核对字节格式）：
+                # debug 级打印所有步骤的响应；progress 级打印**非 PASS** 步骤的响应
+                # （失败时必须能看到实际响应，否则无法定位文档与实测的差异——这是断言校准的前提）。
+                show_resp = ev.response and (log_level == "debug" or ev.status != "PASS")
+                if show_resp:
                     vis = ev.response.replace("\r", "<CR>").replace("\n", "<LF>")
                     typer.echo(f"           resp: {vis}")
         elif isinstance(ev, PressureProgressEvent):
@@ -336,7 +358,5 @@ def _expand_parameters(case: Case) -> list[Case]:
         return [case]
     instances: list[Case] = []
     for idx, row in enumerate(case.parameters, start=1):
-        instances.append(
-            case.model_copy(update={"parameters": (row,), "param_index": idx})
-        )
+        instances.append(case.model_copy(update={"parameters": (row,), "param_index": idx}))
     return instances

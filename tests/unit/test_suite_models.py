@@ -18,6 +18,7 @@ class TestSuiteModel:
 
     def test_suite_with_setup_teardown(self) -> None:
         from atprobe.domain.case.models import Step
+
         s = Suite(
             name="x",
             suite_setup=(Step(command="AT+CFUN=1"),),

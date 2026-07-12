@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,6 @@ class RawLogger:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._started = False
-        self._open_files: dict[Path, object] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -57,9 +57,7 @@ class RawLogger:
                 return
             self._started = True
             self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._run, name="atprobe-rawlog", daemon=True
-            )
+            self._thread = threading.Thread(target=self._run, name="atprobe-rawlog", daemon=True)
             self._thread.start()
 
     def stop(self) -> None:
@@ -98,36 +96,59 @@ class RawLogger:
     # 后台线程
     # ------------------------------------------------------------------
     def _run(self) -> None:
-        while True:
-            rec = self._queue.get()
-            if rec is None:
-                # 哨兵：把队列里剩余的全部写完
-                self._drain()
-                return
-            self._write(rec)
+        # B4 修复：缓存文件句柄（按 file_path），消除每条记录重开 2 个文件的 I/O 放大。
+        # 哨兵退出时统一 close 所有句柄，确保缓冲落盘。
+        files: dict[Path, tuple[Any, Any]] = {}  # stem -> (text_fp, hex_fp)
+        try:
+            while True:
+                rec = self._queue.get()
+                if rec is None:
+                    self._drain(files)
+                    return
+                self._write(rec, files)
+        finally:
+            # 兜底：线程退出（含异常）时关闭所有句柄
+            for text_fp, hex_fp in files.values():
+                for fp in (text_fp, hex_fp):
+                    try:
+                        fp.close()
+                    except OSError:
+                        pass
 
-    def _drain(self) -> None:
+    def _drain(self, files: dict[Path, tuple[Any, Any]]) -> None:
         while True:
             try:
                 rec = self._queue.get_nowait()
             except queue.Empty:
                 return
             if rec is not None:
-                self._write(rec)
+                self._write(rec, files)
 
-    def _write(self, rec: _Record) -> None:
+    def _write(self, rec: _Record, files: dict[Path, tuple[Any, Any]]) -> None:
         try:
             text = rec.data.decode("utf-8", errors="replace")
             hexs = " ".join(f"{b:02X}" for b in rec.data)
             stem = rec.file_path  # begin_case 返回的基础路径（无后缀）
             parent, name = stem.parent, stem.name
+            text_path = parent / f"{name}.text.log"
+            hex_path = parent / f"{name}.hex.log"
+            # 按句柄缓存 key（text_path）获取或新建一对文件句柄
+            pair = files.get(text_path)
+            if pair is None:
+                # B4：缓存句柄而非每次重开（消除 I/O 放大）。不用 with——
+                # 句柄在线程生命周期内常驻，哨兵退出时 finally 统一 close。
+                text_fp = open(text_path, "a", encoding="utf-8")  # noqa: SIM115
+                hex_fp = open(hex_path, "a", encoding="utf-8")  # noqa: SIM115
+                pair = (text_fp, hex_fp)
+                files[text_path] = pair  # 用 text_path 作 key（与 hex_path 一一对应）
+            text_fp, hex_fp = pair
             # TEXT 与 HEX 分离到两个独立文件（§7.2）
-            with open(parent / f"{name}.text.log", "a", encoding="utf-8") as f:
-                f.write(f"[{rec.timestamp}] [{rec.direction}] {text}")
-                if not text.endswith("\n"):
-                    f.write("\n")
-            with open(parent / f"{name}.hex.log", "a", encoding="utf-8") as f:
-                f.write(f"[{rec.timestamp}] [{rec.direction}] {hexs}\n")
+            text_fp.write(f"[{rec.timestamp}] [{rec.direction}] {text}")
+            if not text.endswith("\n"):
+                text_fp.write("\n")
+            text_fp.flush()
+            hex_fp.write(f"[{rec.timestamp}] [{rec.direction}] {hexs}\n")
+            hex_fp.flush()
         except OSError:
             # 日志失败不应影响测试主流程（吞掉，避免读线程崩）
             pass

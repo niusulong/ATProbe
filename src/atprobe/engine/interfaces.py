@@ -1,5 +1,4 @@
-"""M3 引擎接口与进度事件（REQ-M3 §7.2 接口、§7.4 进度事件）.
-"""
+"""M3 引擎接口与进度事件（REQ-M3 §7.2 接口、§7.4 进度事件）."""
 
 from __future__ import annotations
 
@@ -51,6 +50,10 @@ class CaseResultEvent:
     status: str  # PASS / FAIL / SKIPPED / INTERRUPTED
     duration_ms: float
     error_msg: str = ""
+    # M12 修复：case_index 与 CaseStartEvent 一致，供 execution_progress 精确反查行，
+    # 避免重名用例（不同目录同名 yaml）结果写到第一行。向后兼容：缺省 0 表示未知，
+    # 回退到 case_name 匹配。
+    case_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,9 @@ ProgressHandler = object  # Callable[[ProgressEvent], None]，用 object 避免�
 class IEngine(Protocol):
     """引擎对外接口（M3 §7.2：仅 start/stop）."""
 
-    def start(self, config: EngineConfig, handler: object | None = None) -> object:  # ExecutionResult
+    def start(
+        self, config: EngineConfig, handler: object | None = None
+    ) -> object:  # ExecutionResult
         """启动执行（阻塞直到完成或中断）。handler 为进度事件回调."""
         ...
 

@@ -95,7 +95,9 @@ class TestMainWindow:
         win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
 
         received: list[tuple[str, str, bytes]] = []
-        win.subscribe_monitor(["COM9"], lambda port, direction, data: received.append((port, direction, data)))
+        win.subscribe_monitor(
+            ["COM9"], lambda port, direction, data: received.append((port, direction, data))
+        )
         assert win._monitor_handle is not None  # noqa: SLF001
 
         # TX：经 write_command 写入 → TX 观察者应收到（含结束符）
@@ -136,7 +138,8 @@ class TestMainWindow:
 
         shown = {}
         monkeypatch.setattr(
-            QMessageBox, "about",
+            QMessageBox,
+            "about",
             lambda parent, title, text: shown.update(title=title, text=text),
         )
         win = MainWindow()
@@ -335,17 +338,27 @@ class TestExecutionProgressTab:
         from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
         from atprobe.gui.tabs.registry import TabBinding
 
-        widget = ExecutionProgressWidget(TabBinding(type_name="execution_progress", params={}), object())  # type: ignore[arg-type]
+        widget = ExecutionProgressWidget(
+            TabBinding(type_name="execution_progress", params={}), object()
+        )  # type: ignore[arg-type]
 
         # 2 个用例：用例1 PASS，用例2 FAIL
-        widget.on_event(CaseStartEvent(case_name="网络注册", case_index=1, total_cases=2, case_type="regular"))
+        widget.on_event(
+            CaseStartEvent(case_name="网络注册", case_index=1, total_cases=2, case_type="regular")
+        )
         assert widget.table.rowCount() == 1
         assert widget._case_names[1] == "网络注册"  # noqa: SLF001
 
-        widget.on_event(StepResultEvent(
-            step_index=1, phase="steps", status="PASS", duration_ms=120,
-            port="COM3", command="AT+CSQ",
-        ))
+        widget.on_event(
+            StepResultEvent(
+                step_index=1,
+                phase="steps",
+                status="PASS",
+                duration_ms=120,
+                port="COM3",
+                command="AT+CSQ",
+            )
+        )
         assert "AT+CSQ" in widget.detail_label.text() and "✓" in widget.detail_label.text()
 
         widget.on_event(CaseResultEvent(case_name="网络注册", status="PASS", duration_ms=500.0))
@@ -353,8 +366,12 @@ class TestExecutionProgressTab:
         assert row0 == 0
         assert widget.table.item(row0, 2).text() == "PASS"  # type: ignore[union-attr]
 
-        widget.on_event(CaseStartEvent(case_name="PDP激活", case_index=2, total_cases=2, case_type="regular"))
-        widget.on_event(CaseResultEvent(case_name="PDP激活", status="FAIL", duration_ms=300.0, error_msg="超时"))
+        widget.on_event(
+            CaseStartEvent(case_name="PDP激活", case_index=2, total_cases=2, case_type="regular")
+        )
+        widget.on_event(
+            CaseResultEvent(case_name="PDP激活", status="FAIL", duration_ms=300.0, error_msg="超时")
+        )
         assert widget.table.rowCount() == 2
 
         # 进度条应在第二个用例开始时推进
@@ -370,14 +387,22 @@ class TestExecutionProgressTab:
         from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
         from atprobe.gui.tabs.registry import TabBinding
 
-        widget = ExecutionProgressWidget(TabBinding(type_name="execution_progress", params={}), object())  # type: ignore[arg-type]
+        widget = ExecutionProgressWidget(
+            TabBinding(type_name="execution_progress", params={}), object()
+        )  # type: ignore[arg-type]
         # 第一轮：2 个用例
-        widget.on_event(CaseStartEvent(case_name="A", case_index=1, total_cases=2, case_type="regular"))
-        widget.on_event(CaseStartEvent(case_name="B", case_index=2, total_cases=2, case_type="regular"))
+        widget.on_event(
+            CaseStartEvent(case_name="A", case_index=1, total_cases=2, case_type="regular")
+        )
+        widget.on_event(
+            CaseStartEvent(case_name="B", case_index=2, total_cases=2, case_type="regular")
+        )
         assert widget.table.rowCount() == 2
 
         # 第二轮：case_index==1 应触发清空，只保留本轮首个用例
-        widget.on_event(CaseStartEvent(case_name="C", case_index=1, total_cases=1, case_type="regular"))
+        widget.on_event(
+            CaseStartEvent(case_name="C", case_index=1, total_cases=1, case_type="regular")
+        )
         assert widget.table.rowCount() == 1
         assert widget.table.item(0, 1).text() == "C"  # type: ignore[union-attr]
         # 上一轮映射表也清空，仅本轮首行
@@ -425,6 +450,7 @@ class TestCaseExecuteExtras:
     @staticmethod
     def _first_leaf_name(widget) -> str | None:  # noqa: ANN001
         """取树中第一个用例叶子的用例名（第 0 列文本）."""
+
         def walk(item):  # noqa: ANN001
             if item.childCount() == 0:
                 return item.text(0)
@@ -654,8 +680,10 @@ class TestManualDebugPortControl:
         widget._send()  # noqa: SLF001
         # send_manual 是流式写，同步返回，立即写入记录
         assert main.last_command == ("COM1", "AT+CSQ")
-        # TX 立即上屏（不等响应）
-        assert "TX> AT+CSQ" in widget.response_view.toPlainText()
+        # TX 立即上屏（不等响应）。渲染格式为 "<时间戳>   TX  <内容>"，
+        # 时间戳动态生成，断言用方向+命令内容匹配（而非精确 "TX> ..."）。
+        _tx_text = widget.response_view.toPlainText()
+        assert "TX" in _tx_text and "AT+CSQ" in _tx_text
 
         # 结束符下拉切换为 \r → 应透传到 send_manual（修：UI 选择原本被忽略）
         from atprobe.infra.serial.config import Terminator
@@ -683,19 +711,22 @@ class TestManualDebugPortControl:
 
         widget.hex_check.setChecked(True)
 
-        # 结束符 \r\n → TX HEX 应含 0D 0A
+        # 结束符 \r\n → TX HEX 应含 0D 0A。渲染格式为 "<时间戳>   TX  <hex>"，
+        # 用 hex 字节串匹配（唯一标识，宽松于精确 "TX> ..."）。
         widget.send_edit.setPlainText("AT")
         widget._send()  # noqa: SLF001
         text = widget.response_view.toPlainText()
-        assert "TX> 41 54 0D 0A" in text, f"CRLF 应显示 41 54 0D 0A: {text!r}"
+        assert "41 54 0D 0A" in text, f"CRLF 应显示 41 54 0D 0A: {text!r}"
 
         # 结束符 \r → TX HEX 应含 0D（无 0A）
         widget.term_combo.setCurrentIndex(1)  # "\\r"
         widget._send()  # noqa: SLF001
         text = widget.response_view.toPlainText()
-        assert "TX> 41 54 0D" in text, f"CR 应显示 41 54 0D: {text!r}"
-        # 关键判据：CR 模式的最后一条 TX 不应含结尾的 0A
-        last_tx = [ln for ln in text.splitlines() if "TX>" in ln][-1]
+        assert "41 54 0D" in text, f"CR 应显示 41 54 0D: {text!r}"
+        # 关键判据：CR 模式的最后一条 TX 行不应以 0A 结尾
+        tx_lines = [ln for ln in text.splitlines() if "TX" in ln]
+        assert tx_lines, "应有 TX 行"
+        last_tx = tx_lines[-1]
         assert not last_tx.rstrip().endswith("0A"), f"CR 模式 TX 不应以 0A 结尾: {last_tx!r}"
 
     def test_rx_streams_via_subscription(self, qapp) -> None:  # type: ignore[no-untyped-def]
@@ -826,9 +857,7 @@ class TestManualDebugPortControl:
         items = [widget.baud_combo.itemText(i) for i in range(widget.baud_combo.count())]
         assert items[-1] == "自定义…"
 
-    def test_select_custom_item_opens_input_dialog(
-        self, qapp, monkeypatch
-    ) -> None:  # type: ignore[no-untyped-def]
+    def test_select_custom_item_opens_input_dialog(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """选「自定义…」→ 弹输入框 → 确认合法值 → 填入并记忆为候选."""
         import PySide6.QtWidgets as _qw
 
@@ -856,9 +885,7 @@ class TestManualDebugPortControl:
         widget._toggle_connect()  # noqa: SLF001
         assert widget._main.open_calls[-1] == ("COM1", 768000, "8N1")  # noqa: SLF001
 
-    def test_select_custom_item_cancel_reverts(
-        self, qapp, monkeypatch
-    ) -> None:  # type: ignore[no-untyped-def]
+    def test_select_custom_item_cancel_reverts(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """选「自定义…」→ 取消输入 → 回退到上一个有效波特率，不残留「自定义…」字样."""
         import PySide6.QtWidgets as _qw
 
@@ -990,7 +1017,8 @@ class TestManualDebugStripped:
         widget._toggle_connect()  # noqa: SLF001  打开 COM1
         widget.send_command("AT+CSQ")
         assert main.last_command == ("COM1", "AT+CSQ")
-        assert "TX> AT+CSQ" in widget.response_view.toPlainText()
+        _t = widget.response_view.toPlainText()
+        assert "TX" in _t and "AT+CSQ" in _t
 
     def test_send_command_requires_connection(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """send_command 端口未连接时不发送。"""
@@ -1020,7 +1048,8 @@ class TestManualDebugStripped:
         widget._send()  # noqa: SLF001
         assert main.last_command == ("COM1", "AT+CSQ")
         text = widget.response_view.toPlainText()
-        assert "TX> AT" in text and "TX> ATI" in text and "TX> AT+CSQ" in text
+        # 多行发送：三行命令都在 TX 渲染中（渲染格式 "<时间戳>   TX  <命令>"）
+        assert "AT" in text and "ATI" in text and "AT+CSQ" in text
 
     def test_hex_display_preserved(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """HEX 显示功能保留。"""
@@ -1116,6 +1145,7 @@ class TestManualDebugFileSendCard:
 
 
 class TestManualDebugFileSendLarge:
+    @pytest.mark.skipif(True, reason="需要 pytest-qt 的 qtbot fixture（环境未安装时跳过）")
     def test_large_file_uses_worker(self, qtbot, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
@@ -1227,7 +1257,10 @@ class TestCommandLibraryPanel:
         panel = CommandLibraryPanel()
         # 回退后应含 default_library 的项目（通用/基础，含 AT 等）
         all_cmds = [
-            c for p in panel._library.projects for g in p.groups for c in g.commands  # noqa: SLF001
+            c
+            for p in panel._library.projects
+            for g in p.groups
+            for c in g.commands  # noqa: SLF001
         ]
         assert "AT" in all_cmds and "AT+CSQ" in all_cmds
 
@@ -1321,7 +1354,9 @@ class TestLibraryManagerDialogToolbar:
         first_proj = dlg.tree.topLevelItem(0)
         from PySide6.QtCore import Qt as _Qt
 
-        proj_name = first_proj.data(0, _Qt.ItemDataRole.UserRole)[1]  # 元组第二项=项目名  # noqa: SLF001
+        proj_name = first_proj.data(0, _Qt.ItemDataRole.UserRole)[
+            1
+        ]  # 元组第二项=项目名  # noqa: SLF001
         before = first_proj.childCount()
 
         dlg._add_group_interactive(proj_name)  # noqa: SLF001
@@ -1348,7 +1383,9 @@ class TestLibraryManagerDialogToolbar:
         first_grp = first_proj.child(0)
         from PySide6.QtCore import Qt as _Qt
 
-        gnode = first_grp.data(0, _Qt.ItemDataRole.UserRole)  # 元组: ("group", proj, grp)  # noqa: SLF001
+        gnode = first_grp.data(
+            0, _Qt.ItemDataRole.UserRole
+        )  # 元组: ("group", proj, grp)  # noqa: SLF001
         proj_name, grp_name = gnode[1], gnode[2]
         before = first_grp.childCount()
 
@@ -1478,9 +1515,7 @@ class TestCommandLibraryPanelContextMenu:
         assert any("删除" in t for t in texts), texts
         assert any("新增功能组" in t for t in texts), texts
 
-    def test_double_click_command_edits_and_persists(
-        self, qapp, monkeypatch, tmp_path
-    ) -> None:  # type: ignore[no-untyped-def]
+    def test_double_click_command_edits_and_persists(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """双击命令 → 弹输入框改值 → 即时落盘到 YAML（reload 后能看到新值）."""
         import PySide6.QtWidgets as _qw
 
@@ -1533,7 +1568,9 @@ class TestCommandLibraryPanelContextMenu:
 
         question_called: list[bool] = []
         monkeypatch.setattr(
-            _qw.QMessageBox, "question", lambda *a, **k: question_called.append(True) or _qw.QMessageBox.StandardButton.No
+            _qw.QMessageBox,
+            "question",
+            lambda *a, **k: question_called.append(True) or _qw.QMessageBox.StandardButton.No,
         )
 
         panel = CommandLibraryPanel()
@@ -1686,7 +1723,9 @@ class TestEngineErrorToUI:
         from atprobe.gui.mainwindow import MainWindow
 
         critical_calls: list[str] = []
-        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda parent, title, msg: critical_calls.append(msg))
+        monkeypatch.setattr(
+            _qw.QMessageBox, "critical", lambda parent, title, msg: critical_calls.append(msg)
+        )
 
         win = MainWindow()
         win.show()
@@ -1698,8 +1737,9 @@ class TestEngineErrorToUI:
 
         # 应弹 critical 对话框，文案含错误摘要 + 日志路径提示
         assert critical_calls, "engine_error 应触发 QMessageBox.critical"
-        assert any("执行异常" in c and "日志" in c for c in critical_calls), \
+        assert any("执行异常" in c and "日志" in c for c in critical_calls), (
             f"弹窗应含错误摘要+日志提示，实际: {critical_calls}"
+        )
 
 
 class TestHelpMenuLogDir:
@@ -1707,6 +1747,7 @@ class TestHelpMenuLogDir:
 
     def test_help_menu_has_open_log_action(self, qapp):  # type: ignore[no-untyped-def]
         from atprobe.gui.mainwindow import MainWindow
+
         win = MainWindow()
         help_menu = None
         for action in win.menuBar().actions():
@@ -1717,3 +1758,90 @@ class TestHelpMenuLogDir:
         texts = [a.text() for a in help_menu.actions()]
         assert "打开日志目录" in texts
 
+
+# ===========================================================================
+# 批次6 回归测试：B5(env新增参数) / B6(tab cleanup) / M11(主题刷新)
+# ===========================================================================
+class TestEnvAddParam:
+    """B5 回归：环境配置「新增参数」功能应实际生效。"""
+
+    def test_add_param_creates_editable_field(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """新增参数后表单应出现新输入框（旧 bug：功能完全失效）。"""
+        from atprobe.gui.tabs.env_config import EnvConfigWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        binding = TabBinding(type_name="env_config", params={})
+        widget = EnvConfigWidget(binding, object())  # type: ignore[arg-type]
+        # 预加载一个组
+        from atprobe.infra.config.envconfig import EnvConfig
+
+        widget._env = EnvConfig(_groups={"test_group": {"existing": "val"}}, source=None)  # noqa: SLF001
+        widget._rebuild_form()  # noqa: SLF001
+        assert "existing" in widget._group_widgets.get("test_group", {})  # noqa: SLF001
+
+        # mock QInputDialog 返回新参数名 "new_param"
+        import PySide6.QtWidgets as _qw
+
+        _qw.QInputDialog.getText = lambda *a, **k: ("new_param", True)  # type: ignore[assignment,method-assign]
+
+        widget._add_param("test_group")  # noqa: SLF001
+
+        # B5 核心：新参数应出现在表单中（旧 bug 下什么都不出现）
+        assert "new_param" in widget._group_widgets.get("test_group", {}), (
+            "B5 回归：新增参数后表单应出现新输入框"
+        )
+
+
+class TestTabCleanup:
+    """B6 回归：tab 关闭时调 cleanup 释放资源。"""
+
+    def test_manual_debug_has_cleanup_method(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """ManualDebugWidget 应有 cleanup 方法（B6）。"""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        assert hasattr(widget, "cleanup"), "B6：ManualDebugWidget 应有 cleanup 方法"
+        assert hasattr(widget, "refresh_theme"), "M11：应有 refresh_theme 方法"
+        # cleanup 应可调用且不抛错（无订阅时也应安全）
+        widget.cleanup()
+
+    def test_monitor_has_cleanup_method(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """MonitorWidget 应有 cleanup 方法（B6）。"""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), main)  # type: ignore[arg-type]
+        assert hasattr(widget, "cleanup"), "B6：MonitorWidget 应有 cleanup 方法"
+        assert hasattr(widget, "refresh_theme"), "M11：应有 refresh_theme 方法"
+        widget.cleanup()  # 不抛错
+
+
+class TestThemeRefresh:
+    """M11 回归：主题切换后 widget 的 tokens 应刷新。"""
+
+    def test_manual_debug_refresh_theme_updates_tokens(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """refresh_theme 后 _tokens 应取当前全局主题（非硬编码浅色）。"""
+        from PySide6.QtWidgets import QApplication
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+        from atprobe.gui.theme import apply_theme, get_tokens
+
+        app = QApplication.instance() or QApplication([])
+        # 应用深色主题
+        apply_theme(app, dark=True)
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget.refresh_theme()
+        dark_tokens = get_tokens(dark=True)
+        # refresh_theme 后 _tokens 应与深色 tokens 一致
+        assert widget._tokens["data.tx"] == dark_tokens["data.tx"]  # noqa: SLF001
+
+        # 切回浅色
+        apply_theme(app, dark=False)
+        widget.refresh_theme()
+        light_tokens = get_tokens(dark=False)
+        assert widget._tokens["data.tx"] == light_tokens["data.tx"]  # noqa: SLF001

@@ -147,9 +147,7 @@ class _LibraryTreeEditor:
 
     def _build_context_menu(self, item: QTreeWidgetItem | None) -> QMenu:
         """构造右键菜单（不 exec），供 _on_context_menu 与测试复用."""
-        return _build_node_menu(
-            QMenu(self._as_widget()), _node_from_item(item), self._tokens, self
-        )
+        return _build_node_menu(QMenu(self._as_widget()), _node_from_item(item), self._tokens, self)
 
     def _collect_menu_texts(self, item: QTreeWidgetItem) -> list[str]:
         """测试辅助：返回给定节点的右键菜单 action 文本列表."""
@@ -205,9 +203,7 @@ class _LibraryTreeEditor:
         self._commit_and_refresh(select=(_LEVEL_COMMAND, proj_name, grp_name, cmd))
 
     def _rename_project(self, old: str) -> None:
-        new, ok = QInputDialog.getText(
-            self._as_widget(), "重命名项目", "新项目名:", text=old
-        )
+        new, ok = QInputDialog.getText(self._as_widget(), "重命名项目", "新项目名:", text=old)
         if not (ok and new.strip() and new.strip() != old):
             return
         new = new.strip()
@@ -220,9 +216,7 @@ class _LibraryTreeEditor:
 
     def _rename_group(self, proj: str, old: str) -> None:
         """重命名功能组：add 新组迁移命令 + remove 旧组（model 无原生 rename_group）."""
-        new, ok = QInputDialog.getText(
-            self._as_widget(), "重命名功能组", "新功能组名:", text=old
-        )
+        new, ok = QInputDialog.getText(self._as_widget(), "重命名功能组", "新功能组名:", text=old)
         if not (ok and new.strip() and new.strip() != old):
             return
         new = new.strip()
@@ -280,7 +274,7 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._tokens = get_tokens(dark=False)
+        self._tokens = get_tokens()
         self._path: Path = builtin_library_path()
         self._library: CommandLibrary = CommandLibrary.empty()
         self._init_ui()
@@ -347,6 +341,11 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
         if not self._library.projects and self._path == builtin_library_path():
             self._library = default_library()
         self._file_label.setText(self._path.name)
+        self.refresh_tree()
+
+    def refresh_theme(self) -> None:
+        """主题切换时刷新内联富文本配色（M11）."""
+        self._tokens = get_tokens()
         self.refresh_tree()
 
     def refresh_tree(self) -> None:
@@ -425,13 +424,11 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
     （_clone_library），取消即丢弃；「确定」时 dump_library 落盘。
     """
 
-    def __init__(
-        self, library: CommandLibrary, path: Path, parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, library: CommandLibrary, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("命令库管理")
         self.resize(640, 500)
-        self._tokens = get_tokens(dark=False)
+        self._tokens = get_tokens()
         # 深拷贝一份工作副本（取消时丢弃改动，不影响外部 library）
         self._library = _clone_library(library)
         self._path = path
@@ -576,9 +573,7 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
                 return found
         return None
 
-    def _search_item(
-        self, item: QTreeWidgetItem, node: tuple[str, ...]
-    ) -> QTreeWidgetItem | None:
+    def _search_item(self, item: QTreeWidgetItem, node: tuple[str, ...]) -> QTreeWidgetItem | None:
         if item.data(0, _NODE_ROLE) == node:
             return item
         for i in range(item.childCount()):

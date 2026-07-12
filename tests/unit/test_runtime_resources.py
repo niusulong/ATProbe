@@ -29,8 +29,10 @@ def test_app_root_frozen_returns_executable_dir(tmp_path):
     """打包态：app_root() 返回 sys.executable 所在目录。"""
     fake_exe = tmp_path / "ATProbe.exe"
     fake_exe.write_text("")
-    with patch.object(runtime.sys, "frozen", True, create=True), \
-         patch.object(runtime.sys, "executable", str(fake_exe)):
+    with (
+        patch.object(runtime.sys, "frozen", True, create=True),
+        patch.object(runtime.sys, "executable", str(fake_exe)),
+    ):
         assert runtime.app_root() == tmp_path
 
 
@@ -70,8 +72,10 @@ def test_user_workspace_dev_mode_returns_repo_root():
 def test_user_workspace_frozen_returns_exe_dir(tmp_path):
     """打包态用户工作区 = exe 同级目录。"""
     (tmp_path / "ATProbe.exe").write_text("")
-    with patch.object(resources.sys, "frozen", True, create=True), \
-         patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
+    with (
+        patch.object(resources.sys, "frozen", True, create=True),
+        patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")),
+    ):
         assert resources.user_workspace() == tmp_path
 
 
@@ -106,8 +110,10 @@ def test_resolve_workspace_path_absolute_unchanged(tmp_path):
 def test_resolve_workspace_path_frozen_anchors_to_exe_dir(tmp_path):
     """打包态：相对路径锚定到 exe 同级（便携式工作区）。"""
     (tmp_path / "ATProbe.exe").write_text("")
-    with patch.object(resources.sys, "frozen", True, create=True), \
-         patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
+    with (
+        patch.object(resources.sys, "frozen", True, create=True),
+        patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")),
+    ):
         p = resources.resolve_workspace_path("./reports")
         assert p == tmp_path / "reports"
 
@@ -135,8 +141,10 @@ def test_builtin_resource_frozen_prefers_exposed_copy(tmp_path):
     internal.write_text("builtin-readonly", encoding="utf-8")
 
     (app_root / "ATProbe.exe").write_text("")
-    with patch.object(resources.sys, "frozen", True, create=True), \
-         patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")):
+    with (
+        patch.object(resources.sys, "frozen", True, create=True),
+        patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")),
+    ):
         p = resources.builtin_resource("env.yaml")
         assert p == exposed
         assert p.read_text(encoding="utf-8") == "user-edited"
@@ -150,8 +158,10 @@ def test_builtin_resource_frozen_falls_back_to_internal(tmp_path):
     internal.write_text("builtin-readonly", encoding="utf-8")
 
     (app_root / "ATProbe.exe").write_text("")
-    with patch.object(resources.sys, "frozen", True, create=True), \
-         patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")):
+    with (
+        patch.object(resources.sys, "frozen", True, create=True),
+        patch.object(resources.sys, "executable", str(app_root / "ATProbe.exe")),
+    ):
         p = resources.builtin_resource("env.yaml")
         assert p == internal
 
@@ -159,7 +169,9 @@ def test_builtin_resource_frozen_falls_back_to_internal(tmp_path):
 def test_builtin_resource_frozen_missing_raises(tmp_path):
     """打包态：两份都不存在 → FileNotFoundError。"""
     (tmp_path / "ATProbe.exe").write_text("")
-    with patch.object(resources.sys, "frozen", True, create=True), \
-         patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")):
+    with (
+        patch.object(resources.sys, "frozen", True, create=True),
+        patch.object(resources.sys, "executable", str(tmp_path / "ATProbe.exe")),
+    ):
         with pytest.raises(FileNotFoundError):
             resources.builtin_resource("nope.yaml")

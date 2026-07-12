@@ -112,7 +112,7 @@ class _PortSubView(QWidget):
             f'<span style="color:{muted};font-size:11px;">{ts}</span> '
             f'<b style="color:{color};">{_html.escape(direction)}&gt;</b> '
             f'<span style="color:{color};">{safe}</span>'
-            f'</div>'
+            f"</div>"
         )
 
     def flush(self) -> None:
@@ -215,7 +215,9 @@ class MonitorWidget(QWidget):
             if w is not None:
                 w.deleteLater()
         self._port_checks = []
-        getter = getattr(self._main, "available_ports", None) or getattr(self._main, "connected_ports", None)
+        getter = getattr(self._main, "available_ports", None) or getattr(
+            self._main, "connected_ports", None
+        )
         ports = list(getter()) if callable(getter) else []
         for p in ports:
             cb = QCheckBox(p)
@@ -298,6 +300,26 @@ class MonitorWidget(QWidget):
             # 停止监控：冲刷残余 buffer（保留已捕获数据供回看/导出），再停定时器避免空转
             self._flush_all()
             self._timer.stop()
+
+    def cleanup(self) -> None:
+        """统一资源清理钩子（B6：tab 关闭/窗口关闭时调用）.
+
+        monitor 无 closeEvent，旧实现 tab 关闭后定时器空转、监控订阅泄漏。
+        此方法停定时器 + 退订，由 MainWindow._close_tab / closeEvent 显式调用。
+        """
+        try:
+            self._timer.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        if hasattr(self._main, "unsubscribe_monitor"):
+            try:
+                self._main.unsubscribe_monitor()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def refresh_theme(self) -> None:
+        """主题切换时刷新内联富文本配色（M11）."""
+        self._tokens = get_tokens()
 
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
         from datetime import datetime

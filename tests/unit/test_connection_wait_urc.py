@@ -17,8 +17,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pytest
-
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.interfaces import ResponseStatus
@@ -49,8 +47,12 @@ def _make_connection(monkeypatch) -> SerialConnection:
 
 
 def _send_and_feed(
-    conn: SerialConnection, command: str, chunks: list[bytes], *,
-    timeout: float = 5.0, wait_urc: str | None = None,
+    conn: SerialConnection,
+    command: str,
+    chunks: list[bytes],
+    *,
+    timeout: float = 5.0,
+    wait_urc: str | None = None,
     feed_delay: float = 0.0,
 ) -> object:
     """子线程跑 send_command，主线程按节奏喂 chunk（模拟读线程）。
@@ -101,9 +103,11 @@ class TestWaitUrcTermination:
         """OK 与目标 URC 分属不同 chunk（异步典型）：整段 text 含 OK+URC，status=COMPLETE。"""
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+CTM2MDEREG",
+            conn,
+            "AT+CTM2MDEREG",
             chunks=[b"\r\nOK\r\n", b"\r\n+CTM2M:dereg,0,5\r\n"],
-            timeout=3.0, wait_urc=r"\+CTM2M:dereg,0,\d+",
+            timeout=3.0,
+            wait_urc=r"\+CTM2M:dereg,0,\d+",
         )
         assert resp.status is ResponseStatus.COMPLETE
         assert "+CTM2M:dereg,0,5" in resp.text
@@ -114,9 +118,11 @@ class TestWaitUrcTermination:
         conn = _make_connection(monkeypatch)
         t0 = time.monotonic()
         resp = _send_and_feed(
-            conn, "AT+X",
+            conn,
+            "AT+X",
             chunks=[b"\r\nOK\r\n", b"\r\n+X:done\r\n"],
-            timeout=5.0, wait_urc=r"\+X:done",
+            timeout=5.0,
+            wait_urc=r"\+X:done",
             feed_delay=0.1,  # 第二个 chunk 延迟 0.1s 后喂入
         )
         elapsed = time.monotonic() - t0
@@ -128,9 +134,11 @@ class TestWaitUrcTermination:
         """OK 与 URC 同一 chunk 送达：也能正确终结，text 含两者。"""
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+X",
+            conn,
+            "AT+X",
             chunks=[b"\r\nOK\r\n\r\n+X:ok\r\n"],
-            timeout=3.0, wait_urc=r"\+X:ok",
+            timeout=3.0,
+            wait_urc=r"\+X:ok",
         )
         assert resp.status is ResponseStatus.COMPLETE
         assert "OK" in resp.text
@@ -140,9 +148,11 @@ class TestWaitUrcTermination:
         """timeout 内只收到 OK、无目标 URC → status=TIMEOUT，text 含 OK 段。"""
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+X",
+            conn,
+            "AT+X",
             chunks=[b"\r\nOK\r\n"],  # 只有 OK，永远没有 URC
-            timeout=0.4, wait_urc=r"\+X:never",
+            timeout=0.4,
+            wait_urc=r"\+X:never",
         )
         assert resp.status is ResponseStatus.TIMEOUT
         assert "OK" in resp.text  # 已收到的 OK 段保留在 text
@@ -152,9 +162,11 @@ class TestWaitUrcTermination:
         """数据行 + OK + URC 组合（如 +CTM2MSEND:<id> / OK / +CTM2M:send,0,<id>）。"""
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+CTM2MSEND",
+            conn,
+            "AT+CTM2MSEND",
             chunks=[b"\r\n+CTM2MSEND:5\r\nOK\r\n", b"\r\n+CTM2M:send,0,5\r\n"],
-            timeout=3.0, wait_urc=r"\+CTM2M:send,0,\d+",
+            timeout=3.0,
+            wait_urc=r"\+CTM2M:send,0,\d+",
         )
         assert resp.status is ResponseStatus.COMPLETE
         assert "+CTM2MSEND:5" in resp.text
@@ -165,13 +177,15 @@ class TestWaitUrcTermination:
         """无关 URC 不触发终结（方案 B 精准匹配），继续等目标 URC。"""
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+X",
+            conn,
+            "AT+X",
             chunks=[
                 b"\r\nOK\r\n",
-                b"\r\n+OTHER:event\r\n",   # 无关 URC，不应终结
-                b"\r\n+X:target\r\n",      # 目标 URC，才终结
+                b"\r\n+OTHER:event\r\n",  # 无关 URC，不应终结
+                b"\r\n+X:target\r\n",  # 目标 URC，才终结
             ],
-            timeout=3.0, wait_urc=r"\+X:target",
+            timeout=3.0,
+            wait_urc=r"\+X:target",
         )
         assert resp.status is ResponseStatus.COMPLETE
         assert "+X:target" in resp.text
@@ -184,9 +198,11 @@ class TestWaitUrcDefaultBehavior:
     def test_default_ok_terminates(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         conn = _make_connection(monkeypatch)
         resp = _send_and_feed(
-            conn, "AT+CSQ",
+            conn,
+            "AT+CSQ",
             chunks=[b"\r\n+CSQ: 23,0\r\nOK\r\n"],
-            timeout=3.0, wait_urc=None,
+            timeout=3.0,
+            wait_urc=None,
         )
         assert resp.status is ResponseStatus.COMPLETE
         assert "+CSQ: 23,0" in resp.text
@@ -197,18 +213,22 @@ class TestWaitUrcDefaultBehavior:
         conn = _make_connection(monkeypatch)
         # 第一条：wait_urc 模式
         resp1 = _send_and_feed(
-            conn, "AT+X",
+            conn,
+            "AT+X",
             chunks=[b"\r\nOK\r\n", b"\r\n+X:ok\r\n"],
-            timeout=3.0, wait_urc=r"\+X:ok",
+            timeout=3.0,
+            wait_urc=r"\+X:ok",
         )
         assert resp1.status is ResponseStatus.COMPLETE
         # 状态应已复位
         assert conn._wait_urc_re is None  # noqa: SLF001
         # 第二条：默认模式（OK 即终结），不应受前一条 wait_urc 影响
         resp2 = _send_and_feed(
-            conn, "AT+CSQ",
+            conn,
+            "AT+CSQ",
             chunks=[b"\r\nOK\r\n"],
-            timeout=3.0, wait_urc=None,
+            timeout=3.0,
+            wait_urc=None,
         )
         assert resp2.status is ResponseStatus.COMPLETE
 
@@ -218,12 +238,13 @@ class TestWaitUrcDefaultBehavior:
         覆盖 send_command 的 except 分支：若发送失败不复位 wait_urc 状态，
         _wait_urc_re 会残留，污染下一条命令（下条命令误走 wait_urc 分支）。
         """
-        from atprobe.infra.serial.connection import SerialConnection
 
         conn = _make_connection(monkeypatch)
+
         # 让 write 抛 OSError（模拟发送失败）
         def _raise(_data: bytes) -> None:
             raise OSError("发送失败")
+
         monkeypatch.setattr(conn._serial, "write", _raise)  # noqa: SLF001
 
         resp = conn.send_command("AT+X", timeout=2.0, wait_urc=r"\+X:ok")
@@ -231,4 +252,3 @@ class TestWaitUrcDefaultBehavior:
         assert resp.status is ResponseStatus.ERROR
         # 关键：发送失败路径必须复位 wait_urc 状态
         assert conn._wait_urc_re is None, "发送失败后 _wait_urc_re 未复位，会污染下条命令"  # noqa: SLF001
-

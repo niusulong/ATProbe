@@ -84,7 +84,9 @@ class FakePortManager:
             _ScriptedResponse(response=response, match=match, consume_after=not persistent)
         )
 
-    def script_text(self, port: str, text: str, *, match: str | None = None, persistent: bool = False) -> None:
+    def script_text(
+        self, port: str, text: str, *, match: str | None = None, persistent: bool = False
+    ) -> None:
         """便捷：预设成功响应文本."""
         self.script(port, Response(text=text), match=match, persistent=persistent)
 
@@ -204,7 +206,9 @@ class FakePortManager:
             if observer in obs:  # type: ignore[operator]
                 obs.remove(observer)  # type: ignore[arg-type]
 
-    def write_command(self, port: str, command: str, *, terminator: Terminator | None = None) -> None:
+    def write_command(
+        self, port: str, command: str, *, terminator: Terminator | None = None
+    ) -> None:
         """流式写：记录命令（与 send_command 同口径），供测试断言.
 
         同时向 TX 观察者派发实际写入的字节（含结束符），模拟真实写线程行为。

@@ -135,16 +135,29 @@ class EnvConfigWidget(QWidget):
             self._collect_and_update_env()
 
     def _add_param(self, group: str) -> None:
+        """新增参数到指定组（B5 修复：旧实现功能完全失效）.
+
+        旧实现塞游离 QLineEdit 再 rebuild_form（会 clear 丢失引用），且 _env 不含
+        新参数 → 重建后表单无变化。修复：collect 当前值 → 把新参数注入 _env（重建
+        EnvConfig）→ _rebuild_form 基于含新参数的 _env 重建。
+        """
         from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(self, "新增参数", f"{group} 组的新参数名:")
-        if ok and name:
-            self._group_widgets.setdefault(group, {})
-            # 重建该组（简单实现）
-            self._collect_and_update_env()
-            # 确保 dict 里存在
-            self._group_widgets[group][name] = QLineEdit()
-            self._rebuild_form()
+        if not (ok and name):
+            return
+        # 先把当前表单值收集到 _env
+        self._collect_and_update_env()
+        # 把新参数注入 _env：重建 groups 字典并加入新参数
+        groups = {g: dict(p) for g, p in self._env.groups().items()}
+        if group not in groups:
+            groups[group] = {}
+        if name in groups[group]:
+            QMessageBox.warning(self, "已存在", f"参数 {name} 在 {group} 组已存在")
+            return
+        groups[group][name] = ""
+        self._env = EnvConfig(_groups=groups, source=str(self._path) if self._path else None)
+        self._rebuild_form()
 
     def _collect_and_update_env(self) -> None:
         # 浅拷贝内层 dict，避免把可变 dict 直接塞进 EnvConfig（其 _groups 注解为

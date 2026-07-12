@@ -64,29 +64,47 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
     if el.contains is not None:
         passed = el.contains in response
         return AssertionOutcome(
-            name, "response.contains", f"包含 {el.contains!r}", response,
-            passed, "" if passed else f"响应不包含 {el.contains!r}",
+            name,
+            "response.contains",
+            f"包含 {el.contains!r}",
+            response,
+            passed,
+            "" if passed else f"响应不包含 {el.contains!r}",
         )
     if el.not_contains is not None:
         passed = el.not_contains not in response
         return AssertionOutcome(
-            name, "response.not_contains", f"不包含 {el.not_contains!r}", response,
-            passed, "" if passed else f"响应含禁止内容 {el.not_contains!r}",
+            name,
+            "response.not_contains",
+            f"不包含 {el.not_contains!r}",
+            response,
+            passed,
+            "" if passed else f"响应含禁止内容 {el.not_contains!r}",
         )
     if el.matches is not None:
         try:
             ok = re.search(el.matches, response) is not None
         except re.error as exc:
-            return AssertionOutcome(name, "response.matches", el.matches, response, False, f"正则错误：{exc}")
+            return AssertionOutcome(
+                name, "response.matches", el.matches, response, False, f"正则错误：{exc}"
+            )
         return AssertionOutcome(
-            name, "response.matches", f"匹配 {el.matches!r}", response,
-            ok, "" if ok else f"响应不匹配 {el.matches!r}",
+            name,
+            "response.matches",
+            f"匹配 {el.matches!r}",
+            response,
+            ok,
+            "" if ok else f"响应不匹配 {el.matches!r}",
         )
     if el.equals is not None:
         ok = response == el.equals
         return AssertionOutcome(
-            name, "response.equals", repr(el.equals), repr(response),
-            ok, "" if ok else "响应不完全相等",
+            name,
+            "response.equals",
+            repr(el.equals),
+            repr(response),
+            ok,
+            "" if ok else "响应不完全相等",
         )
 
     # ---- B. 变量断言 ----
@@ -101,7 +119,11 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
 
     if not present:
         return AssertionOutcome(
-            name, f"var.{op.value}", expected_disp, "<未定义>", False,
+            name,
+            f"var.{op.value}",
+            expected_disp,
+            "<未定义>",
+            False,
             f"变量 {var_name} 未定义",
         )
 
@@ -116,11 +138,21 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
         passed = val_str != _to_str(el.value)
         if not passed:
             reason = f"{var_name}={val_str!r} 等于 {_to_str(el.value)!r}"
-    elif op in (AssertionOp.GT, AssertionOp.LT, AssertionOp.GE, AssertionOp.LE, AssertionOp.BETWEEN):
+    elif op in (
+        AssertionOp.GT,
+        AssertionOp.LT,
+        AssertionOp.GE,
+        AssertionOp.LE,
+        AssertionOp.BETWEEN,
+    ):
         num = _try_float(val_str)
         if num is None:
             return AssertionOutcome(
-                name, f"var.{op.value}", expected_disp, val_str, False,
+                name,
+                f"var.{op.value}",
+                expected_disp,
+                val_str,
+                False,
                 f"变量 {var_name}={val_str!r} 非数值，无法比较",
             )
         if op is AssertionOp.BETWEEN:
@@ -132,7 +164,11 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
             operand = _try_float(_to_str(el.value))
             if operand is None:
                 return AssertionOutcome(
-                    name, f"var.{op.value}", expected_disp, val_str, False,
+                    name,
+                    f"var.{op.value}",
+                    expected_disp,
+                    val_str,
+                    False,
                     f"期望值 {el.value!r} 非数值",
                 )
             if op is AssertionOp.GT:
@@ -144,7 +180,7 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
             else:  # LE
                 passed, reason = (num <= operand, f"{var_name}={num} 大于 {operand}")
     elif op is AssertionOp.IN:
-        vals = el.values or []
+        vals: tuple[str, ...] | list[str] = el.values or []
         passed = val_str in vals
         if not passed:
             reason = f"{var_name}={val_str!r} 不在 {vals} 内"
@@ -158,11 +194,15 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
         try:
             passed = re.search(pat, val_str) is not None
         except re.error as exc:
-            return AssertionOutcome(name, f"var.{op.value}", pat, val_str, False, f"正则错误：{exc}")
+            return AssertionOutcome(
+                name, f"var.{op.value}", pat, val_str, False, f"正则错误：{exc}"
+            )
         if not passed:
             reason = f"{var_name}={val_str!r} 不匹配 {pat!r}"
     else:  # pragma: no cover
-        return AssertionOutcome(name, f"var.{op.value}", expected_disp, val_str, False, "未知操作符")
+        return AssertionOutcome(
+            name, f"var.{op.value}", expected_disp, val_str, False, "未知操作符"
+        )
 
     actual_disp = val_str
     return AssertionOutcome(name, f"var.{op.value}", expected_disp, actual_disp, passed, reason)

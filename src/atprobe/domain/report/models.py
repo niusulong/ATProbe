@@ -73,6 +73,9 @@ class StepResult:
     retry_count: int = 0
     poll_iterations: int = 0
     error_msg: str = ""
+    # 结构化错误分类（NONE/DISCONNECT/SEND），从 Response.error_kind 透传。
+    # scheduler 的断连安全阀基于此判定，避免依赖 error_msg 的中文字符串匹配（M3）。
+    error_kind: str = "NONE"
 
 
 # ---------------------------------------------------------------------------

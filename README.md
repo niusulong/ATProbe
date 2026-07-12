@@ -28,7 +28,7 @@ uv sync --extra dev --extra gui
 ### CLI
 
 ```bash
-uv run atprobe run examples/testcases/network/network-basic_register.yaml --port COM3:115200
+uv run atprobe run examples/testcases/N58/network/NETWORK-CSQ-RESP-QUERY_FORMAT.yaml --port COM3:115200
 uv run atprobe list cases
 uv run atprobe --version     # 版本号是 --version / -V 标志，不是子命令
 ```

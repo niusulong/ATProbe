@@ -155,7 +155,9 @@ class CaseExecuteWidget(QWidget):
 
     def _refresh_ports(self) -> None:
         self.ports_combo.clear()
-        getter = getattr(self._main, "available_ports", None) or getattr(self._main, "connected_ports", None)
+        getter = getattr(self._main, "available_ports", None) or getattr(
+            self._main, "connected_ports", None
+        )
         if callable(getter):
             for p in getter():
                 self.ports_combo.addItem(p)
@@ -269,13 +271,19 @@ class CaseExecuteWidget(QWidget):
         """获取/创建某父节点下的目录子节点（已存在则复用，避免重复创建）."""
         for i in range(parent.childCount()):
             child = parent.child(i)
-            if child.childCount() > 0 and child.data(0, _FILE_ROLE) is None and child.text(0) == name:
+            if (
+                child.childCount() > 0
+                and child.data(0, _FILE_ROLE) is None
+                and child.text(0) == name
+            ):
                 return child
         item = self._make_dir_item(name)
         parent.addChild(item)
         return item
 
-    def _make_case_item(self, parent: QTreeWidgetItem, name: str, tags: tuple[str, ...], file: str) -> None:
+    def _make_case_item(
+        self, parent: QTreeWidgetItem, name: str, tags: tuple[str, ...], file: str
+    ) -> None:
         """创建用例叶子节点（第 0 列=用例名，1=标签，2=文件；存储文件路径于 UserRole）."""
         item = QTreeWidgetItem([name, ", ".join(tags), file])
         item.setFlags(
@@ -343,7 +351,9 @@ class CaseExecuteWidget(QWidget):
             return
         if hasattr(self._main, "run_cases"):
             self._main.run_cases(
-                selected, port, self.threshold_spin.value(),
+                selected,
+                port,
+                self.threshold_spin.value(),
                 no_report=not self.report_check.isChecked(),
             )
 

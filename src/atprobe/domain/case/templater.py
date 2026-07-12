@@ -59,6 +59,7 @@ def render(
     Raises:
         UndefinedReferenceError: 占位符未定义且 allow_partial=False。
     """
+
     def _resolve(name: str) -> str:
         # 拒绝嵌套点号路径（仅允许两级 group.param）
         parts = name.split(".")

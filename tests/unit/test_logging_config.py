@@ -130,6 +130,7 @@ def test_setup_logging_is_idempotent(monkeypatch, tmp_path):
 def test_setup_logging_debug_level(monkeypatch, tmp_path):
     """setup_logging(level=DEBUG) 后根 logger 级别为 DEBUG."""
     from atprobe.infra import logging_config
+
     monkeypatch.setattr(logging_config, "_log_dir", lambda: tmp_path / "logs")
     root = logging.getLogger()
     saved_handlers = root.handlers[:]

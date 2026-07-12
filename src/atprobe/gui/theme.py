@@ -72,13 +72,13 @@ P_BLUE_TINT_DK = "#1f6feb22"  # 深色主色浅底（带透明）
 
 # 仪器青（signal cyan —— TX 通道/CH1/主操作，「精密仪器」主题主信号色）
 P_CYAN_000 = "#cdf5f0"
-P_CYAN_500 = "#1a9e92"        # 浅色主题主信号（深一档保对比）
-P_CYAN_500_DK = "#4fd1c5"     # 深色主信号（CH1/TX/accent/品牌头）
-P_CYAN_600_DK = "#5dd8cc"     # 深色悬停
+P_CYAN_500 = "#1a9e92"  # 浅色主题主信号（深一档保对比）
+P_CYAN_500_DK = "#4fd1c5"  # 深色主信号（CH1/TX/accent/品牌头）
+P_CYAN_600_DK = "#5dd8cc"  # 深色悬停
 P_CYAN_TINT_DK = "#4fd1c522"  # 深色主色浅底（带透明）
 
 # 信号琥珀（signal amber —— RX 通道/CH2，与仪器青构成双信号色签名）
-P_AMBER_600_DK = "#e8b465"    # 深色 RX/CH2（比 P_AMBER_500_DK 更亮的仪器琥珀）
+P_AMBER_600_DK = "#e8b465"  # 深色 RX/CH2（比 P_AMBER_500_DK 更亮的仪器琥珀）
 
 # 语义色阶
 P_GREEN_000 = "#dafbe1"
@@ -112,12 +112,22 @@ P_TEXT_SECONDARY_LIGHT = "#656d76"
 
 # 间距栅格（4 的倍数）
 SPACE: dict[str, str] = {
-    "1": "4px", "2": "8px", "3": "12px", "4": "16px",
-    "5": "20px", "6": "24px", "8": "32px",
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "5": "20px",
+    "6": "24px",
+    "8": "32px",
 }
 # 圆角
 RADIUS: dict[str, str] = {
-    "none": "0", "sm": "4px", "md": "6px", "lg": "8px", "xl": "12px", "full": "9999px",
+    "none": "0",
+    "sm": "4px",
+    "md": "6px",
+    "lg": "8px",
+    "xl": "12px",
+    "full": "9999px",
 }
 # 等宽字体栈（数据/命令/响应终端 —— 工具视觉主角，仪器铭牌/终端美学）
 # IBM Plex Mono 带工程仪器血统，作为 JetBrains Mono 的补充兜底
@@ -135,7 +145,7 @@ LIGHT_TOKENS: dict[str, str] = {
     "bg.app": "#eef1f4",
     "bg.surface": P_WHITE,
     "bg.subtle": "#e6eaef",
-    "bg.inset": "#f4f6f8",        # 数据屏（浅灰凹陷）
+    "bg.inset": "#f4f6f8",  # 数据屏（浅灰凹陷）
     "bg.accent.subtle": P_CYAN_000,
     # 文字（深石板墨，呼应深色主题的蓝灰血统）
     "text.primary": "#1a2530",
@@ -175,10 +185,10 @@ LIGHT_TOKENS: dict[str, str] = {
 
 DARK_TOKENS: dict[str, str] = {
     # 背景（仪器面板层次：app 外壳 → 卡片浮起 → inset 屏幕凹陷最深）
-    "bg.app": "#0d141b",          # 深石板蓝（仪器外壳）
-    "bg.surface": "#161e27",      # 卡片/面板
-    "bg.subtle": "#1c2530",       # 次表面
-    "bg.inset": "#0a1016",        # 数据屏凹陷（比外壳更深）
+    "bg.app": "#0d141b",  # 深石板蓝（仪器外壳）
+    "bg.surface": "#161e27",  # 卡片/面板
+    "bg.subtle": "#1c2530",  # 次表面
+    "bg.inset": "#0a1016",  # 数据屏凹陷（比外壳更深）
     "bg.accent.subtle": P_CYAN_TINT_DK,
     # 文字（冷白系，不刺眼）
     "text.primary": "#d4dde6",
@@ -223,6 +233,7 @@ DARK_TOKENS: dict[str, str] = {
 # QSS 无变量，故此处以 Python 闭包形式在 _build_qss 内消费，保证单一事实源。
 # ===========================================================================
 
+
 def _build_qss(t: dict[str, str]) -> str:
     """根据语义令牌字典生成完整 QSS（组件令牌在此处就地解析并插值）.
 
@@ -240,136 +251,136 @@ def _build_qss(t: dict[str, str]) -> str:
     * {{
         font-family: {UI_FONT};
         font-size: 14px;
-        color: {t['text.primary']};
+        color: {t["text.primary"]};
     }}
     QMainWindow, QWidget {{
-        background: {t['bg.app']};
+        background: {t["bg.app"]};
     }}
 
     /* ===== 菜单栏 ===== */
     QMenuBar {{
-        background: {t['bg.surface']};
+        background: {t["bg.surface"]};
         border: none;
-        border-bottom: 1px solid {t['border.muted']};
+        border-bottom: 1px solid {t["border.muted"]};
         padding: 2px 4px;
     }}
     QMenuBar::item {{ padding: 6px 10px; border-radius: {btn_radius}; }}
-    QMenuBar::item:selected {{ background: {t['bg.subtle']}; }}
+    QMenuBar::item:selected {{ background: {t["bg.subtle"]}; }}
 
     /* ===== 工具栏 ===== */
     QToolBar {{
-        background: {t['bg.surface']};
+        background: {t["bg.surface"]};
         border: none;
-        border-bottom: 1px solid {t['border.muted']};
+        border-bottom: 1px solid {t["border.muted"]};
         spacing: 6px;
         padding: 6px 10px;
     }}
 
     /* ===== 按钮：default / primary / danger 三变体（states-and-variants.md） ===== */
     QPushButton {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.default']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.default"]};
         border-radius: {btn_radius};
         padding: 6px 16px;
-        color: {t['text.primary']};
+        color: {t["text.primary"]};
         font-weight: 500;
     }}
-    QPushButton:hover {{ background: {t['bg.subtle']}; border-color: {t['text.secondary']}; }}
-    QPushButton:pressed {{ background: {t['border.muted']}; }}
-    QPushButton:disabled {{ color: {t['text.disabled']}; border-color: {t['border.muted']}; }}
+    QPushButton:hover {{ background: {t["bg.subtle"]}; border-color: {t["text.secondary"]}; }}
+    QPushButton:pressed {{ background: {t["border.muted"]}; }}
+    QPushButton:disabled {{ color: {t["text.disabled"]}; border-color: {t["border.muted"]}; }}
     QPushButton:checked {{
-        background: {t['accent']};
-        color: {t['text.on.accent']};
-        border-color: {t['accent']};
+        background: {t["accent"]};
+        color: {t["text.on.accent"]};
+        border-color: {t["accent"]};
         font-weight: 600;
     }}
-    QPushButton:checked:hover {{ background: {t['accent.hover']}; }}
+    QPushButton:checked:hover {{ background: {t["accent.hover"]}; }}
 
     /* 主按钮变体（objectName="primary"） */
     QPushButton#primary {{
-        background: {t['accent']};
-        color: {t['text.on.accent']};
-        border-color: {t['accent']};
+        background: {t["accent"]};
+        color: {t["text.on.accent"]};
+        border-color: {t["accent"]};
         font-weight: 600;
     }}
-    QPushButton#primary:hover {{ background: {t['accent.hover']}; border-color: {t['accent.hover']}; }}
-    QPushButton#primary:pressed {{ background: {t['accent.hover']}; }}
+    QPushButton#primary:hover {{ background: {t["accent.hover"]}; border-color: {t["accent.hover"]}; }}
+    QPushButton#primary:pressed {{ background: {t["accent.hover"]}; }}
 
     /* 危险按钮变体（objectName="danger"） */
     QPushButton#danger {{
-        color: {t['danger']};
-        border-color: {t['danger.bg']};
+        color: {t["danger"]};
+        border-color: {t["danger.bg"]};
     }}
-    QPushButton#danger:hover {{ background: {t['danger.bg']}; }}
+    QPushButton#danger:hover {{ background: {t["danger.bg"]}; }}
 
     /* ===== 输入框 / 下拉 / 数值框（component-tokens.md: input.*） ===== */
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.default']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.default"]};
         border-radius: {input_radius};
         padding: 5px 10px;
-        selection-background-color: {t['accent']};
-        selection-color: {t['text.on.accent']};
+        selection-background-color: {t["accent"]};
+        selection-color: {t["text.on.accent"]};
     }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
-        border: 1px solid {t['accent']};
+        border: 1px solid {t["accent"]};
     }}
-    QLineEdit:disabled {{ color: {t['text.disabled']}; }}
+    QLineEdit:disabled {{ color: {t["text.disabled"]}; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.default']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.default"]};
         border-radius: {input_radius};
-        selection-background-color: {t['accent.bg']};
-        selection-color: {t['accent']};
+        selection-background-color: {t["accent.bg"]};
+        selection-color: {t["accent"]};
         padding: 4px;
         outline: none;
     }}
 
     /* ===== 数据区（终端/日志：凹陷感 + 等宽，component-tokens.md: data.*） ===== */
     QTextEdit, QPlainTextEdit {{
-        background: {t['bg.inset']};
-        border: 1px solid {t['border.muted']};
+        background: {t["bg.inset"]};
+        border: 1px solid {t["border.muted"]};
         border-radius: {data_radius};
         padding: 8px;
         font-family: {MONO_FONT};
         font-size: 12px;
-        selection-background-color: {t['accent.bg']};
-        selection-color: {t['text.primary']};
+        selection-background-color: {t["accent.bg"]};
+        selection-color: {t["text.primary"]};
     }}
 
     /* ===== 分组框（卡片：白底 + 柔和边框 + 轻阴影，在灰背景上浮起） ===== */
     QGroupBox {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.muted']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.muted"]};
         border-radius: {card_radius};
         margin-top: 16px;
         padding: 18px 14px 14px 14px;
         font-weight: 600;
-        color: {t['text.primary']};
+        color: {t["text.primary"]};
     }}
     QGroupBox::title {{
         subcontrol-origin: margin;
         subcontrol-position: top left;
         left: 14px;
         padding: 0 6px;
-        background: {t['bg.app']};
-        color: {t['text.secondary']};
+        background: {t["bg.app"]};
+        color: {t["text.secondary"]};
     }}
 
     /* ===== 选项卡（内容面板：白底卡片，与 tab 栏无缝衔接） ===== */
     QTabWidget::pane {{
-        border: 1px solid {t['border.muted']};
+        border: 1px solid {t["border.muted"]};
         border-top: none;
         border-radius: 0;
         top: -1px;
-        background: {t['bg.app']};
+        background: {t["bg.app"]};
     }}
     QTabWidget > QWidget {{
-        background: {t['bg.app']};
+        background: {t["bg.app"]};
     }}
     QTabBar {{
-        background: {t['bg.app']};
+        background: {t["bg.app"]};
         qproperty-drawBase: 0;
     }}
     QTabBar::tab {{
@@ -380,55 +391,55 @@ def _build_qss(t: dict[str, str]) -> str:
         border-top-right-radius: {btn_radius};
         padding: 9px 20px;
         margin-right: 2px;
-        color: {t['text.secondary']};
+        color: {t["text.secondary"]};
         font-weight: 500;
     }}
-    QTabBar::tab:hover:!selected {{ background: {t['bg.subtle']}; color: {t['text.primary']}; }}
+    QTabBar::tab:hover:!selected {{ background: {t["bg.subtle"]}; color: {t["text.primary"]}; }}
     QTabBar::tab:selected {{
-        background: {t['bg.surface']};
-        color: {t['text.primary']};
-        border-color: {t['border.muted']};
-        border-bottom: 2px solid {t['accent']};
+        background: {t["bg.surface"]};
+        color: {t["text.primary"]};
+        border-color: {t["border.muted"]};
+        border-bottom: 2px solid {t["accent"]};
         font-weight: 600;
     }}
     QTabBar::close-button {{
         image: none;
         subcontrol-position: right;
         padding: 2px;
-        border-radius: {RADIUS['sm']};
+        border-radius: {RADIUS["sm"]};
     }}
-    QTabBar::close-button:hover {{ background: {t['danger.bg']}; }}
+    QTabBar::close-button:hover {{ background: {t["danger.bg"]}; }}
 
     /* ===== 表格（component-tokens.md: table.*） ===== */
     QTableWidget {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.muted']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.muted"]};
         border-radius: {data_radius};
-        gridline-color: {t['border.subtle']};
-        alternate-background-color: {t['bg.subtle']};
+        gridline-color: {t["border.subtle"]};
+        alternate-background-color: {t["bg.subtle"]};
         font-family: {UI_FONT};
         font-size: 13px;
         outline: none;
     }}
     QTableWidget::item {{ padding: 8px 10px; border: none; }}
-    QTableWidget::item:hover {{ background: {t['bg.subtle']}; }}
-    QTableWidget::item:selected {{ background: {t['accent.bg']}; color: {t['accent']}; }}
+    QTableWidget::item:hover {{ background: {t["bg.subtle"]}; }}
+    QTableWidget::item:selected {{ background: {t["accent.bg"]}; color: {t["accent"]}; }}
 
     /* ===== 树（component-tokens.md: table.* 复用——目录层级树，卡片感） ===== */
     QTreeWidget, QTreeView {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.muted']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.muted"]};
         border-radius: {data_radius};
-        alternate-background-color: {t['bg.subtle']};
+        alternate-background-color: {t["bg.subtle"]};
         font-family: {UI_FONT};
         font-size: 13px;
         outline: none;
     }}
     QTreeWidget::item, QTreeView::item {{ padding: 6px 4px; border: none; }}
-    QTreeWidget::item:hover, QTreeView::item:hover {{ background: {t['accent.bg']}; }}
+    QTreeWidget::item:hover, QTreeView::item:hover {{ background: {t["accent.bg"]}; }}
     QTreeWidget::item:selected, QTreeView::item:selected {{
-        background: {t['accent.bg']};
-        color: {t['accent']};
+        background: {t["accent.bg"]};
+        color: {t["accent"]};
         font-weight: 600;
     }}
     /* 分支线（连接父子的虚线）：低对比，不喧宾夺主 */
@@ -436,42 +447,42 @@ def _build_qss(t: dict[str, str]) -> str:
         background: transparent;
     }}
     QTreeView::branch:has-siblings:!adjoins-item {{
-        background: {t['bg.subtle']};
+        background: {t["bg.subtle"]};
     }}
     /* 树内置复选框（三态）—— 与 QCheckBox::indicator 视觉统一，覆盖 Qt 原生丑样式 */
     QTreeView::indicator, QTreeWidget::indicator {{
         width: 16px; height: 16px;
-        border: 1.5px solid {t['border.default']};
-        border-radius: {RADIUS['sm']};
-        background: {t['bg.surface']};
+        border: 1.5px solid {t["border.default"]};
+        border-radius: {RADIUS["sm"]};
+        background: {t["bg.surface"]};
     }}
     QTreeView::indicator:hover, QTreeWidget::indicator:hover, QTreeView::indicator:focus {{
-        border-color: {t['accent']};
+        border-color: {t["accent"]};
     }}
     QTreeView::indicator:checked, QTreeWidget::indicator:checked {{
-        background: {t['accent']};
-        border-color: {t['accent']};
+        background: {t["accent"]};
+        border-color: {t["accent"]};
         image: url("{CHECK_URL}");
     }}
     QTreeView::indicator:indeterminate, QTreeWidget::indicator:indeterminate {{
-        background: {t['accent']};
-        border-color: {t['accent']};
+        background: {t["accent"]};
+        border-color: {t["accent"]};
         image: url("{DASH_URL}");
     }}
     QHeaderView::section {{
-        background: {t['bg.subtle']};
+        background: {t["bg.subtle"]};
         border: none;
-        border-right: 1px solid {t['border.subtle']};
-        border-bottom: 1px solid {t['border.muted']};
+        border-right: 1px solid {t["border.subtle"]};
+        border-bottom: 1px solid {t["border.muted"]};
         padding: 8px 10px;
         font-weight: 600;
-        color: {t['text.secondary']};
+        color: {t["text.secondary"]};
     }}
 
     /* ===== 普通列表（非导航，如报告列表）—— 卡片感 ===== */
     QListWidget, QListView {{
-        background: {t['bg.surface']};
-        border: 1px solid {t['border.muted']};
+        background: {t["bg.surface"]};
+        border: 1px solid {t["border.muted"]};
         border-radius: {data_radius};
         padding: 6px;
         outline: none;
@@ -480,25 +491,25 @@ def _build_qss(t: dict[str, str]) -> str:
         padding: 10px 14px;
         border-radius: {btn_radius};
         margin: 1px 0;
-        color: {t['text.primary']};
+        color: {t["text.primary"]};
     }}
-    QListWidget::item:hover {{ background: {t['bg.subtle']}; }}
+    QListWidget::item:hover {{ background: {t["bg.subtle"]}; }}
     QListWidget::item:selected {{
-        background: {t['accent.bg']};
-        color: {t['accent']};
+        background: {t["accent.bg"]};
+        color: {t["accent"]};
         font-weight: 600;
     }}
 
     /* ===== 侧栏容器（深色品牌导航栏，制造「导航 vs 内容」强分区） ===== */
     QFrame#sidebar {{
-        background: {t['sidebar.bg']};
+        background: {t["sidebar.bg"]};
         border: none;
-        border-right: 1px solid {t['sidebar.header.bg']};
+        border-right: 1px solid {t["sidebar.header.bg"]};
     }}
     /* 品牌头 */
     QLabel#sidebarHeader {{
-        background: {t['sidebar.header.bg']};
-        color: {t['sidebar.header.text']};
+        background: {t["sidebar.header.bg"]};
+        color: {t["sidebar.header.text"]};
         padding: 18px 16px;
         font-family: {MONO_FONT};
         font-size: 16px;
@@ -508,7 +519,7 @@ def _build_qss(t: dict[str, str]) -> str:
     }}
     /* 导航列表 —— 深色栏上的浅色项 */
     QListWidget#sidebarList {{
-        background: {t['sidebar.bg']};
+        background: {t["sidebar.bg"]};
         border: none;
         border-radius: 0;
         padding: 10px 8px;
@@ -519,16 +530,16 @@ def _build_qss(t: dict[str, str]) -> str:
         padding: 11px 14px;
         border-radius: {btn_radius};
         margin: 2px 0;
-        color: {t['sidebar.item.text']};
+        color: {t["sidebar.item.text"]};
         font-weight: 500;
     }}
     QListWidget#sidebarList::item:hover {{
         background: rgba(255,255,255,0.06);
-        color: {t['sidebar.item.text.selected']};
+        color: {t["sidebar.item.text.selected"]};
     }}
     QListWidget#sidebarList::item:selected {{
-        background: {t['accent']};
-        color: {t['text.on.accent']};
+        background: {t["accent"]};
+        color: {t["text.on.accent"]};
         font-weight: 600;
     }}
 
@@ -547,9 +558,9 @@ def _build_qss(t: dict[str, str]) -> str:
 
     /* ===== 状态栏（component-tokens.md: statusbar.*，语义点而非彩色文字） ===== */
     QStatusBar {{
-        background: {t['bg.surface']};
-        border-top: 1px solid {t['border.muted']};
-        color: {t['text.secondary']};
+        background: {t["bg.surface"]};
+        border-top: 1px solid {t["border.muted"]};
+        color: {t["text.secondary"]};
         padding: 2px 8px;
     }}
     QStatusBar::item {{ border: none; }}
@@ -561,11 +572,11 @@ def _build_qss(t: dict[str, str]) -> str:
         margin: 2px;
     }}
     QScrollBar::handle:vertical {{
-        background: {t['border.default']};
+        background: {t["border.default"]};
         border-radius: {pill_radius};
         min-height: 30px;
     }}
-    QScrollBar::handle:vertical:hover {{ background: {t['text.secondary']}; }}
+    QScrollBar::handle:vertical:hover {{ background: {t["text.secondary"]}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar:horizontal {{
         background: transparent;
@@ -573,32 +584,32 @@ def _build_qss(t: dict[str, str]) -> str:
         margin: 2px;
     }}
     QScrollBar::handle:horizontal {{
-        background: {t['border.default']};
+        background: {t["border.default"]};
         border-radius: {pill_radius};
         min-width: 30px;
     }}
-    QScrollBar::handle:horizontal:hover {{ background: {t['text.secondary']}; }}
+    QScrollBar::handle:horizontal:hover {{ background: {t["text.secondary"]}; }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
     /* ===== 复选框 / 单选 ===== */
     QCheckBox, QRadioButton {{ spacing: 6px; padding: 2px; }}
     QCheckBox::indicator, QRadioButton::indicator {{
         width: 16px; height: 16px;
-        border: 1.5px solid {t['border.default']};
-        border-radius: {RADIUS['sm']};
-        background: {t['bg.surface']};
+        border: 1.5px solid {t["border.default"]};
+        border-radius: {RADIUS["sm"]};
+        background: {t["bg.surface"]};
     }}
     QRadioButton::indicator {{ border-radius: {pill_radius}; }}
-    QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {t['accent']}; }}
+    QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {t["accent"]}; }}
     QCheckBox::indicator:checked {{
-        background: {t['accent']};
-        border-color: {t['accent']};
+        background: {t["accent"]};
+        border-color: {t["accent"]};
         image: url("{CHECK_URL}");
     }}
 
     /* ===== 标签（弱化次要文字） ===== */
     QLabel {{ background: transparent; }}
-    QLabel#hint, QLabel#caption {{ color: {t['text.secondary']}; font-size: 12px; }}
+    QLabel#hint, QLabel#caption {{ color: {t["text.secondary"]}; font-size: 12px; }}
 
     /* ===== 滚动区域 ===== */
     QScrollArea {{ border: none; background: transparent; }}
@@ -606,10 +617,10 @@ def _build_qss(t: dict[str, str]) -> str:
 
     /* ===== 提示：QToolTip ===== */
     QToolTip {{
-        background: {t['text.primary']};
-        color: {t['bg.surface']};
+        background: {t["text.primary"]};
+        color: {t["bg.surface"]};
         border: none;
-        border-radius: {RADIUS['sm']};
+        border-radius: {RADIUS["sm"]};
         padding: 4px 8px;
     }}
     """

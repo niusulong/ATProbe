@@ -108,7 +108,9 @@ class AssertElement(_Frozen):
     value: str | int | float | None = None
     min: float | None = None  # noqa: A003 (between 下界)
     max: float | None = None  # noqa: A003 (between 上界)
-    values: list[str] | None = None
+    # M2 修复：改 tuple 防止 frozen 模型的可变字段被就地修改（pydantic v2 frozen 只阻止
+    # 重新赋值，不阻止 list.append；tuple 天然不可变，真正满足"跨线程安全"不变量）。
+    values: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> AssertElement:
@@ -120,6 +122,10 @@ class AssertElement(_Frozen):
             # between 需 min/max；in 需 values；其余需 value
             if self.op is AssertionOp.BETWEEN and (self.min is None or self.max is None):
                 raise ValueError("op=between 需提供 min 与 max")
+            # L9：between 下界不应大于上界（否则断言恒失败，用户排查困难）
+            if self.op is AssertionOp.BETWEEN and self.min is not None and self.max is not None:
+                if self.min > self.max:
+                    raise ValueError(f"op=between 的 min({self.min}) 不应大于 max({self.max})")
             if self.op is AssertionOp.IN and not self.values:
                 raise ValueError("op=in 需提供 values")
             if self.op not in (AssertionOp.BETWEEN, AssertionOp.IN) and self.value is None:
@@ -127,11 +133,21 @@ class AssertElement(_Frozen):
             return self
 
         # 响应原文断言：恰好一个
-        present = [k for k in ("contains", "not_contains", "matches", "equals") if getattr(self, k) is not None]
+        present = [
+            k
+            for k in ("contains", "not_contains", "matches", "equals")
+            if getattr(self, k) is not None
+        ]
         if not present:
             raise ValueError("断言元素须指定响应原文断言或变量断言")
         if len(present) > 1:
             raise ValueError(f"响应原文断言互斥，不可同时指定：{present}")
+        # L5：not_contains/matches 为空字符串时行为反直觉（'' in anything 恒 True → 永远失败）
+        # 给明确错误，而非让用户困惑于"恒失败"结果。equals='' 是合法语义（断言响应为空）。
+        for field_name in ("not_contains", "matches"):
+            v = getattr(self, field_name)
+            if v is not None and v == "":
+                raise ValueError(f"{field_name} 不可为空字符串（行为反直觉/无意义）")
         return self
 
 

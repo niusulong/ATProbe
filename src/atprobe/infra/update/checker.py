@@ -29,6 +29,8 @@ class ReleaseInfo(BaseModel):
     zip_size: int  # 字节数
     release_notes: str  # release body（changelog）
     html_url: str  # GitHub Release 页面（备用）
+    # B9：随包发布的 SHA256 摘要（来自 <zip>.sha256 asset）。可能为空（旧版未发布哈希文件）。
+    sha256: str | None = None
 
 
 def fetch_latest(
@@ -73,11 +75,18 @@ def _parse_release(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo:
         raise UpdateCheckError("响应缺少 tag_name 字段") from exc
     version = tag.lstrip("v")
     expected_name = cfg.asset_name_for(version)
-    asset = next(
-        (a for a in body.get("assets", []) if a.get("name") == expected_name), None
-    )
+    asset = next((a for a in body.get("assets", []) if a.get("name") == expected_name), None)
     if asset is None:
         raise AssetNotFoundError(f"版本 {version} 无 Windows 安装包（{expected_name}）")
+    # B9：查找随包发布的 <zip>.sha256 哈希文件（可选 asset）。若存在，下载并解析摘要；
+    # 失败则 sha256=None（降级为仅校验 size）。哈希文件几十字节，下载开销可忽略。
+    sha256_digest: str | None = None
+    sha_name = f"{expected_name}.sha256"
+    sha_asset = next((a for a in body.get("assets", []) if a.get("name") == sha_name), None)
+    if sha_asset is not None:
+        sha_url = str(sha_asset.get("browser_download_url", ""))
+        if sha_url:
+            sha256_digest = _fetch_sha256(sha_url, cfg)
     return ReleaseInfo(
         version=version,
         tag=tag,
@@ -85,7 +94,26 @@ def _parse_release(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo:
         zip_size=int(asset.get("size", 0)),
         release_notes=str(body.get("body", "")),
         html_url=str(body.get("html_url", "")),
+        sha256=sha256_digest,
     )
+
+
+def _fetch_sha256(url: str, cfg: UpdateConfig) -> str | None:
+    """下载 .sha256 文件并解析出摘要（小文件，失败返回 None 降级）."""
+    req = urllib.request.Request(url, headers={"User-Agent": f"ATProbe/{current_version()}"})
+    to = cfg.check_timeout
+    try:
+        with urllib.request.urlopen(req, timeout=to) as resp:  # noqa: S310
+            raw = resp.read(256)  # sha256 摘要 64 hex 字符，读 256 字节足够
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+    # .sha256 文件格式："<64位hex>  <filename>" 或纯摘要。取首段 hex。
+    text = raw.decode("utf-8", errors="replace").strip()
+    first = text.split()[0] if text else ""
+    # 校验是合法的 64 位十六进制
+    if len(first) == 64 and all(c in "0123456789abcdefABCDEF" for c in first):
+        return first.lower()
+    return None
 
 
 def _http_error_msg(code: int) -> str:

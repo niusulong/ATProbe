@@ -88,7 +88,7 @@ def test_load_then_accept_persists_to_active_not_source(qapp, monkeypatch, tmp_p
     assert src.stat().st_mtime_ns == src_mtime_before
 
 
-def test_load_refreshes_dialog_tree(qapp, monkeypatch, tmp_path: Path) ->  None:  # type: ignore[no-untyped-def]
+def test_load_refreshes_dialog_tree(qapp, monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     """加载后对话框树立即显示新内容（视觉反馈，不能只改内存不刷 UI）。"""
     active = tmp_path / "quick_commands.yaml"
     dump_library(_make_library(), active)

@@ -9,8 +9,6 @@ SerialConnection.send_command 的两处调用点（首次发送 + 断连重发�
 
 from __future__ import annotations
 
-import pytest
-
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.interfaces import Response, ResponseStatus
@@ -22,7 +20,11 @@ def _make_connected_portmanager(monkeypatch) -> tuple[PortManager, SerialConnect
     cfg = PortConfig(name="COM9", baudrate=115200, frame=FrameFormat.parse("8N1"))
     conn = SerialConnection(cfg)
     monkeypatch.setattr(conn, "_connected", True)
-    monkeypatch.setattr(conn, "_serial", type("S", (), {"write": lambda self, d: None, "flush": lambda self: None})())
+    monkeypatch.setattr(
+        conn,
+        "_serial",
+        type("S", (), {"write": lambda self, d: None, "flush": lambda self: None})(),
+    )
     pm = PortManager()
     monkeypatch.setattr(pm, "_connections", {"COM9": conn})
     return pm, conn
@@ -74,7 +76,13 @@ class TestPortManagerWaitUrcForwarding:
             calls.append({"wait_urc": wait_urc, "is_disconnect_error": False})
             if len(calls) == 1:
                 # 首次返回断连 ERROR，触发 PortManager 重连重发
-                return Response(text="", status=ResponseStatus.ERROR, error="端口断连")
+                # M3：基于 error_kind 判定断连，需设 DISCONNECT（与真实 connection._handle_disconnect 一致）
+                return Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error="端口断连",
+                    error_kind="DISCONNECT",
+                )
             return Response(text="\r\nOK\r\n\r\n+X:done\r\n", status=ResponseStatus.COMPLETE)
 
         monkeypatch.setattr(conn, "send_command", _capture)
@@ -98,7 +106,9 @@ class TestVsimWaitUrcAcceptance:
         from atprobe.infra.serial.vsim import VsimPortManager
 
         vsim = VsimPortManager()
-        monkeypatch.setattr(vsim, "_responder", type("R", (), {"respond": lambda self, cmd: b"\r\nOK\r\n"})())
+        monkeypatch.setattr(
+            vsim, "_responder", type("R", (), {"respond": lambda self, cmd: b"\r\nOK\r\n"})()
+        )
         # 应正常返回，不因 wait_urc 参数报 TypeError
         resp = vsim.send_command("COM9", "AT+X", wait_urc=r"\+X:done", timeout=2)
         assert resp.status is ResponseStatus.COMPLETE

@@ -89,9 +89,15 @@ def run_pressure(
                 effective_step = step.model_copy(update={"on_failure": FailureStrategy.CONTINUE})
             result: StepExecResult = execute_step(
                 effective_step,
-                index=idx, phase="steps", ctx=ctx, sender=sender,
-                default_port=default_port, step_timeout_default=step_timeout_default,
-                clock=clock, sleep=sleep, cancel=cancel,
+                index=idx,
+                phase="steps",
+                ctx=ctx,
+                sender=sender,
+                default_port=default_port,
+                step_timeout_default=step_timeout_default,
+                clock=clock,
+                sleep=sleep,
+                cancel=cancel,
             )
             sr = result.step_result
             if sr.status is StepStatus.PASS:
@@ -134,10 +140,16 @@ def run_pressure(
     passed = success_rate >= pass_threshold and not aborted
 
     stats = PressureStats(
-        total_rounds=total, warmup_rounds=warmup, counted_rounds=counted,
-        success_rounds=success_rounds, failed_rounds=failed_rounds,
-        success_rate=success_rate, aborted=aborted,
-        pass_threshold=pass_threshold, passed=passed, step_stats=step_stats,
+        total_rounds=total,
+        warmup_rounds=warmup,
+        counted_rounds=counted,
+        success_rounds=success_rounds,
+        failed_rounds=failed_rounds,
+        success_rate=success_rate,
+        aborted=aborted,
+        pass_threshold=pass_threshold,
+        passed=passed,
+        step_stats=step_stats,
     )
     return PressureRunResult(stats=stats, aborted=aborted)
 
@@ -163,14 +175,21 @@ def _build_step_stat(
         p95 = s[min(n - 1, int(n * 0.95))]
         p99 = s[min(n - 1, int(n * 0.99))]
         return StepPressureStats(
-            step_index=idx, command=cmd,
-            success_count=suc, fail_count=fail,
-            min_ms=s[0], max_ms=s[-1], avg_ms=avg,
-            p95_ms=p95, p99_ms=p99,
+            step_index=idx,
+            command=cmd,
+            success_count=suc,
+            fail_count=fail,
+            min_ms=s[0],
+            max_ms=s[-1],
+            avg_ms=avg,
+            p95_ms=p95,
+            p99_ms=p99,
         )
     return StepPressureStats(
-        step_index=idx, command=cmd,
-        success_count=suc, fail_count=fail,
+        step_index=idx,
+        command=cmd,
+        success_count=suc,
+        fail_count=fail,
     )
 
 

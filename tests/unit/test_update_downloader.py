@@ -39,9 +39,7 @@ def test_download_writes_file_and_renames(tmp_path) -> None:  # type: ignore[no-
     data = b"x" * 1000
     resp = _FakeResp(data)
     with patch("urllib.request.urlopen", return_value=resp):
-        result = download(
-            "https://example.com/file.zip", tmp_path, filename="update.zip"
-        )
+        result = download("https://example.com/file.zip", tmp_path, filename="update.zip")
     assert result.path == tmp_path / "update.zip"
     assert result.path.read_bytes() == data
     assert result.size == 1000
@@ -117,3 +115,53 @@ def test_download_infers_filename_from_url(tmp_path) -> None:  # type: ignore[no
     with patch("urllib.request.urlopen", return_value=resp):
         result = download("https://example.com/path/ATProbe-0.3.0-win64.zip", tmp_path)
     assert result.path.name == "ATProbe-0.3.0-win64.zip"
+
+
+# ---------------------------------------------------------------------------
+# B9：SHA256 内容校验
+# ---------------------------------------------------------------------------
+def test_download_sha256_match_succeeds(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """正确的 SHA256 → 下载成功。"""
+    import hashlib
+
+    data = b"update content here" * 100
+    expected_sha = hashlib.sha256(data).hexdigest()
+    resp = _FakeResp(data)
+    with patch("urllib.request.urlopen", return_value=resp):
+        result = download(
+            "https://example.com/f.zip",
+            tmp_path,
+            filename="f.zip",
+            expected_sha256=expected_sha,
+        )
+    assert result.path == tmp_path / "f.zip"
+    assert result.size == len(data)
+
+
+def test_download_sha256_mismatch_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """错误的 SHA256 → 抛 DownloadError，.part 清理。"""
+    data = b"actual content"
+    resp = _FakeResp(data)
+    with patch("urllib.request.urlopen", return_value=resp):
+        with pytest.raises(DownloadError, match="SHA256"):
+            download(
+                "https://example.com/f.zip",
+                tmp_path,
+                filename="f.zip",
+                expected_sha256="0" * 64,  # 完全错误的摘要
+            )
+    assert not (tmp_path / "f.zip.part").exists()
+
+
+def test_download_no_sha256_skips_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """expected_sha256=None 时跳过校验（向后兼容旧 Release 无哈希）。"""
+    data = b"anything"
+    resp = _FakeResp(data)
+    with patch("urllib.request.urlopen", return_value=resp):
+        result = download(
+            "https://example.com/f.zip",
+            tmp_path,
+            filename="f.zip",
+            expected_sha256=None,
+        )
+    assert result.size == len(data)

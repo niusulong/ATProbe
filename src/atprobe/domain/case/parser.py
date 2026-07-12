@@ -42,7 +42,9 @@ def parse_case(data: str | bytes | dict[str, Any], *, source: str | None = None)
         raw: Any = data
     else:
         try:
-            raw = _yaml.load(StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8")))
+            raw = _yaml.load(
+                StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8"))
+            )
         except YAMLError as exc:
             # ruamel 错误对象常带 .problem_mark.line（0-based）
             line = getattr(getattr(exc, "problem_mark", None), "line", None)

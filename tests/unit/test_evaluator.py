@@ -31,7 +31,7 @@ class TestComparisons:
 
     def test_numeric_comparison_string_fails(self) -> None:
         # > < 对非数值字符串比较 → false（§6.3 规则 3）
-        assert evaluate('x > 5', {"x": "abc"}) is False
+        assert evaluate("x > 5", {"x": "abc"}) is False
 
     def test_float_comparison(self) -> None:
         assert evaluate("v > 1.5", {"v": 2.0}) is True
@@ -48,8 +48,48 @@ class TestLogicalOps:
         assert evaluate('a == "1" or b == "2"', {"a": "9", "b": "9"}) is False
 
     def test_mixed(self) -> None:
-        assert evaluate('a == "1" and b == "2" or c == "3"',
-                        {"a": "1", "b": "9", "c": "3"}) is True
+        assert evaluate('a == "1" and b == "2" or c == "3"', {"a": "1", "b": "9", "c": "3"}) is True
+
+
+class TestParentheses:
+    """括号分组（与 and/or 优先级配合，用于复杂条件如注册状态多分支判断）."""
+
+    def test_simple_paren(self) -> None:
+        assert evaluate('(a == "1")', {"a": "1"}) is True
+        assert evaluate('(a == "1")', {"a": "2"}) is False
+
+    def test_paren_overrides_precedence(self) -> None:
+        # 无括号：and 优先于 or → (a==1 and b==2) or c==3
+        # 有括号：a==1 and (b==2 or c==3) —— 语义不同
+        scope = {"a": "1", "b": "9", "c": "3"}
+        assert evaluate('a == "1" and (b == "2" or c == "3")', scope) is True
+        assert evaluate('a == "1" and b == "2" or c == "3"', scope) is True  # 同结果但不同路径
+        # 关键区分用例：a!=1 时，括号版应 false（因 and 左假），无括号版看 c==3
+        scope2 = {"a": "9", "b": "9", "c": "3"}
+        assert evaluate('a == "1" and (b == "2" or c == "3")', scope2) is False
+        assert evaluate('a == "1" and b == "2" or c == "3"', scope2) is True
+
+    def test_nested_paren(self) -> None:
+        assert evaluate('((a == "1"))', {"a": "1"}) is True
+        assert (
+            evaluate('(a == "1" or (b == "2" and c == "3"))', {"a": "9", "b": "2", "c": "3"})
+            is True
+        )
+
+    def test_paren_with_null_check(self) -> None:
+        assert (
+            evaluate('(a == "1" or b == "5") and c is not null', {"a": "1", "b": "5", "c": "x"})
+            is True
+        )
+        assert (
+            evaluate('(a == "1" or b == "5") and c is not null', {"a": "1", "b": "5"}) is False
+        )  # c 未定义 → null
+
+    def test_unbalanced_paren_error(self) -> None:
+        with pytest.raises(ExpressionError):
+            evaluate('(a == "1"', {"a": "1"})
+        with pytest.raises(ExpressionError):
+            evaluate('a == "1")', {"a": "1"})
 
 
 class TestNullHandling:
@@ -63,7 +103,7 @@ class TestNullHandling:
 
     def test_null_in_comparison_is_false(self) -> None:
         # null 与任意比较（非 is null）→ false（§6.3 规则 2）
-        assert evaluate("missing == \"1\"", {}) is False
+        assert evaluate('missing == "1"', {}) is False
         assert evaluate("missing > 5", {}) is False
 
     def test_empty_string_not_null(self) -> None:

@@ -92,7 +92,8 @@ def install_excepthook(error_cb: Callable[[BaseException], None] | None = None) 
     def _thread_hook(args: Any) -> None:
         thread_name = getattr(args.thread, "name", "?")
         logger.error(
-            "未捕获的线程异常 [%s]", thread_name,
+            "未捕获的线程异常 [%s]",
+            thread_name,
             exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
         )
         if error_cb is not None and args.exc_value is not None:

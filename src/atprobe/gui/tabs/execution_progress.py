@@ -52,7 +52,7 @@ class ExecutionProgressWidget(QWidget):
     def __init__(self, binding: TabBinding, main_window: object) -> None:
         super().__init__()
         self._main = main_window
-        self._tokens = get_tokens(dark=False)
+        self._tokens = get_tokens()
         # 用例索引 → 表格行号（每个用例一行步骤明细在第二列文本）
         self._case_rows: dict[int, int] = {}
         self._case_names: dict[int, str] = {}
@@ -190,8 +190,14 @@ class ExecutionProgressWidget(QWidget):
         from atprobe.engine.interfaces import CaseResultEvent
 
         assert isinstance(ev, CaseResultEvent)
-        # 按用例名反查行（case_index 可能跨多个用例不连续，用名字匹配）
-        row = self._find_row_by_name(ev.case_name)
+        # M12 修复：优先按 case_index 精确反查行（与 CaseStartEvent 一致），
+        # 避免 重名用例（不同目录同名 yaml）结果错位写到第一行。
+        # case_index=0（未知）时回退到 case_name 匹配。
+        row = None
+        if ev.case_index > 0:
+            row = self._case_rows.get(ev.case_index)
+        if row is None:
+            row = self._find_row_by_name(ev.case_name)
         if row is None:
             return
         color_key = {
@@ -204,6 +210,14 @@ class ExecutionProgressWidget(QWidget):
         status_item.setForeground(self._qt_color(self._tokens[color_key]))
         self.table.setItem(row, 2, status_item)
         self.table.setItem(row, 3, QTableWidgetItem(f"{ev.duration_ms:.2f}s"))
+
+    def cleanup(self) -> None:
+        """统一资源清理钩子（B6）。execution_progress 无外部订阅/线程，空实现保持一致接口."""
+        pass
+
+    def refresh_theme(self) -> None:
+        """主题切换时刷新内联富文本配色（M11）."""
+        self._tokens = get_tokens()
 
     def _on_finished(self, ev: object) -> None:
         self.progress_bar.setValue(100)

@@ -44,7 +44,9 @@ def _list_cases(cases_dir: Path, tag: list[str]) -> None:
         raise typer.Exit(1)
     typer.echo(f"可用用例 (扫描目录: {cases_dir}):")
     count = 0
-    for f in sorted(cases_dir.rglob("*.yaml")):
+    # M5 修复：同时扫 .yaml 与 .yml，与 run.py 一致（否则 .yml 用例被静默漏掉）
+    yaml_files = sorted({*cases_dir.rglob("*.yaml"), *cases_dir.rglob("*.yml")})
+    for f in yaml_files:
         if f.name.startswith("suite-"):
             continue
         try:
@@ -67,7 +69,9 @@ def _list_suites(cases_dir: Path) -> None:
         raise typer.Exit(1)
     typer.echo("可用套件:")
     count = 0
-    for f in sorted(cases_dir.rglob("suite-*.yaml")):
+    # M5 修复：同时扫 suite-*.yaml 与 suite-*.yml，与 run.py 一致
+    suite_files = sorted({*cases_dir.rglob("suite-*.yaml"), *cases_dir.rglob("suite-*.yml")})
+    for f in suite_files:
         name, desc, case_count, tags = _parse_suite_meta(f)
         rel = f.relative_to(cases_dir)
         display_name = name or f.stem

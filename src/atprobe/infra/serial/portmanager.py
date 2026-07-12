@@ -19,6 +19,7 @@ from atprobe.infra.serial.exceptions import (
     PortOpenError,
 )
 from atprobe.infra.serial.interfaces import (
+    ERROR_KIND_DISCONNECT,
     CancelToken,
     ICommandSender,
     IConnectionManager,
@@ -67,9 +68,21 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
     # §4.1 连接管理
     # ------------------------------------------------------------------
     def open(self, config: PortConfig) -> None:
+        """打开端口。M4 修复：已用相同配置打开则幂等返回，配置不同才抛错。
+
+        旧实现对已开端口无条件 raise PortOpenError，破坏"外部已连端口复用"语义
+        （scheduler.start 先 is_connected 判断 already_open 再无条件 open，导致 GUI
+        已连端口被引擎复用时误判为打开失败）。现改为幂等：同名且配置一致直接返回。
+        """
         with self._lock:
-            if config.name in self._connections:
-                raise PortOpenError(config.name, "端口已打开")
+            existing = self._connections.get(config.name)
+            if existing is not None:
+                # 已用相同配置打开 → 幂等返回（不破坏外部已建立的连接与订阅）
+                old = self._configs.get(config.name)
+                if old is not None and old == config:
+                    return
+                # 配置不同 → 抛错（无法在不中断现有连接的情况下切换配置）
+                raise PortOpenError(config.name, "端口已用不同配置打开")
             conn = SerialConnection(config, raw_logger=self._raw_logger, clock=self._clock)
             conn.open()
             self._connections[config.name] = conn
@@ -102,7 +115,11 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         return conn is not None and conn.is_connected
 
     def config_of(self, port: str) -> PortConfig:
-        return self._configs[port]
+        """返回端口配置；端口未知时返回默认 PortConfig（L12：与 Fake 对齐，便于安全阀回退）."""
+        cfg = self._configs.get(port)
+        if cfg is not None:
+            return cfg
+        return PortConfig(name=port)
 
     def enumerate_ports(self) -> list[PortInfo]:
         """枚举系统串口（M5 list ports）."""
@@ -157,12 +174,16 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             # 触发重连（用例级重试由上层 M3 决策，此处只尝试恢复连接）
             if not self._reconnect(port):
                 return Response(
-                    text="", status=ResponseStatus.ERROR, error=f"端口 {port} 重连失败"
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error=f"端口 {port} 重连失败",
+                    error_kind=ERROR_KIND_DISCONNECT,
                 )
 
         resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
-        # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）
-        if resp.status is ResponseStatus.ERROR and "断连" in resp.error:
+        # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）。
+        # M3 修复：基于结构化 error_kind 判定，而非脆弱的中文字符串匹配。
+        if resp.status is ResponseStatus.ERROR and resp.error_kind == ERROR_KIND_DISCONNECT:
             if self._reconnect(port):
                 resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
         return resp
@@ -242,7 +263,9 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if conn is not None:
             conn.remove_tx_observer(observer)  # type: ignore[arg-type]
 
-    def write_command(self, port: str, command: str, *, terminator: Terminator | None = None) -> None:
+    def write_command(
+        self, port: str, command: str, *, terminator: Terminator | None = None
+    ) -> None:
         """写字符串命令（追加结束符），不等待响应——供手动调试/串口助手用.
 
         Args:

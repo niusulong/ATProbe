@@ -46,8 +46,14 @@ def _make_connection(monkeypatch) -> SerialConnection:
     return conn
 
 
-def _send_in_thread(conn: SerialConnection, command: str, *, timeout: float = 5.0,
-                    wait_urc: str | None = None, cancel=None) -> tuple[threading.Thread, dict]:
+def _send_in_thread(
+    conn: SerialConnection,
+    command: str,
+    *,
+    timeout: float = 5.0,
+    wait_urc: str | None = None,
+    cancel=None,
+) -> tuple[threading.Thread, dict]:
     """子线程跑 send_command，返回（线程对象，结果字典）。结果字典 done/resp 在完成时填充。"""
     result: dict = {"resp": None}
 
@@ -141,32 +147,35 @@ class TestTimeoutFinalGet:
 
 
 class TestCancelDrainsPending:
-    """cancel 返回前排空队列，避免响应遗弃。"""
+    """cancel 时抛 OperationCancelled 并排空队列（M1 修复：统一取消语义）."""
 
-    def test_cancel_returns_cancelled_and_drains(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """send_command 被 cancel 时返回 CANCELLED，且不残留响应在队列。
+    def test_cancel_raises_operation_cancelled_and_drains(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """send_command 被 cancel 时抛 OperationCancelled，且排空队列。
 
-        时序：预先 cancel，send_command 首次循环即检测到 cancelled → 返回 CANCELLED。
-        验证 cancel 分支执行了排空（队列 qsize==0）。
+        M1 修复：取消语义统一为 raise OperationCancelled（与 Fake/vsim 一致），
+        上层 step_runner catch 后判 INTERRUPTED。旧实现返回 Response(CANCELLED) 被
+        _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉。
+        时序：预先 cancel，send_command 首次循环即检测到 → raise。
         """
+        from atprobe.infra.serial.exceptions import OperationCancelled
         from atprobe.infra.serial.interfaces import CancelToken
 
         conn = _make_connection(monkeypatch)
         cancel = CancelToken()
         cancel.cancel()  # 预先取消
 
-        resp = conn.send_command("AT+X", timeout=2.0, cancel=cancel)
-
-        assert resp.status is ResponseStatus.CANCELLED
+        with pytest.raises(OperationCancelled):
+            conn.send_command("AT+X", timeout=2.0, cancel=cancel)
         # cancel 分支排空了队列
         assert conn._response_q.qsize() == 0  # noqa: SLF001
 
     def test_cancel_after_drain_no_pollution(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """cancel 排空后，下次 send_command 不被残留污染。
 
-        场景：命令 A 被 cancel，cancel 前队列里有一条响应；命令 A 返回 CANCELLED 并排空。
+        场景：命令 A 被 cancel，cancel 前队列里有一条响应；命令 A raise 并排空。
         命令 B 执行时不应取到 A 残留的响应。
         """
+        from atprobe.infra.serial.exceptions import OperationCancelled
         from atprobe.infra.serial.interfaces import CancelToken
 
         conn = _make_connection(monkeypatch)
@@ -177,8 +186,8 @@ class TestCancelDrainsPending:
             Response(text="SHOULD_BE_DRAINED", status=ResponseStatus.COMPLETE)
         )
 
-        resp_a = conn.send_command("AT+A", timeout=2.0, cancel=cancel)
-        assert resp_a.status is ResponseStatus.CANCELLED
+        with pytest.raises(OperationCancelled):
+            conn.send_command("AT+A", timeout=2.0, cancel=cancel)
 
         # 命令 B 不应取到 "SHOULD_BE_DRAINED"
         resp_b = conn.send_command("AT+B", timeout=0.1)

@@ -353,7 +353,7 @@ teardown:
 
 class TestEnvConfig:
     def test_env_dot_ref_filled(self, fake_port) -> None:  # type: ignore[no-untyped-def]
-        env = load_env_config('ftp:\n  host: 192.168.1.100\n  port: 21\n')
+        env = load_env_config("ftp:\n  host: 192.168.1.100\n  port: 21\n")
         fake_port.script_text("COM3", "OK\r\n")
         case = parse_case("""
 name: env-test
@@ -461,11 +461,17 @@ class TestDisconnectSafety:
     def test_safety_valve_aborts_case(self, fake_port) -> None:  # type: ignore[no-untyped-def]
         from atprobe.infra.serial.interfaces import ResponseStatus
 
-        # 5 步都返回断连错误（error 含「断连」）→ 第 3 步触发安全阀放弃用例
+        # 5 步都返回断连错误（error_kind=DISCONNECT）→ 第 3 步触发安全阀放弃用例
+        # M3：安全阀基于结构化 error_kind 判定，不再依赖 error 文案字符串匹配
         for _ in range(5):
             fake_port.script(
                 "COM3",
-                Response(text="", status=ResponseStatus.ERROR, error="端口断连"),
+                Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error="端口断连",
+                    error_kind="DISCONNECT",
+                ),
                 match="AT",
                 persistent=True,
             )
@@ -587,8 +593,13 @@ class TestParameterization:
         from atprobe.domain.case.models import Case, Step
 
         base = Case(
-            name="多参数", port="COM3",
-            steps=(Step(command="AT{{val}}", ),),
+            name="多参数",
+            port="COM3",
+            steps=(
+                Step(
+                    command="AT{{val}}",
+                ),
+            ),
             parameters=({"val": "A"}, {"val": "B"}),
         )
         # 手动展开（模拟 run.py 行为）
@@ -736,5 +747,3 @@ steps:
         port_dirs = [p.name for p in session_dir.iterdir() if p.is_dir()]
         assert "COM3" in port_dirs, f"日志应在 COM3 下，实际端口目录: {port_dirs}"
         assert "COM5" not in port_dirs, f"不应在 COM5（用例硬编码）下建日志，实际: {port_dirs}"
-
-

@@ -51,16 +51,12 @@ def load_library(path: Path) -> CommandLibrary:
     if raw is None:
         return CommandLibrary.empty()
     if not isinstance(raw, dict):
-        raise QuickCmdStoreError(
-            f"命令库根节点必须是映射，实际为 {type(raw).__name__}"
-        )
+        raise QuickCmdStoreError(f"命令库根节点必须是映射，实际为 {type(raw).__name__}")
     projects_raw = raw.get("projects")
     if projects_raw is None:
         return CommandLibrary.empty()
     if not isinstance(projects_raw, list):
-        raise QuickCmdStoreError(
-            f"'projects' 必须是列表，实际为 {type(projects_raw).__name__}"
-        )
+        raise QuickCmdStoreError(f"'projects' 必须是列表，实际为 {type(projects_raw).__name__}")
     lib = CommandLibrary.empty()
     for i, proj_raw in enumerate(projects_raw):
         if not isinstance(proj_raw, dict):
@@ -73,25 +69,17 @@ def load_library(path: Path) -> CommandLibrary:
         lib.add_project(name)
         groups_raw = proj_raw.get("groups", []) or []
         if not isinstance(groups_raw, list):
-            raise QuickCmdStoreError(
-                f"项目 {name!r} 的 'groups' 必须是列表"
-            )
+            raise QuickCmdStoreError(f"项目 {name!r} 的 'groups' 必须是列表")
         for j, grp_raw in enumerate(groups_raw):
             if not isinstance(grp_raw, dict):
-                raise QuickCmdStoreError(
-                    f"项目 {name!r} 第 {j + 1} 个功能组必须是映射"
-                )
+                raise QuickCmdStoreError(f"项目 {name!r} 第 {j + 1} 个功能组必须是映射")
             gname = grp_raw.get("name")
             if not isinstance(gname, str) or not gname.strip():
-                raise QuickCmdStoreError(
-                    f"项目 {name!r} 第 {j + 1} 个功能组缺少 'name' 或为空"
-                )
+                raise QuickCmdStoreError(f"项目 {name!r} 第 {j + 1} 个功能组缺少 'name' 或为空")
             grp = lib.add_group(name, gname)
             cmds_raw = grp_raw.get("commands", []) or []
             if not isinstance(cmds_raw, list):
-                raise QuickCmdStoreError(
-                    f"功能组 {name!r}/{gname!r} 的 'commands' 必须是列表"
-                )
+                raise QuickCmdStoreError(f"功能组 {name!r}/{gname!r} 的 'commands' 必须是列表")
             for c in cmds_raw:
                 # 强制转 str，兼容用户手写整数等
                 grp.commands.append(str(c))
@@ -107,10 +95,7 @@ def dump_library(library: CommandLibrary, path: Path) -> None:
         "projects": [
             {
                 "name": p.name,
-                "groups": [
-                    {"name": g.name, "commands": list(g.commands)}
-                    for g in p.groups
-                ],
+                "groups": [{"name": g.name, "commands": list(g.commands)} for g in p.groups],
             }
             for p in library.projects
         ]

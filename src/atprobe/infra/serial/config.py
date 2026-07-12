@@ -1,5 +1,4 @@
-"""M1 串口配置与数据结构（REQ-M1 §2.1 连接级参数、§3.2 数据流参数）.
-"""
+"""M1 串口配置与数据结构（REQ-M1 §2.1 连接级参数、§3.2 数据流参数）."""
 
 from __future__ import annotations
 
@@ -55,9 +54,7 @@ class FrameFormat:
         try:
             parity = Parity(par_ch.upper())
         except ValueError as exc:
-            raise ValueError(
-                f"校验位应为 N/E/O/M/S，实际：{par_ch!r}"
-            ) from exc
+            raise ValueError(f"校验位应为 N/E/O/M/S，实际：{par_ch!r}") from exc
         if sb_ch == "1":
             stopbits = 1.0
         elif sb_ch == "2":

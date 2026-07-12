@@ -23,8 +23,9 @@ def test_update_check_reports_new_version() -> None:
         release_notes="notes",
         html_url="https://github.com/niusulong/ATProbe/releases/tag/v0.3.0",
     )
-    with patch("atprobe.cli.commands.update.fetch_latest", return_value=fake), patch(
-        "atprobe.cli.commands.update.is_newer", return_value=True
+    with (
+        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
+        patch("atprobe.cli.commands.update.is_newer", return_value=True),
     ):
         result = runner.invoke(app, ["update", "--check"])
     assert result.exit_code == 0
@@ -37,11 +38,16 @@ def test_update_check_already_latest() -> None:
     from atprobe.infra.update.checker import ReleaseInfo
 
     fake = ReleaseInfo(
-        version="0.2.1", tag="v0.2.1", zip_url="u", zip_size=1,
-        release_notes="", html_url="h",
+        version="0.2.1",
+        tag="v0.2.1",
+        zip_url="u",
+        zip_size=1,
+        release_notes="",
+        html_url="h",
     )
-    with patch("atprobe.cli.commands.update.fetch_latest", return_value=fake), patch(
-        "atprobe.cli.commands.update.is_newer", return_value=False
+    with (
+        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
+        patch("atprobe.cli.commands.update.is_newer", return_value=False),
     ):
         result = runner.invoke(app, ["update", "--check"])
     assert result.exit_code == 0

@@ -75,9 +75,7 @@ class FileSendWorker(QObject):
                 offset = 0
                 while offset < n:
                     if self._cancel is not None and self._cancel.cancelled:
-                        raise OperationCancelled(
-                            f"文件发送被取消（已发送 {offset}/{n} 字节）"
-                        )
+                        raise OperationCancelled(f"文件发送被取消（已发送 {offset}/{n} 字节）")
                     end = min(offset + self._chunk_size, n)
                     chunk = data[offset:end]
                     self._conn.write_bytes(chunk)  # type: ignore[attr-defined]

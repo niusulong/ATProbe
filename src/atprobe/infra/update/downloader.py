@@ -5,10 +5,14 @@
     - 任何退出路径（失败/取消）都清理 ``.part``；成功路径在 finally 前已完成重命名
     - 目标目录用系统临时目录，避免写 exe 同级（权限/防软件监控）
     - 可选 expected_size 校验，防止代理截断给残缺 zip
+    - B9 修复：可选 expected_sha256 内容校验，边下边哈希，下载完比对。
+      防传输损坏 / CDN 缓存污染 / 等大小恶意替换（expected_size 来自同一 Release JSON
+      防不住攻击者构造等大小 zip）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -40,6 +44,7 @@ def download(
     filename: str | None = None,
     timeout: float | None = None,
     expected_size: int | None = None,
+    expected_sha256: str | None = None,
     progress_cb: ProgressCb | None = None,
     cancel_token: CancelToken | None = None,
     config: UpdateConfig | None = None,
@@ -52,6 +57,8 @@ def download(
         filename: 目标文件名；None 则从 URL 路径推断。
         timeout: 连接超时；None 用 config.download_timeout。
         expected_size: 期望字节数，下载后校验；None 不校验。
+        expected_sha256: 期望的 SHA256 十六进制摘要（B9）。边下边哈希，下载完比对；
+            None 不校验。防传输损坏 / CDN 缓存污染 / 等大小恶意替换。
         progress_cb: ``(downloaded, total)`` 回调，每 chunk 调用。
         cancel_token: 返回 True 则中止下载（抛 DownloadCancelled）。
         config: 超时等配置。
@@ -61,7 +68,7 @@ def download(
 
     Raises:
         DownloadCancelled: 用户取消。
-        DownloadError: 网络/磁盘/大小不符。
+        DownloadError: 网络/磁盘/大小不符/SHA256 不符。
     """
     cfg = config or DEFAULT_CONFIG
     if filename is None:
@@ -88,6 +95,7 @@ def download(
 
         total = _content_length(resp)
         written = 0
+        sha = hashlib.sha256() if expected_sha256 is not None else None
         try:
             with part.open("wb") as f:
                 while True:
@@ -100,6 +108,8 @@ def download(
                         f.write(chunk)
                     except OSError as exc:
                         raise DownloadError(f"写盘失败：{exc}") from exc
+                    if sha is not None:
+                        sha.update(chunk)
                     written += len(chunk)
                     if progress_cb is not None:
                         progress_cb(written, total)
@@ -111,6 +121,13 @@ def download(
             raise DownloadError(
                 f"下载文件大小不符：期望 {expected_size}，实际 {written}（可能已损坏）"
             )
+        # B9：SHA256 内容校验（防传输损坏 / CDN 缓存污染 / 等大小恶意替换）
+        if sha is not None and expected_sha256 is not None:
+            actual = sha.hexdigest()
+            if actual.lower() != expected_sha256.lower():
+                raise DownloadError(
+                    f"下载文件 SHA256 不符：期望 {expected_sha256}，实际 {actual}（文件可能被篡改）"
+                )
 
         # 原子重命名（成功路径）
         try:

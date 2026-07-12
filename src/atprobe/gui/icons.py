@@ -34,8 +34,7 @@ _ICONS: dict[str, str] = {
     "case_execute": '<polygon points="6 4 20 12 6 20 6 4"/>',
     # 实时监控：活动波形 + 边框，呼应"实时数据流"
     "monitor": (
-        '<rect x="3" y="4" width="18" height="16" rx="2"/>'
-        '<path d="M3 13h3l2-4 3 7 2-5 2 2h6"/>'
+        '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 13h3l2-4 3 7 2-5 2 2h6"/>'
     ),
     # 报告查看：带横线的文档
     "report_view": (
@@ -71,10 +70,7 @@ _ICONS: dict[str, str] = {
         '<path d="M10 11v6M14 11v6"/>'
     ),
     # 编辑：铅笔
-    "edit": (
-        '<path d="M12 20h9"/>'
-        '<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'
-    ),
+    "edit": ('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
     # 发送：纸飞机
     "send": '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
 }

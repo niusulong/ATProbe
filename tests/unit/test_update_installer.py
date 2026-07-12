@@ -53,10 +53,10 @@ def test_apply_update_generates_and_launches_script(tmp_path: Path) -> None:
     (tmp_path / "ATProbe.exe").write_bytes(b"old")
 
     popen_mock = MagicMock()
-    with patch("atprobe.infra.update.installer.is_frozen", return_value=True), patch(
-        "atprobe.infra.update.installer.subprocess.Popen", return_value=popen_mock
-    ) as p_open, patch(
-        "atprobe.infra.update.installer.os.getpid", return_value=12345
+    with (
+        patch("atprobe.infra.update.installer.is_frozen", return_value=True),
+        patch("atprobe.infra.update.installer.subprocess.Popen", return_value=popen_mock) as p_open,
+        patch("atprobe.infra.update.installer.os.getpid", return_value=12345),
     ):
         apply_update(zip_path, tmp_path)
 

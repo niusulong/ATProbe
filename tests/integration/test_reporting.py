@@ -25,33 +25,71 @@ from atprobe.reporting.interfaces import ReportOutput
 
 def _make_result() -> ExecutionResult:
     step_ok = StepResult(
-        step_index=1, phase="steps", input_type=InputType.COMMAND,
-        command="AT", port="COM3", status=StepStatus.PASS,
-        request="AT", response="OK\r\n",
-        assertions=(AssertionResult(name="成功", op_kind="response.contains", expected="OK", actual="OK\r\n", passed=True),),
+        step_index=1,
+        phase="steps",
+        input_type=InputType.COMMAND,
+        command="AT",
+        port="COM3",
+        status=StepStatus.PASS,
+        request="AT",
+        response="OK\r\n",
+        assertions=(
+            AssertionResult(
+                name="成功",
+                op_kind="response.contains",
+                expected="OK",
+                actual="OK\r\n",
+                passed=True,
+            ),
+        ),
         duration_ms=120.0,
     )
     step_fail = StepResult(
-        step_index=2, phase="steps", input_type=InputType.COMMAND,
-        command="AT+BAD", port="COM3", status=StepStatus.FAIL,
-        request="AT+BAD", response="ERROR\r\n",
-        assertions=(AssertionResult(name="成功", op_kind="response.contains", expected="OK", actual="ERROR\r\n", passed=False, reason="响应不含 OK"),),
-        duration_ms=95.0, error_msg="响应不含 OK",
+        step_index=2,
+        phase="steps",
+        input_type=InputType.COMMAND,
+        command="AT+BAD",
+        port="COM3",
+        status=StepStatus.FAIL,
+        request="AT+BAD",
+        response="ERROR\r\n",
+        assertions=(
+            AssertionResult(
+                name="成功",
+                op_kind="response.contains",
+                expected="OK",
+                actual="ERROR\r\n",
+                passed=False,
+                reason="响应不含 OK",
+            ),
+        ),
+        duration_ms=95.0,
+        error_msg="响应不含 OK",
     )
     cases = [
         CaseResult(
-            case_name="通过用例", case_file="a.yaml", tags=("network",),
-            ports=("COM3",), status=CaseStatus.PASS,
-            step_results=(step_ok,), duration_ms=200.0,
+            case_name="通过用例",
+            case_file="a.yaml",
+            tags=("network",),
+            ports=("COM3",),
+            status=CaseStatus.PASS,
+            step_results=(step_ok,),
+            duration_ms=200.0,
         ),
         CaseResult(
-            case_name="失败用例", case_file="b.yaml", tags=("network",),
-            ports=("COM3",), status=CaseStatus.FAIL,
-            step_results=(step_ok, step_fail), duration_ms=300.0,
+            case_name="失败用例",
+            case_file="b.yaml",
+            tags=("network",),
+            ports=("COM3",),
+            status=CaseStatus.FAIL,
+            step_results=(step_ok, step_fail),
+            duration_ms=300.0,
             error_msg="响应不含 OK",
         ),
     ]
-    summary = aggregate(cases, start_time="2026-06-20 10:00:00", end_time="2026-06-20 10:00:01", duration_ms=500.0)
+    summary = aggregate(
+        cases, start_time="2026-06-20 10:00:00", end_time="2026-06-20 10:00:01", duration_ms=500.0
+    )
     return ExecutionResult(summary=summary, case_results=tuple(cases))
 
 
@@ -83,16 +121,25 @@ class TestHtmlReporter:
         # 模板渲染失败等场景：步骤 FAIL 但无 response，error_msg 必须显示在报告里，
         # 否则用户只看到 "FAIL / 0ms / 无断言" 而不知原因（回归 issue: 变量未定义诊断丢失）。
         step = StepResult(
-            step_index=1, phase="setup", input_type=InputType.COMMAND,
-            command="AT+HTTPCREATE=0,{{http.https_ipv6_url}}", port="COM28",
-            status=StepStatus.FAIL, request="", response="",
+            step_index=1,
+            phase="setup",
+            input_type=InputType.COMMAND,
+            command="AT+HTTPCREATE=0,{{http.https_ipv6_url}}",
+            port="COM28",
+            status=StepStatus.FAIL,
+            request="",
+            response="",
             error_msg="模板渲染失败：'http.https_ipv6_url'",
             duration_ms=0.0,
         )
         case = CaseResult(
-            case_name="变量未定义用例", case_file="c.yaml", tags=(),
-            ports=("COM28",), status=CaseStatus.SKIPPED,
-            setup_results=(step,), duration_ms=0.0,
+            case_name="变量未定义用例",
+            case_file="c.yaml",
+            tags=(),
+            ports=("COM28",),
+            status=CaseStatus.SKIPPED,
+            setup_results=(step,),
+            duration_ms=0.0,
             error_msg="setup 失败",
         )
         summary = aggregate([case])
@@ -105,12 +152,39 @@ class TestHtmlReporter:
         assert "https_ipv6_url" in html
 
     def test_pressure_case_rendered(self, tmp_path: Path) -> None:
-        step_stats = (StepPressureStats(step_index=1, command="AT", success_count=95, fail_count=0, min_ms=80, max_ms=210, avg_ms=95, p95_ms=130, p99_ms=180),)
-        ps = PressureStats(total_rounds=100, warmup_rounds=5, counted_rounds=95, success_rounds=95, failed_rounds=0, success_rate=100.0, pass_threshold=95.0, passed=True, step_stats=step_stats)
+        step_stats = (
+            StepPressureStats(
+                step_index=1,
+                command="AT",
+                success_count=95,
+                fail_count=0,
+                min_ms=80,
+                max_ms=210,
+                avg_ms=95,
+                p95_ms=130,
+                p99_ms=180,
+            ),
+        )
+        ps = PressureStats(
+            total_rounds=100,
+            warmup_rounds=5,
+            counted_rounds=95,
+            success_rounds=95,
+            failed_rounds=0,
+            success_rate=100.0,
+            pass_threshold=95.0,
+            passed=True,
+            step_stats=step_stats,
+        )
         case = CaseResult(
-            case_name="压测用例", case_file="p.yaml", tags=("stress",),
-            ports=("COM3",), status=CaseStatus.PASS, is_pressure=True,
-            pressure_stats=ps, duration_ms=15000.0,
+            case_name="压测用例",
+            case_file="p.yaml",
+            tags=("stress",),
+            ports=("COM3",),
+            status=CaseStatus.PASS,
+            is_pressure=True,
+            pressure_stats=ps,
+            duration_ms=15000.0,
         )
         summary = aggregate([case])
         result = ExecutionResult(summary=summary, case_results=(case,))
@@ -142,9 +216,14 @@ class TestConsoleReporter:
     def test_suite_setup_failure_shown(self, capsys: pytest.CaptureFixture[str]) -> None:
         # suite_setup 失败的步骤应在汇总中展示（issue #5：套件前后置诊断）
         suite_step = StepResult(
-            step_index=1, phase="suite_setup", input_type=InputType.COMMAND,
-            command="AT+CFUN=1", port="COM3", status=StepStatus.FAIL,
-            request="AT+CFUN=1", response="ERROR\r\n",
+            step_index=1,
+            phase="suite_setup",
+            input_type=InputType.COMMAND,
+            command="AT+CFUN=1",
+            port="COM3",
+            status=StepStatus.FAIL,
+            request="AT+CFUN=1",
+            response="ERROR\r\n",
             error_msg="响应不含 OK",
         )
         summary = aggregate([])

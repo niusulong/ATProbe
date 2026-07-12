@@ -30,6 +30,7 @@ class AtResponder:
         # AT+CMGF 等可变状态
         self.cmgf = 0
         self.cereg_n = 0  # CEREG 上报开关
+        self.echo = True  # 回显开关（ATE1 开 / ATE0 关），对齐 3GPP TS 27.007 §5.1
         # 指令分发表
         # handler 返回约定（list[str] | None）：
         #   list[str]  正文行，respond() 追加 OK（空 list = 仅 OK 的正常响应）
@@ -109,29 +110,41 @@ class AtResponder:
 
         handler 返回 ``None`` 表示解析失败/参数非法 → 返回 ERROR；返回 ``list``（含
         空 list）表示正常 → 追加 OK。从而区分「合法空响应」与「错误拒绝」。
+
+        帧格式对齐真实模组：每行以 ``\\r\\n`` 分隔，整帧以 ``\\r\\n`` 起始
+        （如 ``\\r\\n+CSQ: 23,99\\r\\nOK\\r\\n``），与 ATProbe connection.py 的终结符识别一致。
+        回显遵循 ATE0/ATE1（3GPP TS 27.007 §5.1）：默认 ATE1 回显收到的指令；
+        ATE0 后不再回显。这使得多数 setup 首步发 ATE0 的用例能整条跑通（断言不含回显前缀）。
         """
         c = cmd.strip().upper()
         if not c:
             return b""
-        # 回显（多数模组默认回显收到的指令，ATProbe 自己不依赖回显，但保留更真实）
-        echo = _line(cmd.strip())
+        # ATE0/ATE1 切换回显（先于分发，确保 ATE0 自身响应也不回显——对齐真实模组）
+        if c in ("ATE0", "ATE1"):
+            self.echo = c.endswith("1")
         # 精确匹配优先；否则前缀匹配（按前缀长度降序，保证最长/最具体者优先）。
         # 注意："AT" 这类裸指令只走精确匹配，不作前缀（否则会吞掉所有 AT+ 指令）。
         body: list[str] | None = None
         if c in self._handlers:
             body = self._handlers[c](cmd)
         else:
-            for prefix, fn in sorted(self._handlers.items(), key=lambda kv: len(kv[0]), reverse=True):
+            for prefix, fn in sorted(
+                self._handlers.items(), key=lambda kv: len(kv[0]), reverse=True
+            ):
                 # 裸指令（不含 + = ? &）不参与前缀匹配，仅精确匹配
                 if prefix in ("AT", "ATI", "ATZ"):
                     continue
                 if c.startswith(prefix):
                     body = fn(cmd)
                     break
+        # 组装行列表：可选回显行 + body 行 + 结束行（OK/ERROR）
+        lines: list[str] = []
+        if self.echo:
+            lines.append(cmd.strip())
         if body is None:
-            return echo + _line("ERROR")
-        frame = echo
-        for line in body:
-            frame += _line(line)
-        frame += _line("OK")
-        return frame
+            lines.append("ERROR")
+        else:
+            lines.extend(body)
+            lines.append("OK")
+        # 渲染：整帧以 \r\n 起始，每行以 \r\n 结尾（如 \r\n+CSQ: 23,99\r\nOK\r\n）
+        return CRLF + CRLF.join(line.encode("utf-8") for line in lines) + CRLF

@@ -7,13 +7,13 @@
     ICommandSender     发送命令并等待完整响应（直接输入，§3.1）
     IConnectionManager 连接管理 / 端口枚举
     IURCSubscriber     URC 订阅（§6）
-    IDataObserver      原始字节流监听（M6 §6.2 实时监控）
 
 注：数据流分块发送（§3.2）由 DataStreamSender 直接操作连接实现，未抽象为 Protocol。
-原始 RX 字节流订阅（手动调试/实时监控，M6 §6.2）经 SerialConnection.add_rx_observer
-提供；write_command（只写不等响应，供手动调试）为 SerialConnection/PortManager 的具体方法。
+原始 RX/TX 字节流订阅（手动调试/实时监控，M6 §6.2）经 SerialConnection.add_rx_observer
+/ add_tx_observer 提供；write_command（只写不等响应，供手动调试）为 SerialConnection/
+PortManager 的具体方法。
 
-所有阻塞操作接收 CancelToken（M1 §4.3 操作取消）。
+所有阻塞操作接收 CancelToken（M1 §4.3 操作取消）；取消时统一抛 ``OperationCancelled``。
 """
 
 from __future__ import annotations
@@ -57,21 +57,35 @@ class ResponseStatus(str, Enum):
     COMPLETE = "complete"  # 收到终结标志（OK/ERROR 等）的完整响应
     TIMEOUT = "timeout"  # 完整但超时
     ERROR = "error"  # 发送失败 / 断连等异常
-    CANCELLED = "cancelled"  # 被取消（stop）
+    CANCELLED = (
+        "cancelled"  # 被取消（stop）—— 保留枚举值以兼容存量调用，新代码改抛 OperationCancelled
+    )
+
+
+# Response.error_kind 的取值（结构化错误分类，供上层基于枚举判定而非脆弱的字符串匹配）。
+#   NONE        无错误（ok=True）
+#   DISCONNECT  端口断连 / 重连失败（§4.2 热插拔路径）—— 触发断连安全阀与重发判定
+#   SEND        发送侧失败（写超时、I/O 错误等）—— 不触发断连安全阀
+ERROR_KIND_NONE = "NONE"
+ERROR_KIND_DISCONNECT = "DISCONNECT"
+ERROR_KIND_SEND = "SEND"
 
 
 @dataclass(frozen=True)
 class Response:
     """M1 交付给上层的完整响应（M1 §7.5）.
 
-    text   完整响应文本（已按终结标志或超时界定边界）。
-    status 完整性状态。
-    error  异常时的原因（ERROR/CANCELLED/TIMEOUT 时填写）。
+    text       完整响应文本（已按终结标志或超时界定边界）。
+    status     完整性状态。
+    error      异常时的原因（ERROR/CANCELLED/TIMEOUT 时填写）。
+    error_kind 结构化错误分类（NONE/DISCONNECT/SEND）。DISCONNECT 用于断连/重连失败，
+               上层据此判定安全阀与重发，避免依赖 error 文案的字符串匹配（文案改动即失效）。
     """
 
     text: str
     status: ResponseStatus = ResponseStatus.COMPLETE
     error: str = ""
+    error_kind: str = ERROR_KIND_NONE
 
     @property
     def ok(self) -> bool:
@@ -127,7 +141,8 @@ class ICommandSender(Protocol):
             timeout: 单次响应超时（秒）；None 用端口默认。
             wait_urc: 异步指令 URC 终结正则（可空）。非空时遇 OK 不返回，继续读到
                 匹配此正则的 URC 立即返回（整段响应文本含 OK+URC）；为空时 OK 即终结。
-            cancel: 取消令牌；触发后阻塞立即返回 Response(status=CANCELLED)。
+            cancel: 取消令牌；触发后阻塞操作立即抛 ``OperationCancelled``（与 Fake/vsim 一致，
+                统一取消语义，上层据此判 INTERRUPTED 而非 FAIL）。
         """
         ...
 
@@ -137,7 +152,7 @@ class IConnectionManager(Protocol):
     """连接管理（M1 §4.1）/ 端口枚举（M5 list ports）."""
 
     def open(self, config: PortConfig) -> None:
-        """打开端口（已打开则抛错）."""
+        """打开端口；已用相同配置打开则幂等返回，配置不同则抛错."""
         ...
 
     def close(self, port: str) -> None:
@@ -150,7 +165,9 @@ class IConnectionManager(Protocol):
         """枚举系统可用串口（含占用检测，M5 list ports）."""
         ...
 
-    def config_of(self, port: str) -> PortConfig: ...
+    def config_of(self, port: str) -> PortConfig:
+        """返回端口配置；端口未知时返回默认 PortConfig（不抛错，便于安全阀回退）."""
+        ...
 
 
 @runtime_checkable
@@ -162,14 +179,3 @@ class IURCSubscriber(Protocol):
         ...
 
     def unsubscribe_urc(self, handle: Any) -> None: ...
-
-
-@runtime_checkable
-class IDataObserver(Protocol):
-    """原始字节流监听（M6 §6.2 实时监控，独立于命令收发）."""
-
-    def observe(self, port: str, sink: Callable[[str, bytes, float], None]) -> Any:
-        """订阅端口原始字节流。sink(direction, data, ts)：direction 'TX'/'RX'."""
-        ...
-
-    def stop_observe(self, handle: Any) -> None: ...

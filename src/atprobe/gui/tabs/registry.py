@@ -23,7 +23,12 @@ class TabBinding:
 
 
 class ITabView(Protocol):
-    """选项卡视图接口（§2.3 选项卡类型注册表契约）."""
+    """选项卡视图接口（§2.3 选项卡类型注册表契约）.
+
+    可选钩子（视图可选实现，MainWindow._close_tab 经 getattr 安全访问）：
+        cleanup  选项卡关闭/窗口关闭时调用，用于释放 RX 订阅、停定时器、取消 worker。
+                 未实现 cleanup 的视图无清理（保持向后兼容）。
+    """
 
     type_name: str
     display_name: str  # 侧边栏/菜单显示名

@@ -50,10 +50,6 @@ from atprobe.infra.serial.interfaces import (
 )
 
 
-class StepInterrupted(Exception):
-    """步骤被 stop 中断（不等于失败）。"""
-
-
 @dataclass
 class CaseContext:
     """单个用例执行期间的可变上下文（变量池等）.
@@ -91,6 +87,7 @@ class _SingleAttempt:
     step_passed: bool  # 本次是否成功（发送 ok 且断言全通过）
     step_error: str  # 失败原因（成功时为空）
     duration_ms: float
+    error_kind: str = "NONE"  # 结构化错误分类，从 Response 透传（M3）
 
 
 def execute_step(
@@ -139,9 +136,14 @@ def execute_step(
         request = _render_input(step, ctx)
     except (UndefinedReferenceError, TemplateRenderError) as exc:
         sr = StepResult(
-            step_index=index, phase=phase, input_type=input_type,
-            command=_truncate(_cmd_display(step)), port=port,
-            status=StepStatus.FAIL, request="", response="",
+            step_index=index,
+            phase=phase,
+            input_type=input_type,
+            command=_truncate(_cmd_display(step)),
+            port=port,
+            status=StepStatus.FAIL,
+            request="",
+            response="",
             error_msg=f"模板渲染失败：{exc}",
         )
         return StepExecResult(status=StepStatus.FAIL, step_result=sr, abort_case=True)
@@ -164,8 +166,14 @@ def execute_step(
             poll_iters = 0
     except OperationCancelled:
         sr = StepResult(
-            step_index=index, phase=phase, input_type=input_type, command=command_display,
-            port=port, status=StepStatus.INTERRUPTED, request=request, response="",
+            step_index=index,
+            phase=phase,
+            input_type=input_type,
+            command=command_display,
+            port=port,
+            status=StepStatus.INTERRUPTED,
+            request=request,
+            response="",
         )
         return StepExecResult(status=StepStatus.INTERRUPTED, step_result=sr, interrupted=True)
 
@@ -180,34 +188,44 @@ def execute_step(
         strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
 
     if not attempt.step_passed and strategy is FailureStrategy.SKIP:
-        status = StepStatus.SKIPPED          # skip：步骤记 SKIPPED（不算失败）
+        status = StepStatus.SKIPPED  # skip：步骤记 SKIPPED（不算失败）
     else:
         status = StepStatus.PASS if attempt.step_passed else StepStatus.FAIL
 
     assertion_results = tuple(
         AssertionResult(
-            name=a.name, op_kind=a.op_kind, expected=a.expected, actual=a.actual,
-            passed=a.passed, reason=a.reason,
+            name=a.name,
+            op_kind=a.op_kind,
+            expected=a.expected,
+            actual=a.actual,
+            passed=a.passed,
+            reason=a.reason,
         )
         for a in attempt.assertion_outcomes
     )
     sr = StepResult(
-        step_index=index, phase=phase, input_type=input_type, command=command_display,
-        port=port, status=status, request=request, response=attempt.response.text,
-        assertions=assertion_results, extracted_vars=dict(attempt.extracted),
-        duration_ms=attempt.duration_ms, retry_count=retry_count,
-        poll_iterations=poll_iters, error_msg=attempt.step_error,
+        step_index=index,
+        phase=phase,
+        input_type=input_type,
+        command=command_display,
+        port=port,
+        status=status,
+        request=request,
+        response=attempt.response.text,
+        assertions=assertion_results,
+        extracted_vars=dict(attempt.extracted),
+        duration_ms=attempt.duration_ms,
+        retry_count=retry_count,
+        poll_iterations=poll_iters,
+        error_msg=attempt.step_error,
+        error_kind=attempt.error_kind,
     )
 
     # ------------------------------------------------------------------
     # 7. on_failure
     # ------------------------------------------------------------------
     # on_failure（skip 已在 status 体现，此处仅决 abort_case）
-    abort_case = (
-        not is_teardown
-        and status is StepStatus.FAIL
-        and strategy is FailureStrategy.ABORT
-    )
+    abort_case = not is_teardown and status is StepStatus.FAIL and strategy is FailureStrategy.ABORT
 
     return StepExecResult(
         status=status, step_result=sr, extracted=attempt.extracted, abort_case=abort_case
@@ -239,7 +257,9 @@ def _run_retry(
             raise OperationCancelled("步骤被取消")
         if attempt_no > 0 and retry is not None:
             sleep(retry.interval / 1000.0)
-        attempt = _single_attempt(step, request, port, timeout, wait_urc, ctx, sender, clock, cancel)
+        attempt = _single_attempt(
+            step, request, port, timeout, wait_urc, ctx, sender, clock, cancel
+        )
         total_duration += attempt.duration_ms
         # 合并耗时到 attempt
         attempt.duration_ms = total_duration
@@ -271,6 +291,10 @@ def _run_poll(
     interval = poll.interval / 1000.0
     iterations = 0
     total_duration = 0.0
+    # 记录 until 表达式的首次编译错误（仅一次）；运行期变量未定义不算错误，继续轮询。
+    # M7 修复：旧实现 except Exception: pass 把表达式编译错误也静默吞掉，用户看到的是
+    # "poll 超时未满足条件"而非"until 表达式错误"，排查困难。
+    expr_error: str = ""
 
     while True:
         if cancel is not None and cancel.cancelled:
@@ -279,7 +303,9 @@ def _run_poll(
         # 注：首轮立即查询（sleep 在循环末尾）。这是有意设计——poll 典型场景是
         # 「发指令后等设备产生结果」，首轮立即查询可在结果已就绪时省掉一个 interval
         # 的等待；上一条命令的残留响应已由 send_command 入口的 _drain_response_q 清排。
-        attempt = _single_attempt(step, request, port, timeout, wait_urc, ctx, sender, clock, cancel)
+        attempt = _single_attempt(
+            step, request, port, timeout, wait_urc, ctx, sender, clock, cancel
+        )
         total_duration += attempt.duration_ms
         attempt.duration_ms = total_duration
 
@@ -292,13 +318,20 @@ def _run_poll(
                     attempt.step_passed = True
                     attempt.step_error = ""
                     return attempt, iterations
-            except Exception:  # noqa: BLE001
+            except UndefinedReferenceError:
+                # 变量尚未定义（extract 还没拿到值）→ 继续轮询，属正常 poll 节奏
                 pass
+            except ExpressionError as exc:
+                # 表达式编译/语法错误 → 首次记录，继续轮询（可能在首轮变量未就绪时报错）
+                if not expr_error:
+                    expr_error = str(exc)
 
         if clock() >= deadline:
-            # poll 超时 → 步骤失败（§4.4）
+            # poll 超时 → 步骤失败（§4.4）。优先报告表达式错误（若有），否则报超时
             attempt.step_passed = False
-            attempt.step_error = "poll 超时未满足条件"
+            attempt.step_error = (
+                f"poll until 表达式错误：{expr_error}" if expr_error else "poll 超时未满足条件"
+            )
             return attempt, iterations
         sleep(interval)
 
@@ -327,9 +360,14 @@ def _single_attempt(
 
     if not resp.ok:
         return _SingleAttempt(
-            response=resp, extracted=extracted, matched=matched,
+            response=resp,
+            extracted=extracted,
+            matched=matched,
             assertion_outcomes=outcomes,
-            step_passed=False, step_error=resp.error or "响应异常", duration_ms=dt,
+            step_passed=False,
+            step_error=resp.error or "响应异常",
+            duration_ms=dt,
+            error_kind=resp.error_kind,
         )
 
     if step.extract:
@@ -345,14 +383,22 @@ def _single_attempt(
     if step.assertions and any(not a.passed for a in outcomes):
         failed = next(a for a in outcomes if not a.passed)
         return _SingleAttempt(
-            response=resp, extracted=extracted, matched=matched,
+            response=resp,
+            extracted=extracted,
+            matched=matched,
             assertion_outcomes=outcomes,
-            step_passed=False, step_error=failed.reason or "断言失败", duration_ms=dt,
+            step_passed=False,
+            step_error=failed.reason or "断言失败",
+            duration_ms=dt,
         )
     return _SingleAttempt(
-        response=resp, extracted=extracted, matched=matched,
+        response=resp,
+        extracted=extracted,
+        matched=matched,
         assertion_outcomes=outcomes,
-        step_passed=True, step_error="", duration_ms=dt,
+        step_passed=True,
+        step_error="",
+        duration_ms=dt,
     )
 
 
@@ -387,8 +433,14 @@ def _build_skipped(
     it = InputType.DATA if step.data is not None else InputType.COMMAND
     status = StepStatus.FAIL if is_fail else StepStatus.SKIPPED
     sr = StepResult(
-        step_index=index, phase=phase, input_type=it,
-        command=_truncate(_cmd_display(step)), port=port,
-        status=status, request="", response="", error_msg=msg,
+        step_index=index,
+        phase=phase,
+        input_type=it,
+        command=_truncate(_cmd_display(step)),
+        port=port,
+        status=status,
+        request="",
+        response="",
+        error_msg=msg,
     )
     return StepExecResult(status=status, step_result=sr, abort_case=is_fail)

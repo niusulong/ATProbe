@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-import typer
+import sys
 
-from atprobe import __version__
+# L16：Windows 控制台默认 cp936/cp1252，日志/echo 含中文或 Unicode 字符时可能
+# UnicodeEncodeError 中断渲染。在 import typer 前重配置 stdout/stderr 为 UTF-8
+# （Python 3.7+ 支持 reconfigure；已有配置则幂等）。
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+
+import typer  # noqa: E402
+
+from atprobe import __version__  # noqa: E402
 
 app = typer.Typer(
     name="atprobe",

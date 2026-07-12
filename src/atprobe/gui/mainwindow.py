@@ -45,6 +45,14 @@ from atprobe.reporting.interfaces import ReportOutput
 
 _log = logging.getLogger("atprobe.engine_gui")
 
+# LED 状态 → token key 映射（M11：主题切换时按当前状态重设颜色）
+_LED_COLOR = {
+    "IDLE": "neutral",
+    "RUNNING": "accent",
+    "FINISHED": "success",
+    "ERROR": "danger",
+}
+
 
 class MainWindow(QMainWindow):
     """主窗口（§2.1）.
@@ -115,7 +123,9 @@ class MainWindow(QMainWindow):
         """构造侧边导航：深色品牌头 + 图标导航列表，覆盖原生丑陋的 Dock 标题栏."""
         dock = QDockWidget(self)
         dock.setObjectName("sidebarDock")
-        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         dock.setTitleBarWidget(QWidget())  # 移除原生丑陋的停靠标题栏
 
@@ -254,12 +264,23 @@ class MainWindow(QMainWindow):
         self._dark = dark
         apply_theme(QApplication.instance(), dark=dark)  # type: ignore[arg-type]
         self._theme_action.setText("切换深色主题" if not dark else "切换浅色主题")
-        # 刷新状态点颜色（内联令牌随主题变）
+        # 刷新主窗口令牌 + 状态点颜色（M11：用当前 LED 状态而非重推 RUNNING/IDLE）
         self._tokens = get_tokens(dark=dark)
-        self._set_engine_status(
-            "RUNNING" if self._engine is not None else "IDLE",
-            self._tokens["accent"] if self._engine is not None else self._tokens["neutral"],
-        )
+        led_key = _LED_COLOR.get(self._led_state, "neutral")
+        led_color = self._tokens.get(led_key, self._tokens["neutral"])
+        self._set_engine_status(self._led_state, led_color)
+        # M11 修复：遍历所有 tab 调 refresh_theme（若有），刷新内联富文本配色。
+        # 旧实现各 tab 硬编码 get_tokens(dark=False)，切深色后 TX/RX 色块/状态字色不变。
+        for i in range(self.tabs.count()):
+            widget = self.tabs.widget(i)
+            if widget is None:
+                continue
+            refresher = getattr(widget, "refresh_theme", None)
+            if callable(refresher):
+                try:
+                    refresher()
+                except Exception:  # noqa: BLE001
+                    _log.debug("refresh_theme 抛异常", exc_info=True)
         QSettings("ATProbe", "ATProbe").setValue("theme/dark", dark)
 
     def _on_about(self) -> None:
@@ -289,6 +310,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QDesktopServices
 
         from atprobe.infra.logging_config import _log_dir
+
         try:
             log_dir = _log_dir()
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -338,9 +360,7 @@ class MainWindow(QMainWindow):
         # None：已是最新
         if result is None:
             if getattr(self, "_check_manual", False):
-                QMessageBox.information(
-                    self, "检查更新", f"当前已是最新版本 {current_version()}"
-                )
+                QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_version()}")
             return
         # ReleaseInfo：有新版 → 弹升级对话框
         self._show_update_dialog(result)  # type: ignore[arg-type]
@@ -363,9 +383,11 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("发现新版本")
         dlg.setMinimumWidth(480)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel(
-            f"<b>发现新版本 {info.version}</b>（当前 {current_version()}）"  # type: ignore[attr-defined]
-        ))
+        layout.addWidget(
+            QLabel(
+                f"<b>发现新版本 {info.version}</b>（当前 {current_version()}）"  # type: ignore[attr-defined]
+            )
+        )
         notes = QTextEdit()
         notes.setReadOnly(True)
         # HTML 转义 changelog，避免含 <,>,& 的 release body 破坏渲染
@@ -393,7 +415,11 @@ class MainWindow(QMainWindow):
         self._update_in_progress = True
 
         self._progress_dlg = QProgressDialog(
-            f"正在更新到 {info.version}...", "取消", 0, 100, self  # type: ignore[attr-defined]
+            f"正在更新到 {info.version}...",  # type: ignore[attr-defined]
+            "取消",
+            0,
+            100,
+            self,  # type: ignore[attr-defined]
         )
         self._progress_dlg.setWindowTitle("更新")
         self._progress_dlg.setMinimumDuration(0)
@@ -453,7 +479,8 @@ class MainWindow(QMainWindow):
         # 下载成功 → 最终确认安装
         zip_path = Path(result)  # type: ignore[arg-type]
         choice = QMessageBox.question(
-            self, "开始安装",
+            self,
+            "开始安装",
             "更新已就绪。点击「是」后程序将关闭并自动完成升级（约 5 秒）。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -472,10 +499,15 @@ class MainWindow(QMainWindow):
     # 选项卡管理（§2.3）
     # ------------------------------------------------------------------
     # 所有内置选项卡均为单例：重复打开 → 跳转到已存在的页。
-    _SINGLETON_TYPES = frozenset({
-        "manual_debug", "case_execute", "monitor", "execution_progress",
-        "env_config",
-    })
+    _SINGLETON_TYPES = frozenset(
+        {
+            "manual_debug",
+            "case_execute",
+            "monitor",
+            "execution_progress",
+            "env_config",
+        }
+    )
 
     def new_tab(self, type_name: str, params: dict[str, object] | None = None) -> None:
         view = self._registry.get(type_name)
@@ -498,12 +530,24 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(idx)
 
     def _close_tab(self, idx: int) -> None:
-        # 执行中的选项卡关闭前确认（§2.3）
+        # B6 修复：关闭 tab 时调 widget 的 cleanup（若有），释放 RX 订阅/定时器/worker。
+        # Qt 的 removeTab 不触发 closeEvent 也不 deleteLater，旧实现仅清理 env_config
+        # 引用，导致 manual_debug 的 RX 订阅、monitor 的定时器/订阅在 tab 关闭后泄漏。
         widget = self.tabs.widget(idx)
-        # 环境配置页关闭：解除引用，run_cases 回退磁盘读取
-        if widget is not None and widget.property("tab_type") == "env_config":
-            self._env_widget = None
+        if widget is not None:
+            # 环境配置页关闭：解除引用，run_cases 回退磁盘读取
+            if widget.property("tab_type") == "env_config":
+                self._env_widget = None
+            # 统一调用 cleanup（经 getattr 安全访问，未实现则跳过）
+            cleaner = getattr(widget, "cleanup", None)
+            if callable(cleaner):
+                try:
+                    cleaner()
+                except Exception:  # noqa: BLE001 - 清理失败不阻断关闭
+                    _log.debug("tab cleanup 抛异常", exc_info=True)
         self.tabs.removeTab(idx)
+        if widget is not None:
+            widget.deleteLater()
 
     def _on_sidebar_double_click(self, item: QListWidgetItem) -> None:
         type_name = item.data(Qt.ItemDataRole.UserRole)
@@ -540,9 +584,7 @@ class MainWindow(QMainWindow):
         except FileNotFoundError:
             return None
 
-    def send_manual(
-        self, port: str, command: str, *, terminator: Terminator | None = None
-    ) -> bool:
+    def send_manual(self, port: str, command: str, *, terminator: Terminator | None = None) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
 
         响应须经 ``subscribe_rx`` 订阅后在视图侧自行接收渲染。
@@ -635,21 +677,47 @@ class MainWindow(QMainWindow):
             return False
 
     def closeEvent(self, event: object) -> None:  # noqa: D401
-        """窗口关闭：释放全部串口资源（修既有未清理的泄漏）."""
+        """窗口关闭：释放全部资源（B6 修复：遍历 tab cleanup + 停引擎 + 关串口）."""
         try:
+            # 先停引擎（若在跑），避免引擎线程操作已关闭的串口
+            self.stop_engine()
+            # 遍历所有 tab 调 cleanup，释放 RX 订阅/定时器/worker
+            for i in range(self.tabs.count()):
+                widget = self.tabs.widget(i)
+                if widget is None:
+                    continue
+                cleaner = getattr(widget, "cleanup", None)
+                if callable(cleaner):
+                    try:
+                        cleaner()
+                    except Exception:  # noqa: BLE001
+                        _log.debug("closeEvent tab cleanup 抛异常", exc_info=True)
+            # 最后关闭所有串口
             self._port_manager.close_all()
         finally:
             super().closeEvent(event)  # type: ignore[arg-type]
 
     def run_cases(
-        self, case_files: list[str], port: str, threshold: int,
-        *, dry_run: bool = False, no_report: bool = False,
+        self,
+        case_files: list[str],
+        port: str,
+        threshold: int,
+        *,
+        dry_run: bool = False,
+        no_report: bool = False,
     ) -> None:
         """用例执行：驱动 M3 引擎（在引擎线程，§10.2）.
 
         dry_run=True 时只解析用例、检查端口，不实际执行（M5 §3.6 等价）。
         no_report=True 时不生成 HTML 报告。
         """
+        # B8 修复：防重入——引擎在跑时拒绝再次执行，避免两个引擎线程并发操作同一串口。
+        from atprobe.engine.config import EngineState
+
+        if self._engine is not None and self._engine.state() is EngineState.RUNNING:
+            QMessageBox.warning(self, "正在执行", "已有用例正在执行中，请先停止后再开始。")
+            return
+
         from atprobe.domain.case.parser import CaseParseError, parse_case_file
 
         cases: list[object] = []
@@ -669,7 +737,8 @@ class MainWindow(QMainWindow):
                 open_ok = False
             status = "可用" if open_ok or self._port_manager.is_connected(port) else "不可用"
             QMessageBox.information(
-                self, "预演 (Dry Run)",
+                self,
+                "预演 (Dry Run)",
                 f"将执行用例：{len(cases)} 个\n端口 {port}：{status}\n（未实际执行）",
             )
             return
@@ -701,7 +770,8 @@ class MainWindow(QMainWindow):
                 except Exception as exc:  # noqa: BLE001
                     # 不再静默吞：env 解析失败会让所有点号引用变未定义，必须提示用户。
                     QMessageBox.warning(
-                        self, "环境配置加载失败",
+                        self,
+                        "环境配置加载失败",
                         f"加载环境配置失败，用例中的 {{{{group.param}}}} 引用可能无法替换：\n"
                         f"{env_path}\n\n{exc}\n\n请检查该 YAML 语法（应为两级 group.param 映射）。",
                     )
@@ -737,16 +807,30 @@ class MainWindow(QMainWindow):
                 self.progress.emit(("engine_error", f"执行异常：{exc}"))
                 self._set_engine_status("ERROR", self._tokens["danger"])
                 return
+            finally:
+                # B8 补充：执行结束（含异常）后清理引擎引用。
+                # 旧实现不置 None，导致 stop_engine_dialog 对已结束引擎误弹停止框、
+                # _toggle_theme 误把 FINISHED/IDLE 重设为 RUNNING 色。
+                self._engine = None
             if no_report:
                 _log.info("执行结束: %d通过/%d失败", result.summary.passed, result.summary.failed)
-                self.progress.emit(("done_noreport", "", result.summary.passed, result.summary.failed))
+                self.progress.emit(
+                    ("done_noreport", "", result.summary.passed, result.summary.failed)
+                )
                 return
             # 生成报告
             try:
                 rdir = resolve_workspace_path(self._app_config.report_dir) / session / "report.html"
                 HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
-                _log.info("执行结束: %d通过/%d失败, 报告: %s", result.summary.passed, result.summary.failed, rdir)
-                self.progress.emit(("done", str(rdir), result.summary.passed, result.summary.failed))
+                _log.info(
+                    "执行结束: %d通过/%d失败, 报告: %s",
+                    result.summary.passed,
+                    result.summary.failed,
+                    rdir,
+                )
+                self.progress.emit(
+                    ("done", str(rdir), result.summary.passed, result.summary.failed)
+                )
             except Exception as exc:
                 _log.exception("报告生成异常")
                 self.progress.emit(("engine_error", f"报告生成异常：{exc}"))
@@ -764,9 +848,12 @@ class MainWindow(QMainWindow):
         if self._engine is None:
             return
         choice = QMessageBox.question(
-            self, "停止执行",
+            self,
+            "停止执行",
             "选择停止范围：\n  「是」= 停止全部\n  「否」= 仅中断当前用例，继续后续\n  「取消」= 不停止",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if choice == QMessageBox.StandardButton.Cancel:
@@ -839,10 +926,13 @@ class MainWindow(QMainWindow):
             # 转发完成事件给执行进度选项卡（若有）
             self._forward_progress(ev)
             if tag == "done_noreport":
-                QMessageBox.information(self, "执行完成", f"通过 {passed} / 失败 {failed}\n（未生成报告）")
+                QMessageBox.information(
+                    self, "执行完成", f"通过 {passed} / 失败 {failed}\n（未生成报告）"
+                )
             else:
                 QMessageBox.information(
-                    self, "执行完成",
+                    self,
+                    "执行完成",
                     f"通过 {passed} / 失败 {failed}\n报告: {report_path}",
                 )
                 # 用系统默认浏览器打开报告（HTML 纯静态，浏览器渲染效果最佳；
@@ -850,9 +940,7 @@ class MainWindow(QMainWindow):
                 from PySide6.QtCore import QUrl
                 from PySide6.QtGui import QDesktopServices
 
-                QDesktopServices.openUrl(
-                    QUrl.fromLocalFile(str(Path(report_path).resolve()))
-                )
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(report_path).resolve())))
             return
         # 中间进度事件：首次事件时自动弹出执行进度选项卡，并转发
         self._forward_progress(ev)
@@ -886,4 +974,3 @@ class MainWindow(QMainWindow):
             if isinstance(w, QWidget) and w.property("tab_type") == type_name:
                 return w
         return None
-

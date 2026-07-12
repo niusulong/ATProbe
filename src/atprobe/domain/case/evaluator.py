@@ -11,7 +11,7 @@
     比较表达式 := 操作数 运算符 操作数
                 | 操作数 'is' 'null'
                 | 操作数 'is' 'not' 'null'
-    操作数   := 变量名 | 字符串字面量 | 数值字面量
+    操作数   := 变量名 | 字符串字面量 | 数值字面量 | '(' 或表达式 ')'
     运算符   := == | != | > | < | >= | <=
 
 求值规则（§6.3）：
@@ -53,7 +53,7 @@ _TOKEN_RE = _re.compile(
       | (?P<NUM>-?\d+(?:\.\d+)?)
       | (?P<LP>\()
       | (?P<RP>\))
-      | (?P<NAME>[A-Za-z_][A-Za-z0-9_\.]*)
+      | (?P<NAME>[A-Za-z_][A-Za-z0-9_]*)
     """,
     _re.VERBOSE,
 )
@@ -107,7 +107,9 @@ class _BoolLit(_Node):
 
 
 class _Comparison(_Node):
-    def __init__(self, left_kind: str, left_val: str, op: str, right_kind: str, right_val: str) -> None:
+    def __init__(
+        self, left_kind: str, left_val: str, op: str, right_kind: str, right_val: str
+    ) -> None:
         self.left_kind = left_kind
         self.left_val = left_val
         self.op = op
@@ -281,8 +283,17 @@ class _Parser:
         return node
 
     def _parse_comparison(self) -> _Node:
-        # 操作数 'is' ['not'] 'null'
         left = self._parse_operand()
+        left_kind, left_val = left
+        # 括号子表达式已求值为布尔节点（无运算符跟随时直接透传）。
+        # 形如 (a == 1)、((a == 1) and b == 2) 等仅作分组，不参与运算符拼接。
+        if left_kind == "__NODE__":
+            # 括号路径：left_val 是已求值的 _Node，直接透传
+            assert isinstance(left_val, _Node)
+            return left_val
+        # 此后 left_val 一定是普通操作数的原始字符串（STR/NUM/NAME）
+        assert isinstance(left_val, str)
+        # 操作数 'is' ['not'] 'null'
         t = self._peek()
         if t is not None and t.kind == "IS":
             self._next()
@@ -291,20 +302,34 @@ class _Parser:
                 t3 = self._next()
                 if t3.kind != "NULL":
                     raise ExpressionError("is not 后应为 null")
-                return _IsNull(left[0], left[1], negate=True)
+                return _IsNull(left_kind, left_val, negate=True)
             if t2.kind == "NULL":
-                return _IsNull(left[0], left[1], negate=False)
+                return _IsNull(left_kind, left_val, negate=False)
             raise ExpressionError("is 后应为 null 或 not null")
         if t is not None and t.kind == "OP":
             op_tok = self._next()
             right = self._parse_operand()
-            return _Comparison(left[0], left[1], op_tok.value, right[0], right[1])
+            right_kind, right_val = right
+            assert isinstance(right_val, str)  # OP 比较的右操作数必为普通操作数
+            return _Comparison(left_kind, left_val, op_tok.value, right_kind, right_val)
         raise ExpressionError("比较表达式缺少运算符（应为 ==/!=/>/</>=/<= 或 is null）")
 
-    def _parse_operand(self) -> tuple[str, str]:
+    def _parse_operand(self) -> tuple[str, str] | tuple[str, _Node]:
+        """解析操作数，返回 (kind, value) 标记对。
+
+        - 普通操作数（STR/NUM/NAME）→ (kind, raw_value)
+        - 括号子表达式 → ("__NODE__", node)，由 _parse_comparison 透传为布尔节点
+        """
         t = self._next()
         if t.kind in ("STR", "NUM", "NAME"):
             return (t.kind, t.value)
+        # 括号分组：'(' 表达式 ')'，递归求值为布尔节点，用 __NODE__ 标记透传给上层。
+        if t.kind == "LP":
+            node = self._parse_or()
+            t2 = self._next()
+            if t2.kind != "RP":
+                raise ExpressionError("括号未闭合，缺少 ')' ")
+            return ("__NODE__", node)
         raise ExpressionError(f"意外的操作数：{t.value!r}")
 
 

@@ -72,9 +72,7 @@ class ConsoleReporter(IReporter):
                 # 找第一个失败步骤
                 for sr in c.step_results:
                     if sr.status is StepStatus.FAIL:
-                        stream.write(
-                            f"      步骤{sr.step_index}: {sr.command} {sr.error_msg}\n"
-                        )
+                        stream.write(f"      步骤{sr.step_index}: {sr.command} {sr.error_msg}\n")
                         break
                 if c.log_ref:
                     stream.write(f"      日志: {c.log_ref}\n")
@@ -83,18 +81,23 @@ class ConsoleReporter(IReporter):
         if skipped:
             stream.write("\n跳过用例:\n")
             for c in skipped:
-                stream.write(f"  [{_status_color('SKIPPED', color=color)}] {c.case_name} ({c.error_msg})\n")
+                stream.write(
+                    f"  [{_status_color('SKIPPED', color=color)}] {c.case_name} ({c.error_msg})\n"
+                )
 
         interrupted = [c for c in result.case_results if c.status is CaseStatus.INTERRUPTED]
         if interrupted:
             stream.write("\n中断用例:\n")
             for c in interrupted:
-                stream.write(f"  [{_status_color('INTERRUPTED', color=color)}] {c.case_name} ({c.error_msg})\n")
+                stream.write(
+                    f"  [{_status_color('INTERRUPTED', color=color)}] {c.case_name} ({c.error_msg})\n"
+                )
 
         # 套件级前后置诊断（REQ-M2 §12.2）：展示非 PASS 的 suite_setup/teardown 步骤，
         # 便于定位"用例被跳过是因 suite_setup 失败"等场景（issue #5）
         suite_failed_steps = [
-            sr for sr in (*result.suite_setup_results, *result.suite_teardown_results)
+            sr
+            for sr in (*result.suite_setup_results, *result.suite_teardown_results)
             if sr.status is not StepStatus.PASS
         ]
         if suite_failed_steps:
@@ -137,7 +140,7 @@ def format_step_line(
 ) -> str:
     """格式化单步结果行（M4 §3.2）::
 
-        [HH:MM:SS]   → [COM3] AT+CSQ ...... PASS (120ms)
+    [HH:MM:SS]   → [COM3] AT+CSQ ...... PASS (120ms)
     """
     ts = now_ts()
     cmd = command if len(command) <= truncate else command[: truncate - 1] + "…"
@@ -151,5 +154,7 @@ def format_case_start(case_name: str, index: int, total: int, *, color: bool = T
     return f"[{now_ts()}] [{index}/{total}] {_color(case_name, 'BOLD', enabled=color)}"
 
 
-def format_case_result(case_name: str, status: str, duration_ms: float, *, color: bool = True) -> str:
+def format_case_result(
+    case_name: str, status: str, duration_ms: float, *, color: bool = True
+) -> str:
     return f"用例结果: {_status_color(status, color=color)} ({duration_ms / 1000.0:.1f}s)"

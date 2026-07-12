@@ -37,6 +37,14 @@ jobs:
       - name: Build
         run: uv run python packaging/build.py
 
+      - name: Generate SHA256 checksum（B9：下载校验用，checker 解析此文件做内容校验）
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/ATProbe-*-win64.zip | Select-Object -First 1
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Out-File -Encoding ascii "$($zip.FullName).sha256"
+          Write-Host "SHA256: $hash"
+
       - name: Upload artifact（便于排查失败的构建）
         uses: actions/upload-artifact@v4
         with:
@@ -44,9 +52,11 @@ jobs:
           path: dist/ATProbe-*-win64.zip
           if-no-files-found: error
 
-      - name: Create GitHub Release & upload zip
+      - name: Create GitHub Release & upload zip + sha256
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ATProbe-*-win64.zip
+          files: |
+            dist/ATProbe-*-win64.zip
+            dist/ATProbe-*-win64.zip.sha256
           generate_release_notes: true   # 自动从 commit 生成 changelog
           fail_on_unmatched_files: true

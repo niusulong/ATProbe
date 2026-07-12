@@ -1,5 +1,4 @@
-"""M3 引擎配置与状态枚举（REQ-M3 §7.1/§7.2）.
-"""
+"""M3 引擎配置与状态枚举（REQ-M3 §7.1/§7.2）."""
 
 from __future__ import annotations
 

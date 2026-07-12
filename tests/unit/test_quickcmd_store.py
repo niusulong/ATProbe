@@ -53,7 +53,7 @@ class TestLoad:
 
     def test_load_invalid_structure_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.yaml"
-        f.write_text("projects: \"不是列表\"\n", encoding="utf-8")
+        f.write_text('projects: "不是列表"\n', encoding="utf-8")
         with pytest.raises(QuickCmdStoreError):
             load_library(f)
 
@@ -94,9 +94,7 @@ class TestDefaults:
     def test_default_library_has_migrated_commands(self) -> None:
         """默认库含迁移的 5 条指令（AT/AT+CSQ/AT+CEREG?/AT+CPIN?/AT+CGDCONT?）."""
         lib = default_library()
-        all_cmds = [
-            c for p in lib.projects for g in p.groups for c in g.commands
-        ]
+        all_cmds = [c for p in lib.projects for g in p.groups for c in g.commands]
         for expected in ("AT", "AT+CSQ", "AT+CEREG?", "AT+CPIN?", "AT+CGDCONT?"):
             assert expected in all_cmds, f"默认库缺少迁移指令 {expected}"
 

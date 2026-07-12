@@ -53,6 +53,12 @@ def apply_update(
     if staging_exe is None:
         raise UpdateError("安装包结构异常：找不到主程序 exe")
     staging_exe_name = staging_exe.name
+    # M8：查找 staging 里的 CLI exe（atprobe-cli.exe），若存在则 bat 同时替换
+    staging_cli_exe_name: str | None = None
+    for candidate in staging_app.iterdir():
+        if candidate.is_file() and candidate.name.lower() == "atprobe-cli.exe":
+            staging_cli_exe_name = candidate.name
+            break
 
     exe_path = app_root / _EXE_NAME
     internal_path = app_root / _INTERNAL_NAME
@@ -65,9 +71,14 @@ def apply_update(
         pid=pid,
         restart=restart,
         staging_exe_name=staging_exe_name,
+        staging_cli_exe_name=staging_cli_exe_name,
     )
     bat_path = Path(tempfile.gettempdir()) / "atprobe-updater.bat"
-    bat_path.write_text(script, encoding="utf-8")
+    # M9 修复：用 utf-8-sig（带 BOM）写 bat，兼容中文用户路径。
+    # chcp 65001 只影响 echo/set 显示，不影响 cmd 解析 bat 源字节的编码；
+    # 无 BOM 的 UTF-8 bat 在中文 Windows（默认 ANSI=GBK）下，含中文的 set 值会被
+    # 按 GBK 解析导致 xcopy 找不到路径。BOM 让 cmd 按 UTF-8 解析 bat 源字节。
+    bat_path.write_text(script, encoding="utf-8-sig")
 
     try:
         subprocess.Popen(  # noqa: S603,S607 - cmd 是 Windows 系统命令
@@ -141,6 +152,7 @@ def build_updater_script(
     pid: int,
     restart: bool = True,
     staging_exe_name: str = _EXE_NAME,
+    staging_cli_exe_name: str | None = None,
 ) -> str:
     """生成 updater.bat 内容（Windows 批处理）。
 
@@ -149,6 +161,8 @@ def build_updater_script(
     Args:
         staging_exe_name: staging 目录里主 exe 的真实文件名（大小写与 zip 产物一致），
             默认 ATProbe.exe。bat 用它从 staging 复制到目标。
+        staging_cli_exe_name: M8 修复——staging 目录里 CLI exe 的真实文件名（如
+            atprobe-cli.exe）。非空时 bat 同时替换 CLI exe，避免 GUI 升级后 CLI 仍是旧版。
     """
     exe = _win(str(exe_path))
     internal = _win(str(internal_path))
@@ -157,6 +171,14 @@ def build_updater_script(
     exe_bak = _win(str(exe_path) + ".bak")
     staging_exe = _win(str(staging_dir / staging_exe_name))
     restart_cmd = f'start "" "{exe}"' if restart else "exit /b 0"
+    # M8：CLI exe 替换块（仅 staging 含 atprobe-cli.exe 时执行）
+    cli_replace_block = ""
+    if staging_cli_exe_name is not None:
+        staging_cli = _win(str(staging_dir / staging_cli_exe_name))
+        cli_dest = _win(str(exe_path.parent / staging_cli_exe_name))
+        cli_replace_block = (
+            f'if exist "{staging_cli}" (\n    copy /y "{staging_cli}" "{cli_dest}" >nul\n)\n'
+        )
     return f"""@echo off
 chcp 65001 >nul
 setlocal
@@ -193,7 +215,7 @@ xcopy /e /i /y "%STAGING%\\_internal" "%INTERNAL%" >nul
 if errorlevel 1 goto rollback
 copy /y "{staging_exe}" "%EXE%" >nul
 if errorlevel 1 goto rollback
-
+{cli_replace_block}
 REM 4. 成功：清理 + 重启
 rmdir /s /q "%BACKUP%"
 del "%EXE_BAK%" 2>nul

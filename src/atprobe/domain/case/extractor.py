@@ -41,9 +41,7 @@ def extract_one(pattern: str, response: str) -> ExtractionResult:
     return ExtractionResult(name="", value=value, matched=True)
 
 
-def extract_all(
-    spec: dict[str, str], response: str
-) -> tuple[dict[str, str], dict[str, bool]]:
+def extract_all(spec: dict[str, str], response: str) -> tuple[dict[str, str], dict[str, bool]]:
     """对一组 extract 规则提取，返回 (变量值字典, 是否匹配字典).
 
     Args:

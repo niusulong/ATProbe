@@ -27,9 +27,7 @@ class TestExtractor:
         assert matched == {"stat": True, "rssi": True}
 
     def test_partial_match(self) -> None:
-        values, matched = extract_all(
-            {"a": r"A(\d)", "b": r"B(\d)"}, "A1 only"
-        )
+        values, matched = extract_all({"a": r"A(\d)", "b": r"B(\d)"}, "A1 only")
         assert values == {"a": "1", "b": ""}
         assert matched == {"a": True, "b": False}
 

@@ -18,20 +18,24 @@ class TestAggregate:
         assert s.pass_rate == 100.0
 
     def test_mixed(self) -> None:
-        s = aggregate([
-            _cr("a", CaseStatus.PASS),
-            _cr("b", CaseStatus.FAIL),
-            _cr("c", CaseStatus.SKIPPED),
-        ])
+        s = aggregate(
+            [
+                _cr("a", CaseStatus.PASS),
+                _cr("b", CaseStatus.FAIL),
+                _cr("c", CaseStatus.SKIPPED),
+            ]
+        )
         assert (s.passed, s.failed, s.skipped) == (1, 1, 1)
         # pass_rate 分母排除 skipped：1/(3-1-0) = 50%
         assert s.pass_rate == 50.0
 
     def test_pass_rate_excludes_interrupted(self) -> None:
-        s = aggregate([
-            _cr("a", CaseStatus.PASS),
-            _cr("b", CaseStatus.INTERRUPTED),
-        ])
+        s = aggregate(
+            [
+                _cr("a", CaseStatus.PASS),
+                _cr("b", CaseStatus.INTERRUPTED),
+            ]
+        )
         # 1/(2-0-1) = 100%
         assert s.pass_rate == 100.0
 
@@ -45,25 +49,37 @@ class TestAggregate:
         assert s.pass_rate == 0.0
 
     def test_by_tag(self) -> None:
-        s = aggregate([
-            _cr("a", CaseStatus.PASS, ("network",)),
-            _cr("b", CaseStatus.FAIL, ("network",)),
-            _cr("c", CaseStatus.PASS, ("sms",)),
-        ])
+        s = aggregate(
+            [
+                _cr("a", CaseStatus.PASS, ("network",)),
+                _cr("b", CaseStatus.FAIL, ("network",)),
+                _cr("c", CaseStatus.PASS, ("sms",)),
+            ]
+        )
         # 完整四态计数（含 skipped/interrupted），数字自洽：total = passed+failed+skipped+interrupted
         assert s.by_tag["network"] == {
-            "total": 2, "passed": 1, "failed": 1, "skipped": 0, "interrupted": 0
+            "total": 2,
+            "passed": 1,
+            "failed": 1,
+            "skipped": 0,
+            "interrupted": 0,
         }
         assert s.by_tag["sms"] == {
-            "total": 1, "passed": 1, "failed": 0, "skipped": 0, "interrupted": 0
+            "total": 1,
+            "passed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "interrupted": 0,
         }
 
     def test_by_tag_includes_skipped_and_interrupted(self) -> None:
         """P2-3：SKIPPED/INTERRUPTED 用例必须在 by_tag 中可见，不再"消失"."""
-        s = aggregate([
-            _cr("a", CaseStatus.SKIPPED, ("network",)),
-            _cr("b", CaseStatus.INTERRUPTED, ("network",)),
-        ])
+        s = aggregate(
+            [
+                _cr("a", CaseStatus.SKIPPED, ("network",)),
+                _cr("b", CaseStatus.INTERRUPTED, ("network",)),
+            ]
+        )
         st = s.by_tag["network"]
         assert st["total"] == 2
         assert st["skipped"] == 1

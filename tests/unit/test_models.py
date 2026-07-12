@@ -30,7 +30,7 @@ class TestStepValidation:
             Step(
                 command="AT",
                 retry=RetryConfig(count=1),
-                poll=PollConfig(until="x == \"y\"", timeout=5),
+                poll=PollConfig(until='x == "y"', timeout=5),
             )
 
     def test_wait_urc_defaults_none(self) -> None:
@@ -59,7 +59,7 @@ class TestStepValidation:
             Step(
                 command="AT+X",
                 wait_urc=r"\+X:ok",
-                poll=PollConfig(until="x == \"y\"", timeout=5),
+                poll=PollConfig(until='x == "y"', timeout=5),
             )
 
     def test_wait_urc_invalid_regex_rejected(self) -> None:
@@ -211,7 +211,11 @@ steps:
   - command: AT
    bad: indent
 """)
-        assert "行" in str(exc_info.value) or "syntax" in str(exc_info.value).lower() or "用例" in str(exc_info.value)
+        assert (
+            "行" in str(exc_info.value)
+            or "syntax" in str(exc_info.value).lower()
+            or "用例" in str(exc_info.value)
+        )
 
     def test_steps_required(self) -> None:
         with pytest.raises(CaseParseError):
@@ -235,10 +239,12 @@ steps:
 class TestCaseParamIndex:
     def test_default_param_index_none(self) -> None:
         from atprobe.domain.case.models import Case
+
         c = Case(name="x", steps=[Step(command="AT")])
         assert c.param_index is None
 
     def test_param_index_settable(self) -> None:
         from atprobe.domain.case.models import Case
+
         c = Case(name="x", steps=[Step(command="AT")], param_index=2)
         assert c.param_index == 2

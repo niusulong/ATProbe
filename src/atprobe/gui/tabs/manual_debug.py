@@ -92,12 +92,17 @@ class ManualDebugWidget(QWidget):
     def __init__(self, binding: TabBinding, main_window: object) -> None:
         super().__init__()
         self._main = main_window
-        self._tokens = get_tokens(dark=False)
+        self._tokens = get_tokens()
         self._terminator = Terminator.CRLF
         # 当前订阅句柄（端口打开后建立，关闭时撤销）
         self._rx_handle: object | None = None
-        # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染
-        self._rx_buffer = bytearray()
+        # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染。
+        # B7 修复：用 incremental decoder 处理跨 chunk 的多字节字符边界，
+        # 避免残缺字节被 errors="replace" 永久替换成 ?? 后无法与下个 chunk 拼回。
+        from codecs import getincrementaldecoder
+
+        self._rx_decoder = getincrementaldecoder("utf-8")(errors="replace")
+        self._tail_text = ""  # 文本层未换行尾巴（跨 chunk 行拼接）
         # 上一个有效波特率（选「自定义…」取消输入时回退到此值）
         self._last_valid_baud: int = 115200
         self._init_ui()
@@ -263,7 +268,7 @@ class ManualDebugWidget(QWidget):
         legend_row = QHBoxLayout()
         legend = QLabel(
             f'<span style="color:{self._tokens["data.tx"]}">■ TX</span>'
-            f'&nbsp;&nbsp;'
+            f"&nbsp;&nbsp;"
             f'<span style="color:{self._tokens["data.rx"]}">■ RX</span>'
         )
         legend.setTextFormat(Qt.TextFormat.RichText)
@@ -557,9 +562,7 @@ class ManualDebugWidget(QWidget):
         sending = self._file_worker is not None
         is_conn = getattr(self._main, "is_port_connected", None)
         connected = bool(callable(is_conn) and is_conn(port))
-        self.file_send_btn.setEnabled(
-            bool(self._file_path) and connected and not sending
-        )
+        self.file_send_btn.setEnabled(bool(self._file_path) and connected and not sending)
 
     def _send_file(self) -> None:
         """发送文件：读取 → 按大小路由小文件同步 / 大文件后台。"""
@@ -705,7 +708,8 @@ class ManualDebugWidget(QWidget):
         subscribe = getattr(self._main, "subscribe_rx", None)
         if not callable(subscribe):
             return
-        self._rx_buffer.clear()
+        self._rx_decoder.reset()
+        self._tail_text = ""
         self._rx_handle = subscribe(port, self._on_rx_chunk)
 
     def _detach_rx(self) -> None:
@@ -715,7 +719,8 @@ class ManualDebugWidget(QWidget):
         if callable(unsubscribe):
             unsubscribe(self._rx_handle)
         self._rx_handle = None
-        self._rx_buffer.clear()
+        self._rx_decoder.reset()
+        self._tail_text = ""
 
     def _on_rx_chunk(self, chunk: bytes) -> None:
         """串口读线程回调：转发到主线程（避免在非主线程操作 UI）."""
@@ -727,23 +732,31 @@ class ManualDebugWidget(QWidget):
         HEX 开关打开时，每行以十六进制展示（M1 §7.2）。
         文本模式下按实际换行符显示：一个 \\n 换一行，连续 \\n 之间的空行保留，
         忠实反映模块返回的换行结构（行尾 \\r 去除，避免回车错乱）。
+
+        B7 修复：用 incremental decoder 处理跨 chunk 的 UTF-8 多字节字符。
+        旧实现先 decode 残缺字节成 ?? 再 encode 回去，原始尾部字节永久丢失，
+        导致中文/多字节字符在分块边界处必然乱码。incremental decoder 保留未完成
+        字节序列，等下个 chunk 到达后正确拼出完整字符。
         """
         if self.hex_check.isChecked():
             hex_line = " ".join(f"{b:02X}" for b in chunk)
             if hex_line:
                 self._append_line("RX", hex_line, self._tokens["data.rx"])
-            self._rx_buffer.clear()
+            # 切到 HEX 模式时清空文本层尾巴，避免切回文本模式时拼入陈旧文本
+            self._tail_text = ""
+            self._rx_decoder.reset()
             return
-        text = chunk.decode("utf-8", errors="replace")
-        self._rx_buffer.extend(text.encode("utf-8"))
-        data = self._rx_buffer.decode("utf-8", errors="replace")
+        # incremental decode：feed chunk，返回当前可完整解码的文本；尾部半截多字节
+        # 字符自动保留在 decoder 内部状态，等下次 feed 继续解码。
+        # 文本层尾巴 _tail_text 拼在本次解码结果前（上次未换行的尾部），一起按行切分。
+        data = self._tail_text + self._rx_decoder.decode(chunk)
         # 按换行切：完整的行立即渲染（保留空行），最后一段（无换行）留作下次
         parts = data.split("\n")
         if len(parts) > 1:
             complete = "\n".join(parts[:-1]) + "\n"
             for line in split_lines_preserving_blanks(complete):
                 self._append_line("RX", line, self._tokens["data.rx"])
-        self._rx_buffer = bytearray(parts[-1].encode("utf-8"))
+        self._tail_text = parts[-1]
 
     def _render_tx_command(self, command: str) -> None:
         """渲染命令型 TX（手动发送/命令库双击）上屏。
@@ -814,20 +827,36 @@ class ManualDebugWidget(QWidget):
         channel = (
             f'<span style="background-color:{color};color:{on_accent};'
             f'font-size:10px;font-weight:700;">'
-            f'&nbsp;{dir_safe}&nbsp;</span>'
+            f"&nbsp;{dir_safe}&nbsp;</span>"
         )
         self.response_view.append(
             f'<div style="font-family:{MONO_FONT};font-size:12px;margin:2px 0;'
             f'line-height:1.5;white-space:pre-wrap;">'
             f'<span style="color:{muted};font-size:10px;">{ts}</span>&nbsp;&nbsp;'
-            f'{channel} '
+            f"{channel} "
             f'<span style="color:{color};">{safe}</span>'
-            f'</div>'
+            f"</div>"
         )
         # 行数上限由构造时 setMaximumBlockCount 兜底（见 _init_ui），此处无需手卷裁剪。
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         """页面关闭：撤销 RX 订阅 + 取消进行中的文件发送，避免悬挂线程。"""
+        self.cleanup()
+        super().closeEvent(event)
+
+    def cleanup(self) -> None:
+        """统一资源清理钩子（B6：MainWindow._close_tab / closeEvent 调用）.
+
+        Qt 的 removeTab 不触发 closeEvent，旧实现 tab 关闭后 RX 订阅泄漏、文件发送
+        线程悬挂。此方法供 MainWindow 显式调用，确保资源释放与 tab 关闭/窗口关闭同步。
+        """
         self._detach_rx()
         self._cleanup_file_send()
-        super().closeEvent(event)
+
+    def refresh_theme(self) -> None:
+        """主题切换时刷新内联富文本配色（M11：旧实现硬编码 dark=False 不随主题变）."""
+        self._tokens = get_tokens()
+        # 传播到命令库子面板
+        panel_refresher = getattr(self._cmd_panel, "refresh_theme", None)
+        if callable(panel_refresher):
+            panel_refresher()

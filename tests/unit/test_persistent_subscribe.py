@@ -7,9 +7,7 @@ Fake 无 connection 概念，测不到 open 时 re-attach 的真实路径）。
 
 from __future__ import annotations
 
-import threading
 import unittest.mock as mock
-from pathlib import Path
 
 import pytest
 
@@ -32,8 +30,6 @@ def pm_with_mock_conn():
     """
     from atprobe.infra.serial import connection as conn_mod
 
-    real_open = conn_mod.SerialConnection.open
-
     def _fake_open(self):
         # 不真开 pyserial，仅标记已连接 + 起一个无操作读线程占位
         self._connected = True
@@ -53,7 +49,7 @@ class TestPersistentSubscribe:
         received: list[bytes] = []
 
         pm.open(_make_cfg())
-        handle = pm.subscribe_rx("TESTPORT", received.append)
+        pm.subscribe_rx("TESTPORT", received.append)
         conn1 = pm._connections["TESTPORT"]
         conn1._notify_rx_observers(b"data1")
         assert received == [b"data1"]
@@ -175,17 +171,19 @@ class TestEnginePreservesExternalPorts:
         def _fake_send(self, command, *, timeout=None, wait_urc=None, cancel=None):
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
-        with mock.patch.object(conn_mod.SerialConnection, "open", _fake_open), \
-             mock.patch.object(conn_mod.SerialConnection, "send_command", _fake_send):
+        with (
+            mock.patch.object(conn_mod.SerialConnection, "open", _fake_open),
+            mock.patch.object(conn_mod.SerialConnection, "send_command", _fake_send),
+        ):
             pm = PortManager()
             # GUI 预先开端口（模拟用户手动连接/监控）
             pm.open(_make_cfg("COMX"))
             assert pm.is_connected("COMX")
 
-            case = parse_case("name: t\ntags: [x]\nsteps:\n  - command: AT\n    assert: { contains: OK }")
-            ecfg = EngineConfig(
-                ports=(_make_cfg("COMX"),), cases=(case,), log_dir="./logs_test_e"
+            case = parse_case(
+                "name: t\ntags: [x]\nsteps:\n  - command: AT\n    assert: { contains: OK }"
             )
+            ecfg = EngineConfig(ports=(_make_cfg("COMX"),), cases=(case,), log_dir="./logs_test_e")
             engine = Engine(sender_factory=lambda: pm)
             result = engine.start(ecfg)
 

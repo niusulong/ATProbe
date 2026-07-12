@@ -18,13 +18,17 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from atprobe.infra.serial.config import PortConfig, Terminator
 from atprobe.infra.serial.exceptions import (
+    OperationCancelled,
     PortOpenError,
     SendError,
 )
 from atprobe.infra.serial.interfaces import (
+    ERROR_KIND_DISCONNECT,
+    ERROR_KIND_SEND,
     CancelToken,
     Response,
     ResponseStatus,
@@ -49,7 +53,10 @@ except ImportError:  # pragma: no cover - 仅无 pyserial 时
 # ---------------------------------------------------------------------------
 # 响应完整性判定（§7.5）：收到终结标志或超时
 # ---------------------------------------------------------------------------
-# AT 响应终结标志行：OK / ERROR / +CME ERROR / +CMS ERROR 等（按行匹配）
+# AT 响应终结标志行：OK / ERROR / +CME ERROR / +CMS ERROR 等（按行匹配）。
+# 注（L3）：仅覆盖 3GPP TS 27.007 的常用结果码。拨号/语音场景的 NO CARRIER /
+# NO DIALTONE / BUSY / NO ANSWER / CONNECT（数据模式）未纳入——这些场景下设备发这些
+# 码后不再发 OK，ATProbe 会等到超时。纯数据/语音测试工具按需扩展此正则。
 _TERMINATOR_RE = re.compile(rb"^(OK|ERROR|\+CME ERROR:.*|\+CMS ERROR:.*)\s*$")
 
 # 等待响应期间提取 URC（§6.4）：以 + 开头的行
@@ -168,22 +175,36 @@ class SerialConnection:
         if not _PYSERIAL_AVAILABLE:  # pragma: no cover
             raise PortOpenError(self.config.name, "pyserial 未安装")
         try:
-            f = self.config.frame
-            self._serial = serial.Serial(  # type: ignore[union-attr]
-                port=self.config.name,
-                baudrate=self.config.baudrate,
-                bytesize=f.databits,
-                parity=f.parity.value,
-                stopbits=f.stopbits,
-                xonxoff=(self.config.flow_control.value == "xon_xoff"),
-                rtscts=(self.config.flow_control.value == "rts_cts"),
-                timeout=0.1,  # 非阻塞读循环的轮询间隔
-                write_timeout=5.0,
-            )
+            self._serial = self._build_serial()
         except (SerialException, OSError) as exc:
             raise PortOpenError(self.config.name, str(exc)) from exc
 
         self._connected = True
+        self._ensure_reader()
+
+    def _build_serial(self) -> Any:
+        """根据 PortConfig 构造 pyserial.Serial 句柄（L14：open/reconnect 共用，消除重复）."""
+        f = self.config.frame
+        return serial.Serial(  # type: ignore[union-attr]
+            port=self.config.name,
+            baudrate=self.config.baudrate,
+            bytesize=f.databits,
+            parity=f.parity.value,
+            stopbits=f.stopbits,
+            xonxoff=(self.config.flow_control.value == "xon_xoff"),
+            rtscts=(self.config.flow_control.value == "rts_cts"),
+            timeout=0.1,  # 非阻塞读循环的轮询间隔
+            write_timeout=5.0,
+        )
+
+    def _ensure_reader(self) -> None:
+        """保证读线程存活（open / reconnect 共用，B2 修复）.
+
+        若读线程已死（如 close 期间被 set 的 _stop_event）或不存在，则 clear stop_event
+        并新建+start 读线程。reconnect 重开串口后必须调用，否则新句柄永无读线程消费。
+        """
+        if self._read_thread is not None and self._read_thread.is_alive():
+            return  # 读线程仍存活，无需重建
         self._stop_event.clear()
         self._read_thread = threading.Thread(
             target=self._read_loop, name=f"atprobe-read-{self.config.name}", daemon=True
@@ -227,7 +248,9 @@ class SerialConnection:
         含已收到的 OK 段，status=TIMEOUT）。为空时 OK 即终结（原行为）。
         """
         if not self._connected or self._serial is None:
-            return Response(text="", status=ResponseStatus.ERROR, error="端口未连接")
+            return Response(
+                text="", status=ResponseStatus.ERROR, error="端口未连接", error_kind=ERROR_KIND_SEND
+            )
 
         to = self.config.response_timeout if timeout is None else timeout
         terminator = self.config.terminator.value.encode("ascii")
@@ -238,10 +261,12 @@ class SerialConnection:
             self._buffer.clear()
             if wait_urc is not None:
                 self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
-        # 排空上次命令可能遗留的陈旧响应（超时/取消/断连窗口内入队但未被取走的）。
-        # 安全：此刻 _awaiting 尚未 set，读线程不会 put 新响应，只会清掉陈旧残留。
-        self._drain_response_q()
+        # 先 set awaiting 再排空队列（B3 修复：消除 set 与 drain 之间读线程恰好检测到断连
+        # 却因 awaiting 未 set 而丢弃断连信号的竞态窗口。先 set 后，读线程的断连路径会
+        # 把 ERROR 入队，drain 只会清掉这次命令之前入队的陈旧响应；若 drain 恰好清掉了
+        # 刚入队的断连信号也无妨——紧接着 write 会失败或断连会再次触发，最终都能被感知）。
         self._awaiting.set()
+        self._drain_response_q()
 
         self._log_tx(payload)
         self._notify_tx_observers(payload)
@@ -251,16 +276,24 @@ class SerialConnection:
         except (SerialException, OSError) as exc:
             self._awaiting.clear()
             self._reset_wait_urc()
-            return Response(text="", status=ResponseStatus.ERROR, error=f"发送失败：{exc}")
+            return Response(
+                text="",
+                status=ResponseStatus.ERROR,
+                error=f"发送失败：{exc}",
+                error_kind=ERROR_KIND_SEND,
+            )
 
         try:
             # 等待响应队列（带超时 + 取消轮询）
             deadline = self._clock() + to
             while True:
                 if cancel is not None and cancel.cancelled:
+                    # M1 修复：取消时统一抛 OperationCancelled（与 Fake/vsim 一致），
+                    # 上层 step_runner catch 后判 INTERRUPTED，而非旧实现的返回 CANCELLED
+                    # Response（被 _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉）。
                     self._awaiting.clear()
                     self._drain_response_q()
-                    return Response(text="", status=ResponseStatus.CANCELLED)
+                    raise OperationCancelled("命令等待被取消")
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     # 末次非阻塞检查：消除「get 超时与 break 之间响应入队」的窗口。
@@ -472,7 +505,12 @@ class SerialConnection:
         # （否则下一次 send_command 的 get 会立即拿到这个过期断连响应）
         if self._awaiting.is_set():
             self._response_q.put(
-                Response(text="", status=ResponseStatus.ERROR, error="端口断连")
+                Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error="端口断连",
+                    error_kind=ERROR_KIND_DISCONNECT,
+                )
             )
 
     # ------------------------------------------------------------------
@@ -490,7 +528,11 @@ class SerialConnection:
     # 重连支持（§4.2）—— 由 PortManager 调用
     # ------------------------------------------------------------------
     def reconnect(self) -> bool:
-        """尝试重新打开端口（不阻塞读线程太久）."""
+        """尝试重新打开端口（不阻塞读线程太久）.
+
+        重开后调 _ensure_reader 保证读线程存活（B2 修复：旧实现重连后不重启读线程，
+        导致重连成功的端口无消费线程，send_command 必然超时卡死）。
+        """
         with self._reconnecting:
             try:
                 if self._serial is not None:
@@ -498,7 +540,10 @@ class SerialConnection:
                         self._serial.close()  # type: ignore[union-attr]
                     except Exception:  # noqa: BLE001
                         pass
-                return self._try_open_once()
+                if self._try_open_once():
+                    self._ensure_reader()
+                    return True
+                return False
             except PortOpenError:
                 return False
 
@@ -506,18 +551,7 @@ class SerialConnection:
         if not _PYSERIAL_AVAILABLE:  # pragma: no cover
             return False
         try:
-            f = self.config.frame
-            self._serial = serial.Serial(  # type: ignore[union-attr]
-                port=self.config.name,
-                baudrate=self.config.baudrate,
-                bytesize=f.databits,
-                parity=f.parity.value,
-                stopbits=f.stopbits,
-                xonxoff=(self.config.flow_control.value == "xon_xoff"),
-                rtscts=(self.config.flow_control.value == "rts_cts"),
-                timeout=0.1,
-                write_timeout=5.0,
-            )
+            self._serial = self._build_serial()
             self._connected = True
             return True
         except (SerialException, OSError):

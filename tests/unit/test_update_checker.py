@@ -49,6 +49,7 @@ class _FakeResp:
 
 # ---------- fetch_latest ----------
 
+
 def test_fetch_latest_parses_release() -> None:
     resp = _FakeResp(_github_response("v0.3.0"))
     with patch("urllib.request.urlopen", return_value=resp):
@@ -93,7 +94,67 @@ def test_fetch_latest_bad_json_converges() -> None:
             fetch_latest()
 
 
+# ---------- B9：SHA256 解析 ----------
+
+
+def _github_response_with_sha256(tag: str = "v0.3.0", sha: str = "abc123") -> bytes:
+    """构造含 <zip>.sha256 asset 的 GitHub 响应。"""
+    ver = tag.lstrip("v")
+    zip_name = f"ATProbe-{ver}-win64.zip"
+    body = {
+        "tag_name": tag,
+        "body": "## 更新内容",
+        "html_url": f"https://github.com/niusulong/ATProbe/releases/tag/{tag}",
+        "assets": [
+            {
+                "name": zip_name,
+                "browser_download_url": f"https://example.com/{zip_name}",
+                "size": 83558400,
+            },
+            {
+                "name": f"{zip_name}.sha256",
+                "browser_download_url": f"https://example.com/{zip_name}.sha256",
+                "size": 95,
+            },
+        ],
+    }
+    return json.dumps(body).encode("utf-8")
+
+
+def test_fetch_latest_parses_sha256() -> None:
+    """Release 含 <zip>.sha256 asset → ReleaseInfo.sha256 解析出摘要。"""
+    release_resp = _FakeResp(_github_response_with_sha256("v0.3.0"))
+    # 第二次 urlopen（下载 sha256 文件）返回摘要内容
+    sha_content = (
+        b"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  ATProbe-0.3.0-win64.zip"
+    )
+    sha_resp = _FakeResp(sha_content)
+    responses = iter([release_resp, sha_resp])
+    with patch("urllib.request.urlopen", side_effect=lambda *a, **k: next(responses)):
+        info = fetch_latest()
+    assert info.sha256 == "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+
+def test_fetch_latest_no_sha256_asset_returns_none() -> None:
+    """Release 无 sha256 asset → ReleaseInfo.sha256 = None（降级为仅 size 校验）。"""
+    resp = _FakeResp(_github_response("v0.3.0"))  # 无 sha asset
+    with patch("urllib.request.urlopen", return_value=resp):
+        info = fetch_latest()
+    assert info.sha256 is None
+
+
+def test_fetch_latest_sha256_download_failure_returns_none() -> None:
+    """sha256 asset 存在但下载失败 → sha256 = None（降级，不阻断检查）。"""
+    release_resp = _FakeResp(_github_response_with_sha256("v0.3.0"))
+    sha_resp = _FakeResp(b"")  # 空内容（无效摘要）
+    responses = iter([release_resp, sha_resp])
+    with patch("urllib.request.urlopen", side_effect=lambda *a, **k: next(responses)):
+        info = fetch_latest()
+    assert info.sha256 is None  # 无效摘要降级为 None
+
+
 # ---------- is_newer ----------
+
 
 @pytest.mark.parametrize(
     "remote, local, expected",

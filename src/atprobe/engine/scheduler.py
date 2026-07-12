@@ -83,7 +83,9 @@ class Engine:
     # ------------------------------------------------------------------
     # start（阻塞执行）
     # ------------------------------------------------------------------
-    def start(self, config: EngineConfig, handler: Callable[[object], None] | None = None) -> ExecutionResult:
+    def start(
+        self, config: EngineConfig, handler: Callable[[object], None] | None = None
+    ) -> ExecutionResult:
         self._state = EngineState.RUNNING
         self._stop_flag.clear()
         self._stop_mode = None
@@ -109,8 +111,10 @@ class Engine:
         try:
             for pc in config.ports:
                 already_open = port_manager.is_connected(pc.name)  # type: ignore[union-attr]
-                port_manager.open(pc)  # type: ignore[union-attr]
+                # M4 修复：仅当端口未在外部打开时才 open，避免对 GUI 已连端口复用时抛错。
+                # （PortManager.open 已改为幂等，但跳过 open 更语义清晰且省一次锁。）
                 if not already_open:
+                    port_manager.open(pc)  # type: ignore[union-attr]
                     ports_opened.append(pc.name)
         except Exception as exc:  # 端口打开失败
             # 单端口失败不一定是致命；全部失败才是 ERROR（§7.5 场景C）
@@ -132,20 +136,30 @@ class Engine:
             # cancel=cancel 响应停止；失败 → 不继续 cases（但仍执行 teardown）
             suite_setup_failed = False
             suite_setup_results: list[StepResult] = []
-            suite_setup_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+            suite_setup_ctx = CaseContext(
+                env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+            )
             for i, step in enumerate(config.suite_setup, start=1):
                 if self._stop_mode is StopMode.ALL:
                     suite_setup_failed = True
                     break
                 r = execute_step(
-                    step, index=i, phase="suite_setup", ctx=suite_setup_ctx,
-                    sender=sender, default_port=default_port,
+                    step,
+                    index=i,
+                    phase="suite_setup",
+                    ctx=suite_setup_ctx,
+                    sender=sender,
+                    default_port=default_port,
                     step_timeout_default=config.step_timeout_default,
-                    clock=self._clock, sleep=self._sleep, cancel=cancel,
+                    clock=self._clock,
+                    sleep=self._sleep,
+                    cancel=cancel,
                 )
                 suite_setup_results.append(r.step_result)
                 self._emit_step(handler, r)
-                if r.abort_case:  # suite_setup 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
+                if (
+                    r.abort_case
+                ):  # suite_setup 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
                     suite_setup_failed = True
                     break
 
@@ -154,28 +168,47 @@ class Engine:
                     if self._stop_mode is StopMode.ALL:
                         break
                     if self._stop_flag.is_set() and self._stop_mode is StopMode.CURRENT:
+                        # B1 修复：中断当前用例后，重建 cancel token 让后续用例能正常执行。
+                        # 旧实现只清 stop_flag/stop_mode，但 cancel token 仍 cancelled=True，
+                        # 后续用例的 execute_step 一进 _run_retry/_run_poll 就 raise
+                        # OperationCancelled → 所有后续用例被判 INTERRUPTED，"继续后续"
+                        # 语义完全失效。重建 token 后传给 _run_case（需覆盖外层 cancel 变量）。
                         self._stop_flag.clear()
                         self._stop_mode = None
+                        cancel = CancelToken()
+                        self._cancel_token = cancel
 
                     if handler is not None:
                         handler(
                             CaseStartEvent(
-                                case_name=case.name, case_index=idx,
+                                case_name=case.name,
+                                case_index=idx,
                                 total_cases=len(config.cases),
                                 case_type="pressure" if case.is_pressure else "regular",
                             )
                         )
 
                     cr = self._run_case(
-                        case, idx, config, sender, port_manager, default_port,
-                        cancel, log_dir, session, handler,
+                        case,
+                        idx,
+                        config,
+                        sender,
+                        port_manager,
+                        default_port,
+                        cancel,
+                        log_dir,
+                        session,
+                        handler,
                     )
                     case_results.append(cr)
                     if handler is not None:
                         handler(
                             CaseResultEvent(
-                                case_name=case.name, status=cr.status.value,
-                                duration_ms=cr.duration_ms, error_msg=cr.error_msg,
+                                case_name=case.name,
+                                status=cr.status.value,
+                                duration_ms=cr.duration_ms,
+                                error_msg=cr.error_msg,
+                                case_index=idx,
                             )
                         )
 
@@ -184,14 +217,22 @@ class Engine:
             # （is_teardown=True + try/except 吞掉异常，与用例 teardown 语义一致）。
             # cancel=None（不响应取消）；StepResult 进 ExecutionResult 供报告诊断。
             suite_teardown_results: list[StepResult] = []
-            suite_teardown_ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+            suite_teardown_ctx = CaseContext(
+                env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+            )
             for i, step in enumerate(config.suite_teardown, start=1):
                 try:
                     r = execute_step(
-                        step, index=i, phase="suite_teardown", ctx=suite_teardown_ctx,
-                        sender=sender, default_port=default_port,
+                        step,
+                        index=i,
+                        phase="suite_teardown",
+                        ctx=suite_teardown_ctx,
+                        sender=sender,
+                        default_port=default_port,
                         step_timeout_default=config.step_timeout_default,
-                        clock=self._clock, sleep=self._sleep, cancel=None,
+                        clock=self._clock,
+                        sleep=self._sleep,
+                        cancel=None,
                         is_teardown=True,
                     )
                     suite_teardown_results.append(r.step_result)
@@ -224,8 +265,11 @@ class Engine:
         ss_results = tuple(locals().get("suite_setup_results", ()))
         st_results = tuple(locals().get("suite_teardown_results", ()))
         result = ExecutionResult(
-            summary=summary, case_results=tuple(case_results), env_snapshot=env_snap,
-            suite_setup_results=ss_results, suite_teardown_results=st_results,
+            summary=summary,
+            case_results=tuple(case_results),
+            env_snapshot=env_snap,
+            suite_setup_results=ss_results,
+            suite_teardown_results=st_results,
         )
         if handler is not None:
             handler(EngineFinishedEvent(summary=summary))
@@ -236,13 +280,22 @@ class Engine:
     # 单用例执行
     # ------------------------------------------------------------------
     def _run_case(
-        self, case: Case, idx: int, config: EngineConfig,
-        sender: ICommandSender, port_manager: Any, default_port: str,
-        cancel: CancelToken, log_dir: Path, session: str,
+        self,
+        case: Case,
+        idx: int,
+        config: EngineConfig,
+        sender: ICommandSender,
+        port_manager: Any,
+        default_port: str,
+        cancel: CancelToken,
+        log_dir: Path,
+        session: str,
         handler: Callable[[object], None] | None,
     ) -> CaseResult:
         t0 = self._clock()
-        ctx = CaseContext(env=config.env_config if isinstance(config.env_config, EnvConfig) else None)
+        ctx = CaseContext(
+            env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+        )
         # 参数化注入（M2 §10.2）：参数行注入用例级变量作用域（最高优先级）
         if case.parameters:
             for k, v in case.parameters[0].items():
@@ -263,10 +316,17 @@ class Engine:
             setup_failed = False
             for i, step in enumerate(case.setup, start=1):
                 r = execute_step(
-                    step, index=i, phase="setup", ctx=ctx, sender=sender,
-                    default_port=default_port, step_timeout_default=config.step_timeout_default,
+                    step,
+                    index=i,
+                    phase="setup",
+                    ctx=ctx,
+                    sender=sender,
+                    default_port=default_port,
+                    step_timeout_default=config.step_timeout_default,
                     case_on_failure=case.on_failure,
-                    clock=self._clock, sleep=self._sleep, cancel=cancel,
+                    clock=self._clock,
+                    sleep=self._sleep,
+                    cancel=cancel,
                 )
                 setup_results.append(r.step_result)
                 ports_used.add(r.step_result.port)
@@ -291,16 +351,25 @@ class Engine:
                     if handler is not None:
                         handler(
                             PressureProgressEvent(
-                                case_name=case.name, current_round=rnd, total_rounds=total,
-                                success=suc, fail=fail, avg_ms=avg,
+                                case_name=case.name,
+                                current_round=rnd,
+                                total_rounds=total,
+                                success=suc,
+                                fail=fail,
+                                avg_ms=avg,
                             )
                         )
 
                 pr = run_pressure(
-                    case, ctx=ctx, sender=sender, default_port=default_port,
+                    case,
+                    ctx=ctx,
+                    sender=sender,
+                    default_port=default_port,
                     step_timeout_default=config.step_timeout_default,
                     pass_threshold=config.pressure_pass_threshold,
-                    clock=self._clock, sleep=self._sleep, cancel=cancel,
+                    clock=self._clock,
+                    sleep=self._sleep,
+                    cancel=cancel,
                     on_progress=on_progress,
                 )
                 if pr.aborted and cancel.cancelled:
@@ -315,8 +384,16 @@ class Engine:
                 if not pr.aborted:
                     step_results = []  # 压测明细在 pressure_stats
                 return self._build_case_result(
-                    case, idx, status, setup_results, step_results, teardown_results,
-                    t0, ports_used, error_msg, pressure=pr.stats,
+                    case,
+                    idx,
+                    status,
+                    setup_results,
+                    step_results,
+                    teardown_results,
+                    t0,
+                    ports_used,
+                    error_msg,
+                    pressure=pr.stats,
                 )
             else:
                 # §3.2 流程A steps
@@ -326,10 +403,17 @@ class Engine:
                         aborted = True
                         break
                     r = execute_step(
-                        step, index=i, phase="steps", ctx=ctx, sender=sender,
-                        default_port=default_port, step_timeout_default=config.step_timeout_default,
+                        step,
+                        index=i,
+                        phase="steps",
+                        ctx=ctx,
+                        sender=sender,
+                        default_port=default_port,
+                        step_timeout_default=config.step_timeout_default,
                         case_on_failure=case.on_failure,
-                        clock=self._clock, sleep=self._sleep, cancel=cancel,
+                        clock=self._clock,
+                        sleep=self._sleep,
+                        cancel=cancel,
                     )
                     step_results.append(r.step_result)
                     ports_used.add(r.step_result.port)
@@ -360,9 +444,16 @@ class Engine:
             for i, step in enumerate(case.teardown, start=1):
                 try:
                     r = execute_step(
-                        step, index=i, phase="teardown", ctx=ctx, sender=sender,
-                        default_port=default_port, step_timeout_default=config.step_timeout_default,
-                        clock=self._clock, sleep=self._sleep, cancel=None,  # teardown 不响应取消
+                        step,
+                        index=i,
+                        phase="teardown",
+                        ctx=ctx,
+                        sender=sender,
+                        default_port=default_port,
+                        step_timeout_default=config.step_timeout_default,
+                        clock=self._clock,
+                        sleep=self._sleep,
+                        cancel=None,  # teardown 不响应取消
                         is_teardown=True,
                     )
                     teardown_results.append(r.step_result)
@@ -372,8 +463,16 @@ class Engine:
             self._unbind_case_logs(port_manager)
 
         return self._build_case_result(
-            case, idx, status, setup_results, step_results, teardown_results,
-            t0, ports_used, error_msg, pressure=None,
+            case,
+            idx,
+            status,
+            setup_results,
+            step_results,
+            teardown_results,
+            t0,
+            ports_used,
+            error_msg,
+            pressure=None,
         )
 
     # ------------------------------------------------------------------
@@ -425,10 +524,16 @@ class Engine:
         sr = r.step_result
         handler(
             StepResultEvent(
-                step_index=sr.step_index, phase=sr.phase, status=sr.status.value,
-                duration_ms=sr.duration_ms, port=sr.port, command=sr.command,
-                extracted_vars=dict(sr.extracted_vars), error_msg=sr.error_msg,
-                retry_count=sr.retry_count, poll_iterations=sr.poll_iterations,
+                step_index=sr.step_index,
+                phase=sr.phase,
+                status=sr.status.value,
+                duration_ms=sr.duration_ms,
+                port=sr.port,
+                command=sr.command,
+                extracted_vars=dict(sr.extracted_vars),
+                error_msg=sr.error_msg,
+                retry_count=sr.retry_count,
+                poll_iterations=sr.poll_iterations,
                 response=sr.response,
             )
         )
@@ -436,14 +541,11 @@ class Engine:
     def _hit_disconnect_safety(self, sr: StepResult, ctx: CaseContext, port_manager: Any) -> bool:
         """§4.2 连续断连安全阀：维护 ctx.disconnect_streak，达阈值返回 True（应放弃用例）.
 
-        判定依据：步骤失败且错误含「断连/重连失败」（与 M1 send_command 的断连信号一致）。
-        阈值取该端口 PortConfig.reconnect_safety_threshold（默认 3）。成功步骤重置计数。
+        判定依据：步骤失败且 error_kind == "DISCONNECT"（M3 修复：基于结构化错误分类，
+        而非脆弱的 error_msg 中文字符串匹配）。阈值取该端口 PortConfig.reconnect_
+        safety_threshold（默认 3）。成功步骤重置计数。
         """
-        is_disconnect_err = (
-            sr.status is StepStatus.FAIL
-            and bool(sr.error_msg)
-            and ("断连" in sr.error_msg or "重连失败" in sr.error_msg)
-        )
+        is_disconnect_err = sr.status is StepStatus.FAIL and sr.error_kind == "DISCONNECT"
         if not is_disconnect_err:
             if sr.status is not StepStatus.FAIL:
                 ctx.disconnect_streak = 0
@@ -458,22 +560,35 @@ class Engine:
         return ctx.disconnect_streak >= threshold
 
     def _build_case_result(
-        self, case: Case, idx: int, status: CaseStatus,
-        setup_results: list[StepResult], step_results: list[StepResult],
-        teardown_results: list[StepResult], t0: float, ports_used: set[str],
-        error_msg: str, pressure: Any,
+        self,
+        case: Case,
+        idx: int,
+        status: CaseStatus,
+        setup_results: list[StepResult],
+        step_results: list[StepResult],
+        teardown_results: list[StepResult],
+        t0: float,
+        ports_used: set[str],
+        error_msg: str,
+        pressure: Any,
     ) -> CaseResult:
         duration_ms = (self._clock() - t0) * 1000.0
         display_name = case.name
         if case.param_index is not None:
             display_name = f"{case.name}#{case.param_index}"
         return CaseResult(
-            case_name=display_name, case_file=case.source_file or "",
-            tags=case.tags, ports=tuple(sorted(ports_used)),
-            status=status, is_pressure=case.is_pressure,
-            setup_results=tuple(setup_results), step_results=tuple(step_results),
-            teardown_results=tuple(teardown_results), pressure_stats=pressure,
-            duration_ms=duration_ms, error_msg=error_msg,
+            case_name=display_name,
+            case_file=case.source_file or "",
+            tags=case.tags,
+            ports=tuple(sorted(ports_used)),
+            status=status,
+            is_pressure=case.is_pressure,
+            setup_results=tuple(setup_results),
+            step_results=tuple(step_results),
+            teardown_results=tuple(teardown_results),
+            pressure_stats=pressure,
+            duration_ms=duration_ms,
+            error_msg=error_msg,
         )
 
     def _env_snapshot(self, config: EngineConfig) -> dict[str, dict[str, object]]:
