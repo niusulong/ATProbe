@@ -1,12 +1,14 @@
 """atprobe mcp 命令注册与参数处理测试（不真启动服务）.
 
 覆盖（Task 7）：子命令组注册、serve 的 Token 校验层（四级优先级接线后的
-缺失/文件不存在/环境变量兜底）。不覆盖真实传输——stdio 会阻塞、serve 会
-真起 uvicorn，线上行为由 Task 8 集成测试经真实 transport 验证。
+缺失/文件不存在/环境变量兜底）、未装 MCP 依赖的友好守护（sys.modules 置
+None 模拟）。不覆盖真实传输——stdio 会阻塞、serve 会真起 uvicorn，线上
+行为由 Task 8 集成测试经真实 transport 验证。
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,3 +86,17 @@ def test_serve_config_layer_before_token(tmp_path: Path, monkeypatch: pytest.Mon
     res = runner.invoke(app, ["mcp", "serve", "--config", str(bad)])
     assert res.exit_code == 2
     assert "配置错误" in res.output
+
+
+def test_serve_no_mcp_friendly_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """模拟未装 mcp SDK：serve 最先快速失败 exit 2，提示 uv sync --extra mcp.
+
+    ``sys.modules["mcp"]=None`` 使 import mcp 必败；_require_mcp 先于配置
+    加载与 Token 校验，故无需任何 config。tools.py 顶层 SDK import 收敛后，
+    命令体的延迟 import 不再抢先裸炸 ModuleNotFoundError。
+    """
+    monkeypatch.setitem(sys.modules, "mcp", None)
+    res = runner.invoke(app, ["mcp", "serve", "--token", "x"])
+    assert res.exit_code == 2
+    assert "uv sync --extra mcp" in res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit)

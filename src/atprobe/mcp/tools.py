@@ -18,6 +18,9 @@
   开启结构化输出（包成 ``{"result": "<json 文本>"}`` 的 structured_content，
   客户端需二次解析），故显式关闭，纯文本出参。
 - 同步函数由 SDK 自动入线程池（anyio.to_thread），不阻塞事件循环。
+- 顶层零 SDK 依赖（可选性）：``MCPServer`` 仅作注解（TYPE_CHECKING 延迟），
+  ``ToolError`` 在 ``_wrap`` 调用时局部 import——未装 MCP extra 也能 import
+  本模块与 server.py（server.py docstring「无 MCP 依赖可 import」的根因保障）。
 """
 
 from __future__ import annotations
@@ -25,13 +28,13 @@ from __future__ import annotations
 import functools
 import json
 from collections.abc import Callable
-from typing import Any
-
-from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+from typing import TYPE_CHECKING, Any
 
 from atprobe.mcp.errors import McpError
 from atprobe.mcp.service import McpService
+
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import MCPServer
 
 INSTRUCTIONS = (
     "ATProbe 串口 AT 命令测试工具。工作流：list_ports 发现设备 → open_port 连接 → "
@@ -50,6 +53,8 @@ def _wrap(fn: Callable[..., Any]) -> Callable[..., str]:
 
     @functools.wraps(fn)
     def _inner(*args: Any, **kwargs: Any) -> str:
+        from mcp.server.mcpserver.exceptions import ToolError  # 延迟：顶层保持零 SDK 依赖
+
         try:
             return json.dumps(fn(*args, **kwargs), ensure_ascii=False)
         except McpError as exc:

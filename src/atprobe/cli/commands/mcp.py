@@ -38,10 +38,15 @@ def _load_app_config(config: Path | None) -> AppConfig:
         raise typer.Exit(2) from exc
 
 
-def _build_service(config: Path | None, vsim: bool) -> McpService:
-    """构建 McpService；MCP 依赖缺失时红字提示并 exit 2（gui.py 同款）."""
+def _require_mcp() -> None:
+    """MCP 依赖守护：缺失时红字提示并 exit 2（gui.py 同款）.
+
+    必须在命令体最先调用（先于配置加载与任何延迟 import）——无 mcp 环境的
+    真实失败点是 ``from atprobe.mcp.server import ...`` 拉起的 mcp SDK，
+    此处先行探测才能把裸 ModuleNotFoundError 转成友好提示。
+    """
     try:
-        from atprobe.mcp.service import McpService
+        import mcp  # noqa: F401
     except ImportError as exc:
         typer.secho(
             f"MCP 依赖未安装（{exc}）：uv sync --extra mcp",
@@ -49,7 +54,13 @@ def _build_service(config: Path | None, vsim: bool) -> McpService:
             err=True,
         )
         raise typer.Exit(2) from exc
-    return McpService(app_cfg=_load_app_config(config), vsim=vsim)
+
+
+def _build_service(app_cfg: AppConfig, vsim: bool) -> McpService:
+    """构建 McpService（配置由调用方加载一次后传入，避免 serve 双载）."""
+    from atprobe.mcp.service import McpService
+
+    return McpService(app_cfg=app_cfg, vsim=vsim)
 
 
 @mcp_app.command("stdio")
@@ -58,11 +69,12 @@ def stdio(
     vsim: bool = typer.Option(False, "--vsim", help="进程内虚拟模组模式（无需真实串口）"),
 ) -> None:
     """本地 stdio 形态（标准输入输出归 MCP 协议，本命令不打印任何提示）."""
+    _require_mcp()
     from atprobe.mcp.server import run_stdio
 
     # stdout 独占协议：进入 run_stdio 前后都不打印任何东西
-    # （错误路径的 stderr 提示发生在协议启动前，见 _build_service）。
-    raise typer.Exit(run_stdio(_build_service(config, vsim)))
+    # （错误路径的 stderr 提示发生在协议启动前，见 _require_mcp）。
+    raise typer.Exit(run_stdio(_build_service(_load_app_config(config), vsim)))
 
 
 @mcp_app.command("serve")
@@ -81,10 +93,11 @@ def serve(
     vsim: bool = typer.Option(False, "--vsim", help="进程内虚拟模组模式（无需真实串口）"),
 ) -> None:
     """HTTP serve 形态（Streamable HTTP + Bearer Token）."""
+    _require_mcp()
     from atprobe.mcp.auth import ENV_TOKEN, load_token
     from atprobe.mcp.server import run_serve
 
-    # 顺序：配置 → Token → 服务（测试 test_cli_mcp 依赖此顺序）
+    # 顺序：MCP 依赖 → 配置 → Token → 服务（后三者的先后顺序被 test_cli_mcp 钉住）
     app_cfg = _load_app_config(config)
     try:
         tok = load_token(
@@ -100,7 +113,7 @@ def serve(
             err=True,
         )
         raise typer.Exit(2)
-    service = _build_service(config, vsim)
+    service = _build_service(app_cfg, vsim)
     bind_host = host or app_cfg.mcp_host
     bind_port = port if port is not None else app_cfg.mcp_port
     typer.secho(
