@@ -1,0 +1,83 @@
+name: CI
+
+# 质量
+# 门禁：push main / PR 时跑 lint（ruff + mypy strict）与测试（pytest，Linux + Windows 双平台）。
+# tag 推送不触发（由 release.yml 负责构建发布）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支/PR 的新推送取消旧运行，节省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      # --frozen：严格按 uv.lock 安装，lock 与 pyproject 漂移时直接失败（而非静默重解算）
+      - name: Sync dependencies（dev + gui）
+        run: uv sync --frozen --extra dev --extra gui
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 工具主要面向 Windows（串口/升级器），Linux 验证可移植性
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      # 无显示器环境跑 GUI 测试（tests/integration/test_gui.py 同样默认此平台）
+      QT_QPA_PLATFORM: "offscreen"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      # PySide6 的 Qt 运行库不随 wheel 分发（Linux），offscreen 平台所需的最小集
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
+      - name: Sync dependencies（dev + gui）
+        run: uv sync --frozen --extra dev --extra gui
+
+      # e2e 标记（需真机/虚拟串口）已通过 --strict-markers 声明，默认不选中
+      - name: Run tests
+        run: uv run pytest
