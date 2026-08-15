@@ -62,6 +62,11 @@ class AppConfig:
     # 用于设备存在持续性主动上报的场景（如 N58 开启 GPS 循环输出后的
     # $MYGPSPOS 行每秒到达）。正则对 strip 后的整行内容 search。
     urc_filter: tuple[str, ...] = ()
+    # M8 MCP 服务（本地 stdio 无认证；HTTP serve 用 token_file 认证）。
+    # host 默认故意回环——对外开放需显式设 0.0.0.0（最小暴露面）。
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8470
+    mcp_token_file: str | None = None
 
 
 def _to_int(value: object, *, what: str, source: str | None) -> int:
@@ -185,6 +190,14 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
                 source=source,
             )
         cfg = _replace(cfg, urc_filter=tuple(urc_filter_raw))
+    mcp = raw.get("mcp") or {}
+    if isinstance(mcp, dict):
+        if "host" in mcp:
+            cfg = _replace(cfg, mcp_host=str(mcp["host"]))
+        if "port" in mcp:
+            cfg = _replace(cfg, mcp_port=_to_int(mcp["port"], what="mcp.port", source=source))
+        if "token_file" in mcp and mcp["token_file"] is not None:
+            cfg = _replace(cfg, mcp_token_file=str(mcp["token_file"]))
     return cfg
 
 
