@@ -45,14 +45,17 @@ MCP 依赖是可选组件（extra），核心安装不含它：
 # 源码仓库（推荐）
 uv sync --extra mcp          # 仅 MCP；开发全套：uv sync --extra dev --extra gui --extra mcp
 
-# 或 pip 安装
-pip install "atprobe[mcp]"
+# 或 pip 安装（未发布 PyPI：git 直装，或 clone 后本地可编辑安装）
+pip install "atprobe[mcp] @ git+https://github.com/niusulong/ATProbe"
+# 或 clone 仓库后：
+pip install -e ".[mcp]"
 ```
 
 验证：
 
 ```powershell
-uv run atprobe mcp --help    # 能列出 stdio / serve 两个子命令即就绪
+uv run atprobe mcp --help    # 能列出 stdio / serve 两个子命令（--help 不验证 SDK 就绪）
+uv run python -c "import mcp"  # 无报错即 mcp SDK 就绪
 ```
 
 > **便携版注意**：Release 的便携包（`ATProbe.exe` / `atprobe-cli.exe`）当前**不内置**
@@ -93,7 +96,7 @@ uv run atprobe mcp --help    # 能列出 stdio / serve 两个子命令即就绪
 
 没有硬件也想先体验？加 `--vsim` 用进程内虚拟模组应答：
 
-```json
+```text
 "args": ["mcp", "stdio", "--vsim"]
 ```
 
@@ -177,7 +180,7 @@ serve 启动时按以下顺序取 Token，命中即停：
 
 | 优先级 | 来源 | 说明 |
 |---|---|---|
-| 1 | `--token-file` | 文件内容去掉首尾空白；全空白视为未提供（exit 2）；文件不存在 exit 2 |
+| 1 | `--token-file` | 文件内容去掉首尾空白；全空白 → 返回 None，serve 即 exit 2（不再下探其他来源）；文件不存在 exit 2 |
 | 2 | `--token` | 明文。会进 shell 历史与进程列表，仅临时调试用 |
 | 3 | 环境变量 `ATPROBE_MCP_TOKEN` | 去空白后为空则忽略，继续下探 |
 | 4 | 配置 `mcp.token_file` | 同优先级 1 的文件语义 |
