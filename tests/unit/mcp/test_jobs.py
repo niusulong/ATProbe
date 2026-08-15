@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from atprobe.domain.suite.collect import load_cases
 from atprobe.engine.config import EngineConfig
 from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 from atprobe.mcp.errors import McpError
-from atprobe.mcp.jobs import JobManager
+from atprobe.mcp.jobs import EVENT_BUFFER, JobManager
 
 MINIMAL_CASE = """\
 name: mini
@@ -24,15 +26,13 @@ steps:
 """
 
 
-def _make_cfg(tmp_path: Path, session: str = "jobtest") -> EngineConfig:
-    from atprobe.domain.suite.collect import load_cases
-
+def _make_cfg(tmp_path: Path, session: str = "jobtest", port: str = VSIM_PORT) -> EngineConfig:
     case_file = tmp_path / "mini.yaml"
     if not case_file.exists():
         case_file.write_text(MINIMAL_CASE, encoding="utf-8")
     collected = load_cases([case_file])
     return EngineConfig(
-        ports=(PortConfig(name=VSIM_PORT),),
+        ports=(PortConfig(name=port),),
         cases=collected.cases,
         session_id=session,
         log_dir=str(tmp_path / "logs"),
@@ -79,8 +79,6 @@ def test_busy_rejects_second_start(tmp_path, vsim_pm):
         (tmp_path / f"case{i:02d}.yaml").write_text(
             MINIMAL_CASE.replace("name: mini", f"name: mini{i:02d}"), encoding="utf-8"
         )
-    from atprobe.domain.suite.collect import load_cases
-
     files = sorted(tmp_path.glob("case*.yaml"))
     collected = load_cases(list(files))
 
@@ -148,8 +146,6 @@ def test_progress_events_recorded(tmp_path, vsim_pm):
         (tmp_path / f"p{i}.yaml").write_text(
             MINIMAL_CASE.replace("name: mini", f"name: p{i}"), encoding="utf-8"
         )
-    from atprobe.domain.suite.collect import load_cases
-
     collected = load_cases(sorted(tmp_path.glob("p?.yaml")))
     job_id = jobs.start(
         build_engine_cfg=lambda jid: EngineConfig(
@@ -165,3 +161,33 @@ def test_progress_events_recorded(tmp_path, vsim_pm):
     assert "case_start" in kinds
     assert "case_result" in kinds
     assert snap["summary"]["total"] == 3
+    # 事件缓冲上限契约：快照事件数不得超过 EVENT_BUFFER（当前 50）
+    assert len(snap["events"]) <= 50
+    assert EVENT_BUFFER == 50
+    # 事件 schema（Task 6 冻结前定名）：case 级事件统一 case_index 字段
+    for e in snap["events"]:
+        if e["event"] == "case_start":
+            assert "case_index" in e
+            assert "index" not in e
+        if e["event"] == "case_result":
+            assert "case_index" in e
+
+
+def test_port_open_failure_fails_job(tmp_path):
+    """全部端口打开失败 → result.error → job 置 failed（覆盖 failed 终态路径）.
+
+    用真 PortManager + 不存在的端口名：open 抛错且无任何端口连上 →
+    scheduler 语义（全部端口失败 = 启动错误）→ result.error 非空。
+    """
+    jobs = JobManager(report_root=tmp_path / "reports")
+    job_id = jobs.start(
+        build_engine_cfg=lambda jid: _make_cfg(
+            tmp_path, session=jid, port="COM_ATPROBE_NONEXISTENT_99"
+        ),
+        sender_factory=lambda: PortManager(),
+    )
+    snap = _wait_finished(jobs, job_id)
+    assert snap["status"] == "failed"
+    assert "error" in snap
+    assert "端口打开失败" in snap["error"]
+    assert jobs.running_job_id() is None

@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from atprobe.domain.report.models import ExecutionResult
 from atprobe.engine import Engine, EngineConfig
@@ -32,6 +32,8 @@ from atprobe.reporting.interfaces import ReportOutput
 _log = logging.getLogger("atprobe.mcp.jobs")
 
 EVENT_BUFFER = 50
+EVENT_CMD_TRUNCATE = 80  # step 事件 command 摘要截断长度
+EVENT_ERROR_TRUNCATE = 200  # 事件/日志 error 摘要截断长度
 DEFAULT_MAX_HISTORY = 100
 
 
@@ -80,12 +82,14 @@ class JobManager:
     def start(
         self,
         build_engine_cfg: Callable[[str], EngineConfig],
-        sender_factory: Callable[[], object],
+        sender_factory: Callable[[], ICommandSender],
     ) -> str:
         """启动作业并立即返回 job_id（job_id 即 session_id 即报告目录名）.
 
         工厂收到 job_id 并注入 EngineConfig.session_id；工厂抛出的异常
         （INVALID_INPUT 类，service 层抛）原样透传，不注册任何作业状态。
+        build_engine_cfg 在管理器锁内调用，不得回调本管理器方法
+        （Lock 不可重入）。
 
         Raises:
             McpError: BUSY——已有作业在执行（detail.job_id 为占用中的作业 id）。
@@ -103,12 +107,14 @@ class JobManager:
             self._evict_locked()
             # 引擎在此创建并注册（而非 _run 内）：start 返回即可 cancel，
             # 消除「引擎线程尚未跑到注册语句」窗口内 cancel 找不到引擎的竞态。
-            engine = Engine(sender_factory=cast(Callable[[], ICommandSender], sender_factory))
+            engine = Engine(sender_factory=sender_factory)
             self._engines[job_id] = engine
             threading.Thread(
                 target=self._run, args=(job, cfg, engine), name=f"mcp-job-{job_id}", daemon=True
             ).start()
-            return job_id
+        # 启动 info 日志（锁外）：线程已成功启动，total 取配置用例数
+        _log.info("job %s 启动：%d 用例", job_id, len(cfg.cases))
+        return job_id
 
     # ------------------------------------------------------------------
     # 取消
@@ -173,15 +179,18 @@ class JobManager:
     # 内部（引擎线程）
     # ------------------------------------------------------------------
     def _run(self, job: _Job, cfg: EngineConfig, engine: Engine) -> None:
-        """作业线程主体：阻塞跑引擎 → 渲染报告 → 置终态."""
+        """作业线程主体：阻塞跑引擎 → 渲染报告 → 置终态.
+
+        最外层 except Exception 为终态兜底：任何逃逸异常（渲染外的路径
+        缺陷等）都转为 failed 终态，保证 job 永不卡 running（对齐
+        scheduler.py 引擎主循环兜底的同类修复）。
+        """
         try:
             try:
                 result = engine.start(cfg, handler=lambda ev: self._record_event(job, ev))
             except Exception as exc:  # noqa: BLE001 - 引擎异常转 failed 终态，不逃逸线程
                 _log.exception("引擎执行异常 job=%s", job.id)
-                with self._lock:
-                    job.status = "failed"
-                    job.error = f"{type(exc).__name__}: {exc}"
+                self._fail(job, f"{type(exc).__name__}: {exc}")
                 return
             # 报告渲染（引擎线程内）：先于置终态，保证轮询方见非 running 时
             # report_path 已就绪；渲染失败仅记日志，不影响 job 状态。
@@ -201,9 +210,32 @@ class JobManager:
                         "interrupted": s.interrupted,
                         "pass_rate": round(s.pass_rate, 2),
                     }
+            # 终态 info 概览（锁外）：一条日志同时可见状态与关键数字
+            if result.error:
+                _log.info("job %s 失败：%s", job.id, result.error[:EVENT_ERROR_TRUNCATE])
+            else:
+                s = result.summary
+                _log.info(
+                    "job %s 完成：passed=%d failed=%d skipped=%d interrupted=%d",
+                    job.id,
+                    s.passed,
+                    s.failed,
+                    s.skipped,
+                    s.interrupted,
+                )
+        except Exception as exc:  # noqa: BLE001 - 终态兜底：逃逸异常转 failed，不卡 running
+            _log.exception("作业线程未捕获异常 job=%s", job.id)
+            self._fail(job, f"{type(exc).__name__}: {exc}")
         finally:
             with self._lock:
                 self._engines.pop(job.id, None)
+
+    def _fail(self, job: _Job, error: str) -> None:
+        """置 failed 终态并记 info 概览（摘要截断，详细堆栈走 exception 日志）."""
+        with self._lock:
+            job.status = "failed"
+            job.error = error
+        _log.info("job %s 失败：%s", job.id, error[:EVENT_ERROR_TRUNCATE])
 
     def _record_event(self, job: _Job, event: object) -> None:
         """引擎线程回调：CaseStart/CaseResult 更新进度，非 PASS 步骤记事件.
@@ -220,7 +252,7 @@ class JobManager:
                     {
                         "event": "case_start",
                         "case": event.case_name,
-                        "index": event.case_index,
+                        "case_index": event.case_index,
                         "total": event.total_cases,
                     }
                 )
@@ -230,11 +262,12 @@ class JobManager:
                 ev: dict[str, Any] = {
                     "event": "case_result",
                     "case": event.case_name,
+                    "case_index": event.case_index,
                     "status": event.status,
                     "duration_ms": round(event.duration_ms, 1),
                 }
                 if event.error_msg:
-                    ev["error"] = event.error_msg[:200]
+                    ev["error"] = event.error_msg[:EVENT_ERROR_TRUNCATE]
                 job.events.append(ev)
         elif isinstance(event, StepResultEvent) and event.status != "PASS":
             with self._lock:
@@ -245,8 +278,8 @@ class JobManager:
                         "phase": event.phase,
                         "step_index": event.step_index,
                         "status": event.status,
-                        "command": event.command[:80],
-                        "error": event.error_msg[:200],
+                        "command": event.command[:EVENT_CMD_TRUNCATE],
+                        "error": event.error_msg[:EVENT_ERROR_TRUNCATE],
                     }
                 )
 
