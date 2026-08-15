@@ -24,31 +24,55 @@ description: |
 ### 文件命名（4 段，全大写）
 
 ```
-<用例目录>/<功能块>/<功能块>-<指令>-<类型>-<变体>.yaml
+<用例目录>/<平台>/<功能块>/<功能块>-<指令>-<类型>-<变体>.yaml       ← 功能用例
+<用例目录>/regress/<平台>/<功能块>/<功能块>-<指令>-REGRESS-<BUGID>.yaml  ← 回归用例
 ```
 
 | 段 | 规则 | 示例 |
 |---|---|---|
 | `<功能块>` | 大写，对应指令文档章节功能名；**运行时从文档提取，不硬编码** | TCP / NTP / FTP |
 | `<指令>` | 被测指令名，**去掉 AT+ 前缀的裸名**，大写，单一指令 | TCPSEND / UPDATETIME |
-| `<类型>` | 4 字母代码，三选一：FUNC / RESP / PARA | FUNC |
-| `<变体>` | 大写、下划线分词，描述本用例的具体测试点 | NORMAL_SEND / OVER_LENGTH |
+| `<类型>` | FUNC / RESP / PARA（功能用例）或 REGRESS（回归用例） | FUNC |
+| `<变体>` | 大写、下划线分词，描述本用例的具体测试点；回归用例放 BUGID | NORMAL_SEND / BUG1234567890 |
+
+**目录层级**（按平台隔离，不同平台指令实现可能不同）：
+
+```
+testcases/
+  EC626/                    ← 平台目录（模组型号/芯片平台名，大写）
+    tcp/                    ← 功能块目录（与文件名功能块段一致）
+      TCP-TCPSEND-FUNC-NORMAL_SEND.yaml
+    ntp/
+  regress/                  ← 回归用例顶层（与平台平级，不混进平台功能结构）
+    EC626/                  ← 平台目录
+      http/                 ← 按功能块归类
+        HTTP-HTTPCON-REGRESS-BUG1234567890.yaml
+```
+
+> **为什么按平台分**：不同平台（如 EC616/N58/EC626）的 HTTP/MQTT 等指令实现可能完全不同
+> （指令名、响应格式、参数都不同），混在一个目录会冲突。`cases_dir` 递归扫描所有子目录，
+> 加平台层框架自动识别，无需改框架代码。
+> **回归用例为什么单独 `regress/`**：回归用例的归属是 bug 而非功能，与功能用例性质不同，
+> 目录层面分开便于回归集独立运行/筛选（`run regress/`）。
 
 示例：
 ```
-TCP-TCPSEND-FUNC-NORMAL_SEND.yaml       # 数据发送的正常业务路径
-TCP-XIIC-PARA-OVER_N.yaml               # XIIC 链路号越界 → CME 53
-TCP-RECVMODE-RESP-QUERY_FORMAT.yaml     # 查询响应字节格式
-TCP-CMDPARSE-FUNC-INVALID_NAME.yaml     # 功能块级：指令名拼错（CME 58）
+EC626/tcp/TCP-TCPSEND-FUNC-NORMAL_SEND.yaml              # 平台功能用例
+EC626/tcp/TCP-XIIC-PARA-OVER_N.yaml                      # XIIC 链路号越界 → CME 53
+regress/EC626/http/HTTP-HTTPCON-REGRESS-BUG1234567890.yaml  # IPv6 HTTPS 回归
 ```
 
-### 三个测试类型
+### 测试类型
 
-每个指令的用例分三类（权威定义见 `references/testcase-matrix.md`）：
+指令中心用例分三类（权威定义见 `references/testcase-matrix.md`）：
 
 - **RESP**（响应格式）——查询/测试指令的响应字节格式，断言用 `matches: '^...$'`
 - **FUNC**（功能验证）——正常业务路径 + 该指令自身的业务失败路径（如未建链）
 - **PARA**（参数与边界）——合法参数→OK、越界/错误参数→CME；变体名区分（`VALID_*`/`OVER_*`/`WRONG_FORMAT_*`）
+
+另有第四类，独立于指令矩阵：
+
+- **REGRESS**（缺陷回归）——验证某个已修复 bug 不再复现，**变体段放 BUGID**（如 `BUG1234567890`），不走 RESP/FUNC/PARA 矩阵。设计流程见 `references/regression-design.md`。
 
 ### 单一职责落地
 
@@ -166,6 +190,12 @@ steps:
 
 ## 工作流程（按顺序执行）
 
+> **先判断输入类型，走对应分支**：
+> - 目标是**全新平台/芯片**（`response-patterns.md` 无该平台小节、`testcases/<平台>/` 不存在） → **先读 `references/new-platform-onboarding.md`** 完成响应勘测 + 建 env + 定平台目录，再走下方主流程。新平台勿照搬其他固件规律。
+> - 用户提供 **bug 报告 / 缺陷现象日志**（含 BUGID、实测结果） → 这是回归用例，**跳到步骤 3'**（按缺陷生成回归用例），深度流程见 `references/regression-design.md`。
+> - 用户提供 **指令集文档**（要"生成某指令/某章节的用例"） → 走步骤 1→2→3→4（指令中心主流程）。
+> 三条分支共享步骤 2（env 对齐）与步骤 4（自查）。
+
 ### 1. 读指令集文档 + 确定功能块名 + 标注待澄清项
 
 读指令集文档（`docs/at-ref/chXX-*.md` 或用户指定的文档目录），做三件事：
@@ -196,11 +226,15 @@ steps:
 生成用例前，先对齐环境参数，确保用例里的服务器地址/端口/鉴权等用 `{{group.param}}` 引用而非硬编码。
 **详细流程见 `references/env-params.md`「参数对齐工作流」节**，核心是：
 
-1. 读 `references/env-params.md` 查本次功能块需要哪些 env 参数；读项目 env.yaml 掌握已有真实值。
+1. 读 `references/env-params.md` 查本次功能块需要哪些 env 参数；服务器地址/端口的默认值来源是
+   **本地文件 `references/server-cluster.local.md`**（不入库的项目测试集群清单，存在时
+   需要服务器信息**直接用其中默认值**，不必询问用户；不存在则用 env-params.md 占位值并把
+   服务器项列入待补充清单）。读项目 env.yaml 掌握已有真实值。
 2. 用例用 `{{group.param}}` 引用；缺失项按清单命名规则记入「待补充 env 项清单」。
-3. 生成结束时输出清单（只列缺失项，不覆盖已有值，不含真实值），供用户补到项目 env.yaml。
+3. 生成结束时输出清单（只列缺失项——主要是鉴权/设备类，不含真实值），供用户补到项目 env.yaml。
 
-> skill **不直接改写项目 env.yaml 的真实值**。env-params.md（占位清单）与项目 env.yaml（真实值）分离。
+> skill **不直接改写项目 env.yaml 的真实值**。env-params.md（占位清单）、server-cluster.local.md
+> （本地集群默认值）与项目 env.yaml（真实值）三层分离，后两者均不入库。
 
 ### 3. 按矩阵逐指令生成用例（严格断言 + 单一职责）
 
@@ -225,6 +259,20 @@ steps:
 
 完整 YAML schema、字段语义见 `references/yaml-schema.md`。涉及变量引用、条件执行、参数化、压测、套件时，按需读对应机制 reference（见文末「何时读 references」）。
 
+### 3'. 按缺陷生成回归用例（bug 报告输入走此分支）
+
+用户给出 bug 报告（含 BUGID、缺陷现象日志、实测结果）时，按以下流程生成回归用例。
+**完整流程、专项陷阱、问题报告模板见 `references/regression-design.md`（必读）**，此处为精炼版：
+
+1. **解构 bug 报告**：提取 BUGID、所属项目/功能块、缺陷现象日志（关键：触发指令 + 错误码）、发现版本、前置条件。
+2. **定位验证点**：区分这是"指令参数/格式问题"还是"业务功能问题"。后者（如 IPv6 连接缺陷）需完整业务前置链（注网/拨号/建链），复杂度高。
+3. **查文档定响应格式**：**从指令文档确认触发指令是同步（成功直接 OK）还是异步（OK+URC）**——这是断言依据，不可臆测，不可照搬其他项目规律。历史教训：误把同步指令当异步用 `wait_urc` → 等满 timeout 必然失败。
+4. **设计 setup（业务前置链）**：注网判断用 `AT+CEREG?`（`<stat>=1/5` 才算成功，`CGATT=1` 的 OK 仅受理）；地址查询（`CGPADDR`）宽松断言（地址格式由网络决定，可能是十进制点分字节，不严格校验）；setup 首步 `ATE0` 加 `retry` 兜底串口抖动。
+5. **设计断言（bug 反向断言）**：steps 只含触发指令，断言"修复后正确响应"+"bug 错误码不再出现"（`not_contains`）。缺陷报告里的复现步骤/参数**不能照搬**（如 PDP 类型 IPV4V6 vs IPV6 要按实测卡调整）。
+6. **命名 + teardown + 问题报告**：文件名 `<功能块>-<指令>-REGRESS-<BUGID>.yaml`（如 `HTTP-HTTPCON-REGRESS-BUG1234567890.yaml`）；teardown 必须双层资源清理（连接层 + 实例层，见陷阱节）；同步输出问题报告字段填充（前置条件/执行步骤/预期/实测）。
+
+> 回归用例的 env 引用同样走步骤 2（服务器地址等用 `{{group.param}}`，默认值来源 `references/server-cluster.local.md`）。
+
 ### 4. 自查用例完整性（交付前）
 
 生成完所有用例后，做两件事：
@@ -247,8 +295,32 @@ atprobe 未安装时自动降级为基础校验（YAML 语法 + 正则 + 文件�
 - **改设备状态的用例，setup 查了初始值且 teardown 用 `{{var}}` 恢复**（见「设备状态清洁」原则）
 
 > 本 skill 只负责**生成**用例，不负责运行。用例的运行与设备验证由用户后续用
-> `uv run python -m atprobe run <目录> --config <配置>` 执行——若运行时发现设备响应与文档不符，
-> 那正是测试要捕获的偏差，应回到文档确认断言正确性（而非反过来用设备改断言）。
+> `uv run python -m atprobe run <目录> --config <配置>` 执行。
+
+### 5. 上设备实测（文档为标准，实测偏差是测试发现）
+
+本 skill 只负责**生成**用例。用例上设备运行由用户用
+`uv run python -m atprobe run <用例/目录> --config <配置>` 执行。
+
+**核心原则：文档是唯一事实源，实测不符时不急着改用例。** 严格断言（`matches`）按文档写，
+设备实测若不符，**这恰恰是测试的价值——捕获了设备实现的偏差**，不要反过来用设备改断言。
+
+实测不符时的正确处理（按顺序）：
+1. **先确认断言写对了**：重读文档该指令的响应格式描述，确认断言与文档严格对应（空格数/换行/错误码数值）。
+2. **断言没错、设备不符 = 测试发现**：保留断言不动。这正是测试要捕获的——可能是：
+   - 设备固件 bug（实现与文档不一致）；
+   - 固件版本与文档版本不匹配；
+   - 设备状态/前置条件未真正满足（如以为无 PDP 实则有）。
+3. **记录为缺陷**：把实测偏差（实测响应原文 + 与文档的差异）记录为 bug 报告，后续可走步骤 3' 生成 REGRESS 回归用例。
+4. **不急着改断言迎合设备**：除非经厂商确认是文档勘误（文档本身写错），才据勘误修正断言。
+
+> 工具支持：框架在步骤**非 PASS 时自动打印原始响应**（`resp: <CR><LF>...`，`\r\n` 转义可见），
+> 无需开 debug 级，便于直接对照文档看偏差在哪。PASS 步骤的响应只在 debug 级（`--log-level debug`）显示。
+
+**何时用宽松断言（`contains`/`not_contains`）vs 严格断言（`matches`）**：
+- 文档明确给出确切码值/格式 → 严格 `matches`（最大化捕获设备偏差）。
+- 文档只写「ERROR」/「失败」未给具体码值 → 宽松 `contains: "ERROR"`（文档本身未精确到码值，不强求）。
+- 测试前提未满足的路径（如无卡设备跑需 SIM 的用例）属预期不符，不算缺陷。
 
 ## 关键陷阱（已踩过，务必避免）
 
@@ -307,6 +379,39 @@ steps:
 - **纯被动 URC**（无指令前导，如平台主动下行的 `+CTM2MRECV`）本机制不直接支持——它依赖
   「前面发了指令并收到 OK」的前提。测纯被动 URC 需另设计 URC 监听用例类型。
 
+### 同步指令陷阱（误用 wait_urc 必然超时）
+
+与异步指令陷阱相反——**同步指令成功直接返回 OK，没有后续 URC**。若误加 `wait_urc`，框架遇 OK 不终结，
+死等一个永远不存在的 URC，等满 timeout 后步骤判失败。
+
+**判据**：看文档该指令的响应描述——若成功响应就是 `OK`（或带结果码的单段响应），无「主动上报」/
+「OK 后跟 URC」描述，即为同步指令。**同步指令绝不能加 `wait_urc`**，用普通 `assert: { matches: '^\r\nOK\r\n$' }` 即可。
+
+历史教训：`AT+HTTPCON` 文档明确「成功返回 OK」，误当异步加 `wait_urc: '\+HTTPCON: \d+'` → 等满 30s 超时失败。
+同类风险指令：HTTP 系列、TCPSETUP（注意 TCPSETUP 是异步，HTTPCON 是同步，仅差一字，必须逐条查文档）。
+
+### 双层资源清理陷阱（teardown 残留会连锁污染后续用例）
+
+带实例/连接语义的协议（HTTP/MQTT/FTP 等）资源分**两层**：连接层（HTTPCLOSE/MQTTDISCONNECT）和实例层
+（HTTPDESTROY/MQTTDESTROY）。teardown **只关连接不销毁实例** → 实例对象残留 → 下个用例 `HTTPCREATE`
+复用同实例号时冲突失败（现象：5s 无响应）。多用例共享同一设备时，一个用例清理不完整会**连锁污染**后续用例。
+
+**对策**：这类用例 teardown 一律**先关连接再销毁实例**，两条都加 `on_failure: continue`（连接未建立时关闭指令可能报错，属正常，跳过继续清理）：
+
+```yaml
+teardown:
+  - command: AT+HTTPCLOSE=0        # 连接层
+    timeout: 3
+    on_failure: continue
+  - command: AT+HTTPDESTROY=0      # 实例层
+    timeout: 6
+    on_failure: continue
+  # ...其余清理
+```
+
+诊断线索：若某用例 setup 的创建指令（HTTPCREATE/MQTTOPEN 等）5s 无响应而前后用例正常，优先排查上一用例
+teardown 是否漏销毁实例。
+
 ### suite 文件的两种运行方式
 
 `suite-<功能块>.yaml` 有两种运行方式，不要混淆：
@@ -352,7 +457,10 @@ teardown:
 
 写用例时按当前需要读对应机制说明，不必一次全读：
 
+- `references/new-platform-onboarding.md` —— **新平台/芯片从零起步必读**（全新模组先勘测响应规律、建 env、定目录、走主流程的 5 步；勘测产物清单）
 - `references/testcase-matrix.md` —— **第 1、3 步必读**（每指令必备用例清单矩阵 + 三类型定义 + 自查清单）
+- `references/regression-design.md` —— **步骤 3'（bug 回归）必读**（回归用例 7 步设计流程 + 专项陷阱 + 问题报告模板）
+- `references/response-patterns.md` —— **写严格断言时查**（通用响应骨架 + 各平台实测速查：数据行空格/业务码/CME码/同步异步；新平台勘测结果沉淀处）
 - `references/env-params.md` —— **第 2 步必读**（全指令集 env 参数清单 + env.yaml 模板，env 参数对齐用）
 - `references/yaml-schema.md` —— **字段速查**（顶层 Case/Step 字段 + 断言操作符表 + extract/data 规则 + 严格字节级示例）
 - `references/variables.md` —— 用到**变量**时读（`{{var}}` 引用 / extract 提取 / 作用域 / 内置变量 / 跨端口共享 / env 点号引用）

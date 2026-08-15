@@ -2,12 +2,13 @@
 
 测试用例里所有"会随环境变化"的参数（服务器地址/端口/域名/鉴权/平台 ID 等）必须用
 `{{group.param}}` 引用环境配置，**禁止硬编码**。本文件是这些参数的**权威清单**——按业务分组
-列出每个功能块需要哪些 env 参数、字段语义、占位值，供生成用例时查表。
+列出每个功能块需要哪些 env 参数、字段语义、默认值，供生成用例时查表。
 
-> **本文件是「清单/模板」，不含真实值。** 真实地址/密钥/端口在**项目自己的 env.yaml**
-> （由配置文件 `env_config` 指向）。这里只有占位值（example.com / 192.168.x.x / 占位 ID）。
-> 生成用例时，从项目 env.yaml 取真实值；缺项则按本清单命名规则新增（见 SKILL.md
-> 「env 参数对齐」工作流）。
+> **服务器地址/端口的默认值来源是本地文件** `references/server-cluster.local.md`（不入库，
+> 记录项目测试服务器集群真实地址）。该文件存在时，需要服务器信息**直接用其中默认值**，不必询问
+> 用户；不存在时用下方占位值，并把服务器项列入待补充清单。仅鉴权（password/secret）、设备信息
+> （imei 等）等卡/设备相关参数始终是 `<占位>`，需从项目 env.yaml 取真实值。生成后可用
+> `scripts/validate-cases.py --env <env.yaml>` 一键校验 env 引用是否存在。
 
 ## 通用约定
 
@@ -18,6 +19,23 @@
 - 章节号对应指令集文档（`docs/at-ref/chXX-*.md` 或目标工作区的等价文档目录，以实际为准）。
 - **本 skill 自带 env.yaml 模板**：`assets/env.yaml.example`（全占位值）。目标工作区无 env.yaml 时，
   复制它到工作区的 env 配置路径（配置 `env_config` 指向），替换占位值为真实值即可。
+- **默认值来源**：本文件及 `assets/env.yaml.example` 只含占位值（example.com / 192.168.x.x / 2001:db8::1）。
+  真实测试服务器地址/端口记录在**本地文件** `references/server-cluster.local.md`（已 gitignore，不入库），
+  生成用例如需服务器信息，优先读该文件取默认值；无该文件则用占位值并把服务器项列入待补充清单。
+
+---
+
+## 默认值来源：server-cluster.local.md（本地文件，不入库）
+
+> **本文件与 `assets/env.yaml.example` 不含任何真实服务器地址**（版本库可公开）。
+> 项目测试服务器集群的真实地址、端口映射、NAT64 拓扑、IPv6 URL 拼接规则、回归 URL 速查，
+> 全部记录在 `references/server-cluster.local.md`——该文件已加入 `.gitignore`，是公司资产，
+> 严禁提交。生成用例需要服务器信息时：**存在该文件 → 直接用其中的默认值，不必询问用户；
+> 不存在 → 用占位值，服务器项记入「待补充 env 项清单」交用户补值。**
+
+**IPv6 URL 拼接规则**（通用规则，与具体地址无关）：IPv6 地址在 URL 中**必须用方括号 `[...]` 包裹**，
+例如 `http://[2001:db8::1]:8080`。模组 `HTTPCREATE`/`TCPSETUP` 等指令的 URL/host 参数同样遵循
+此规则。直接拼接 `http://<v6>:port`（无方括号）会被部分解析器误判，应避免。
 
 ---
 
@@ -80,6 +98,7 @@
 |---|---|---|---|
 | `host` | 测试服务器 IP/域名（`AT+TCPSETUP` / `AT+UDPSETUP`） | ch06 §6.3/§6.9, ch08 | `192.168.1.100` |
 | `port` | 服务器端口 | ch06 §6.3/§6.9, ch08 | `'8080'` |
+| `host_ipv6` | IPv6 测试服务器（有 NAT64/IPv6 环境时填，回归 IPv6 用例用） | 本地集群清单 | `[2001:db8::1]` |
 
 ### `tcp_server` — 模组做 TCP/UDP 服务器
 
@@ -94,12 +113,13 @@
 | 字段 | 语义 | 出处 | 占位值 |
 |---|---|---|---|
 | `host` | SSL TCP 服务器（`AT+SSLTCPSETUP`） | ch14 §14.2 | `192.168.1.100` |
-| `port` | 端口（常见 4451） | ch14 §14.2 | `'4451'` |
-| `sslversion` | 0SSL3.0/1TLS1.0/2TLS1.1/3TLS1.2 | ch14 §14.1 | `'3'` |
+| `port` | 端口（单向/双向、直连/代理、TLS 版本组合见本地集群清单） | ch14 §14.2, 本地集群清单 | `'4451'`（单向直连） |
+| `sslversion` | 0SSL3.0/1TLS1.0/2TLS1.1/3TLS1.2/4TLS1.3 | ch14 §14.1 | `'3'` |
 | `authmode` | 0不认证/1认证服务器/2双向 | ch14 §14.1 | `'0'` |
 | `cacert` | CA 根证书文件名（authmode≠0 需要） | ch14 §14.1 | `ca.pem` |
 | `client_cert` | 客户端证书文件名（双向认证） | ch14 §14.1 | `cc.pem` |
 | `client_key` | 客户端密钥文件名（双向认证） | ch14 §14.1 | `ck.pem` |
+| `host_ipv6` | IPv6 SSL TCP 服务器（IPv6 回归用例） | 本地集群清单 | `[2001:db8::1]` |
 
 ---
 
@@ -107,14 +127,22 @@
 
 ### `http` — HTTP / HTTPS
 
+> HTTP/HTTPS 回归用例（IPv6 连接类缺陷）的 URL 一律用 `ipv6_url`/`ipv4_url`/`https_ipv6_url`/
+> `https_ipv4_url` 四个完整 URL 字段（已含协议+地址+端口，可直接拼进 `HTTPCREATE`），不要拆成
+> host+port。值取自本地集群清单（`server-cluster.local.md`）。
+
 | 字段 | 语义 | 出处 | 占位值 |
 |---|---|---|---|
 | `host` | HTTP 服务器地址 | ch11 §11.1 | `192.168.1.200` |
-| `port` | 端口（默认 80） | ch11 §11.1 | `'8080'` |
+| `port` | 端口 | ch11 §11.1 | `'8080'` |
 | `url` | 完整 URL（`AT+HTTPPARA=url`，最长 2048，含域名） | ch11 §11.1 | `192.168.1.200/api/test` |
-| `base_url` | 基础路径（拼 url 用） | ch11 §11.1 | `/api` |
-| `https_url` | HTTPS 路径（`AT+HTTPSPARA=url`） | ch11 §11.11 | `example.com/secure/api` |
-| `https_port` | HTTPS 端口（一般 443） | ch11 §11.11 | `'443'` |
+| `base_url` | 基础路径（拼 url 用） | ch11 §11.1 | `/` |
+| `ipv6_url` | **IPv6 HTTP 完整 URL**（`HTTPCREATE` 用，方括号包裹 IPv6 地址） | ch11, 本地集群清单 | `http://[2001:db8::1]:8080` |
+| `ipv4_url` | IPv4 HTTP 完整 URL（对照组） | ch11, 本地集群清单 | `http://192.168.1.200:8080` |
+| `https_ipv6_url` | **IPv6 HTTPS 完整 URL**（单向，`HTTPCREATE` 用） | ch11 §11.11, 本地集群清单 | `https://[2001:db8::1]:443` |
+| `https_ipv4_url` | IPv4 HTTPS 完整 URL（单向，对照组） | ch11 §11.11, 本地集群清单 | `https://192.168.1.200:443` |
+| `https_url` | HTTPS 路径（`AT+HTTPSPARA=url`，老式参数接口） | ch11 §11.11 | `192.168.1.200:443` |
+| `https_port` | HTTPS 端口 | ch11 §11.11 | `'443'` |
 | `cacert` | HTTPS CA 证书文件名（authmode≠0） | ch11 §11.10 | `ca.pem` |
 
 ### `ftp` — FTP / FTPS
@@ -122,7 +150,7 @@
 | 字段 | 语义 | 出处 | 占位值 |
 |---|---|---|---|
 | `host` | FTP 服务器（`AT+FTPLOGIN`） | ch10 §10.2 | `192.168.1.100` |
-| `port` | 端口（一般 21） | ch10 §10.2 | `'21'` |
+| `port` | 端口（FTP/FTPS 显式/隐式、单向/双向、直连/代理组合见本地集群清单） | ch10 §10.2, 本地集群清单 | `'21'`（FTP 明文） |
 | `user` | 用户名（最长 100） | ch10 §10.2 | `testuser` |
 | `password` | 密码（最长 100） | ch10 §10.2 | `<占位password>` |
 | `path` | 服务器目录 | ch10 §10.4 | `/firmware` |
@@ -280,8 +308,9 @@ dns:
   query_domain: example.com
 
 tcp:
-  host: 192.168.1.100
+  host: 192.168.1.100          # 测试服务器 IP/域名
   port: '8080'
+  host_ipv6: '[2001:db8::1]'
 
 tcp_server:
   listen_port: '6800'
@@ -290,25 +319,31 @@ tcp_server:
 
 ssl:
   host: 192.168.1.100
-  port: '4451'
+  port: '4451'                 # 单向/双向、直连/代理、TLS 版本组合见本地集群清单
   sslversion: '3'
   authmode: '0'
   cacert: ca.pem
   client_cert: cc.pem
   client_key: ck.pem
+  host_ipv6: '[2001:db8::1]'
 
 http:
   host: 192.168.1.200
   port: '8080'
   url: 192.168.1.200/api/test
-  base_url: /api
-  https_url: example.com/secure/api
+  base_url: /
+  # IPv6/IPv4 完整 URL（HTTPCREATE 直接用，IPv6 地址必须方括号包裹）—— IPv6 回归用例必备
+  ipv6_url: 'http://[2001:db8::1]:8080'
+  ipv4_url: 'http://192.168.1.200:8080'
+  https_ipv6_url: 'https://[2001:db8::1]:443'
+  https_ipv4_url: 'https://192.168.1.200:443'
+  https_url: 192.168.1.200:443
   https_port: '443'
   cacert: ca.pem
 
 ftp:
   host: 192.168.1.100
-  port: '21'
+  port: '21'                   # FTP/FTPS 各组合端口见本地集群清单
   user: testuser
   password: '<占位password>'
   path: /firmware

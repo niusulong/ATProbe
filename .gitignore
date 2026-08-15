@@ -138,3 +138,10 @@ packaging/build.log
 # 本地自用 skills（pdf / skill-creator），与本项目无关，不入库
 .agents/skills/pdf/
 .agents/skills/skill-creator/
+
+# skill 本地敏感参考：公司测试服务器集群真实地址（入库版只含占位值）
+.agents/skills/atprobe-case-author/references/server-cluster.local.md
+
+# 厂商 AT 指令手册 PDF 与真实设备 COM5 配置（含 IMEI/固件串），本地文件不入库
+/neoway_n58_at命令手册_v2.0_20241203.pdf
+examples/atprobe-com5.yaml

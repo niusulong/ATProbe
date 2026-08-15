@@ -60,6 +60,10 @@ TCP-TCPSEND-FUNC-LENGTH_OVER.yaml       # 长度超限 → +TCPSEND: DATA LENGTH
 
 测模组指令识别机制（如指令名拼错 → CME 58）这类不专属某指令的用例，用特殊指令段 `CMDPARSE`，每功能块最多一个文件：`<功能块>-CMDPARSE-FUNC-INVALID_NAME.yaml`。
 
+## 回归用例（REGRESS）不在本矩阵范围
+
+本矩阵是「指令形态 × 必备模板」，服务于"一条指令的全形态覆盖"。**bug 回归用例（REGRESS 类型）不走本矩阵**——它的设计起点是 bug 报告而非指令形态，每 bug 只产 1 个核心用例，变体段放 BUGID。回归用例设计流程见 `regression-design.md`。
+
 ## 自查清单
 
 为一条新指令写完用例后，按此自查防遗漏：

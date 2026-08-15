@@ -6,7 +6,11 @@
   2. 正则编译校验（extract / assert.matches / wait_urc 的正则都能编译）
   3. env 引用存在性（{{group.param}} 在指定 env.yaml 中有定义）
   4. 文件名四段规范（<功能块>-<指令>-<类型>-<变体>.yaml，全大写）
-  5. tags 前三段规范（[功能块, 指令, 类型]）
+  5. 条件表达式语法（when / poll.until 能被 evaluator 解析，含括号分组）
+
+并对所有 suite-*.yaml 套件文件做：
+  6. 套件解析（复用 parse_suite_file）
+  7. 引用用例文件存在性（cases 列表里的相对路径文件确实存在）
 
 用法（在任意工作区，用相对/绝对路径指向本脚本）：
   uv run python <skill所在>/scripts/validate-cases.py <用例目录> [--env <env.yaml>]
@@ -34,6 +38,8 @@ from pathlib import Path
 try:
     from atprobe.domain.case.parser import CaseParseError, parse_case
     from atprobe.domain.case.templater import find_references
+    from atprobe.domain.case.evaluator import ExpressionError, evaluate
+    from atprobe.domain.suite import SuiteParseError, parse_suite_file
     from atprobe.infra.config.envconfig import EnvConfig, load_env_config_file
 
     _HAS_ATPROBE = True
@@ -42,14 +48,19 @@ except ImportError:
     CaseParseError = None  # type: ignore[assignment,misc]
     parse_case = None  # type: ignore[assignment]
     find_references = None  # type: ignore[assignment]
+    ExpressionError = None  # type: ignore[assignment,misc]
+    evaluate = None  # type: ignore[assignment]
+    SuiteParseError = None  # type: ignore[assignment,misc]
+    parse_suite_file = None  # type: ignore[assignment]
     EnvConfig = None  # type: ignore[assignment,misc]
     load_env_config_file = None  # type: ignore[assignment]
 
 
 # 文件名四段规范：<功能块>-<指令>-<类型>-<变体>.yaml，全大写字母/数字/下划线
-_FILENAME_RE = re.compile(r"^([A-Z][A-Z0-9_]*)-([A-Z][A-Z0-9_]*)-(FUNC|RESP|PARA)-([A-Z][A-Z0-9_]*)\.yaml$")
+# 类型段：FUNC/RESP/PARA（指令中心用例）或 REGRESS（bug 回归用例，变体段放 BUGID）
+_FILENAME_RE = re.compile(r"^([A-Z][A-Z0-9_]*)-([A-Z][A-Z0-9_]*)-(FUNC|RESP|PARA|REGRESS)-([A-Z][A-Z0-9_]*)\.yaml$")
 # 合法类型
-_VALID_TYPES = {"FUNC", "RESP", "PARA"}
+_VALID_TYPES = {"FUNC", "RESP", "PARA", "REGRESS"}
 
 
 def _check_filename(path: Path, block_name: str | None) -> list[str]:
@@ -58,12 +69,12 @@ def _check_filename(path: Path, block_name: str | None) -> list[str]:
     m = _FILENAME_RE.match(path.name)
     if not m:
         errs.append(
-            f"文件名不符四段规范 <功能块>-<指令>-<类型>-<变体>.yaml（全大写，类型 FUNC/RESP/PARA）: {path.name}"
+            f"文件名不符四段规范 <功能块>-<指令>-<类型>-<变体>.yaml（全大写，类型 FUNC/RESP/PARA/REGRESS）: {path.name}"
         )
         return errs
     fb, _cmd, typ, _var = m.group(1), m.group(2), m.group(3), m.group(4)
     if typ not in _VALID_TYPES:
-        errs.append(f"类型段非法 '{typ}'，应为 FUNC/RESP/PARA 之一")
+        errs.append(f"类型段非法 '{typ}'，应为 FUNC/RESP/PARA/REGRESS 之一")
     # 若目录名是功能块大写，比对文件名第一段是否一致
     if block_name and fb != block_name:
         errs.append(f"文件名功能块段 '{fb}' 与所在目录名 '{block_name}' 不一致")
@@ -99,6 +110,33 @@ def _check_regexes(case) -> list[str]:
             re.compile(pat)
         except re.error as exc:
             errs.append(f"正则编译失败 [{src}]: {pat!r} → {exc}")
+    return errs
+
+
+def _check_condition_exprs(case) -> list[str]:
+    """校验 when / poll.until 条件表达式语法（能被 evaluator 解析）。
+
+    用空作用域求值：语法错误（缺运算符、括号不闭合等）会被 evaluator 拒绝；
+    语义判定（变量未定义→null）不影响解析校验。
+    """
+    errs: list[str] = []
+    for phase_name, steps in (("setup", case.setup), ("steps", case.steps), ("teardown", case.teardown or ())):
+        for i, step in enumerate(steps):
+            prefix = f"{phase_name}[{i}]"
+            exprs: list[tuple[str, str]] = []
+            if step.when:
+                exprs.append((f"{prefix} when", step.when))
+            if step.poll:
+                exprs.append((f"{prefix} poll.until", step.poll.until))
+            for src, expr in exprs:
+                try:
+                    evaluate(expr, {})
+                except ExpressionError as exc:
+                    errs.append(f"条件表达式语法错误 [{src}]: {expr!r} → {exc}")
+                except Exception:
+                    # 旧写法 {{var}} 在空作用域求值会因变量未定义抛错（引用错，非语法错），跳过。
+                    # 新用例 when/poll.until 用裸名，未定义→null 不影响解析校验。
+                    pass
     return errs
 
 
@@ -151,10 +189,31 @@ def validate_file(path: Path, env: EnvConfig | None, block_name: str | None) -> 
     errs.extend(_check_filename(path, block_name))
     # 3. 正则编译
     errs.extend(_check_regexes(case))
-    # 4. env 引用
+    # 4. 条件表达式语法（when / poll.until）
+    errs.extend(_check_condition_exprs(case))
+    # 5. env 引用
     env_errs, env_missing = _check_env_refs(case, env)
     errs.extend(env_errs)
     return errs, env_missing
+
+
+def validate_suite(path: Path) -> list[str]:
+    """验证单个套件文件。返回 errors。
+
+    检查：套件能解析；cases 列表里的相对路径文件确实存在（相对套件文件所在目录）。
+    """
+    errs: list[str] = []
+    try:
+        suite = parse_suite_file(path)
+    except SuiteParseError as exc:
+        errs.append(f"套件解析失败: {exc}")
+        return errs
+    # 引用用例文件存在性（相对套件文件所在目录，与 CLI run.py 解析逻辑一致）
+    for crel in suite.cases:
+        cpath = (path.parent / crel).resolve()
+        if not cpath.is_file():
+            errs.append(f"套件引用的用例文件不存在: {crel}（相对套件目录 {path.parent}）")
+    return errs
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +352,9 @@ def main() -> int:
                 print(f"警告：env 加载失败，跳过 env 引用校验: {exc}", file=sys.stderr)
 
     yaml_files = sorted(p for p in case_dir.rglob("*.yaml") if not p.name.startswith("suite-"))
-    if not yaml_files:
-        print(f"未找到用例文件（{case_dir} 下无 *.yaml 或全是 suite- 前缀）", file=sys.stderr)
+    suite_files = sorted(p for p in case_dir.rglob("*.yaml") if p.name.startswith("suite-"))
+    if not yaml_files and not suite_files:
+        print(f"未找到用例文件（{case_dir} 下无 *.yaml）", file=sys.stderr)
         return 2
 
     total_errs = 0
@@ -319,6 +379,21 @@ def main() -> int:
         if missing:
             all_missing[str(path)] = missing
 
+    # 套件文件校验（解析 + 引用文件存在性）
+    total_suites = 0
+    for path in suite_files:
+        total_suites += 1
+        errs = validate_suite(path)
+        if errs:
+            total_errs += len(errs)
+            try:
+                rel = path.relative_to(Path.cwd())
+            except ValueError:
+                rel = path
+            print(f"\n✗ {rel}")
+            for e in errs:
+                print(f"    - {e}")
+
     # 汇总 env 缺失项（跨文件去重）
     if all_missing:
         seen: set[str] = set()
@@ -334,11 +409,12 @@ def main() -> int:
 
     print(f"\n{'=' * 40}")
     if total_errs == 0:
-        print(f"✓ 全部通过: {total_files} 个用例文件校验无误")
+        suite_note = f"，{total_suites} 个套件文件" if total_suites else ""
+        print(f"✓ 全部通过: {total_files} 个用例文件{suite_note}校验无误")
         if all_missing:
             print(f"  （{len(all_missing)} 个文件有 env 待补充项，见上）")
         return 0
-    print(f"✗ 失败: {total_errs} 个错误，涉及用例文件见上（共扫描 {total_files} 个）")
+    print(f"✗ 失败: {total_errs} 个错误，涉及文件见上（共扫描 {total_files} 个用例 + {total_suites} 个套件）")
     return 1
 
 

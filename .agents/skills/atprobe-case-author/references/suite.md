@@ -55,22 +55,22 @@ suite_setup → [用例setup → 用例steps → 用例teardown]×N → suite_te
 
 **用例 name 字段**：支持中文，报告/日志展示用。建议格式 `{功能点}-{测试场景}`，如 `网络注册-基础验证`。
 
-**目录结构**：按功能块组织，每个功能块一个目录，套件与用例就近放一起：
+**目录结构**：按平台 → 功能块组织，套件与用例就近放一起；回归用例独立 `regress/` 顶层：
 
 ```
 testcases/
-├── TCP/                            # TCP 功能块
-│   ├── suite-TCP.yaml              # 该功能的套件
-│   ├── TCP-TCPSEND-FUNC-NORMAL_SEND.yaml
-│   ├── TCP-TCPSEND-FUNC-NOLINK.yaml
-│   └── TCP-RECVMODE-RESP-QUERY_FORMAT.yaml
-├── NETWORK/                        # 网络注册功能块
-│   ├── suite-NETWORK.yaml
-│   ├── NETWORK-CEREG-RESP-QUERY_FORMAT.yaml
-│   └── NETWORK-CGACT-FUNC-ACTIVATE.yaml
-└── STRESS/                         # 压测功能块
-    ├── suite-STRESS.yaml
-    └── STRESS-AT-PRESSURE-LOOP_AT.yaml
+├── EC626/                          # 平台目录（模组型号/芯片平台名）
+│   ├── TCP/                        # TCP 功能块
+│   │   ├── suite-TCP.yaml          # 该功能的套件
+│   │   ├── TCP-TCPSEND-FUNC-NORMAL_SEND.yaml
+│   │   └── TCP-RECVMODE-RESP-QUERY_FORMAT.yaml
+│   └── NETWORK/                    # 网络注册功能块
+│       ├── suite-NETWORK.yaml
+│       └── NETWORK-CEREG-RESP-QUERY_FORMAT.yaml
+└── regress/                        # 回归用例顶层（与平台平级）
+    └── EC626/                      # 平台目录
+        └── http/                   # 按功能块归类
+            └── HTTP-HTTPCON-REGRESS-BUG1234567890.yaml
 ```
 
 - 套件中引用用例用同目录相对路径。
