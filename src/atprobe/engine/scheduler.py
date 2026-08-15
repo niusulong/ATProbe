@@ -199,7 +199,7 @@ class Engine:
                     break
 
             if not suite_setup_failed:
-                # P1 修复（参数化下沉引擎入口）：GUI 路径绕过 CLI 的 _expand_parameters
+                # P1 修复（参数化下沉引擎入口）：GUI 路径绕过收集层（domain/suite/collect）
                 # 直接传原始 Case，旧实现 scheduler 只取 parameters[0]，多行参数静默
                 # 丢弃（只跑第一行）。在引擎入口统一展开：多行 parameters 展开为带
                 # param_index 的独立实例；CLI 已展开的单行实例（param_index 已置）

@@ -13,9 +13,9 @@ from pathlib import Path
 
 import typer
 
-from atprobe.domain.case.models import Case, Step
-from atprobe.domain.case.parser import CaseParseError, parse_case_file
-from atprobe.domain.suite import SuiteParseError, parse_suite_file
+from atprobe.domain.case.parser import CaseParseError
+from atprobe.domain.suite import SuiteParseError
+from atprobe.domain.suite.collect import collect_case_paths, filter_by_tags, load_cases
 from atprobe.engine import Engine, EngineConfig
 from atprobe.engine.config import StopMode
 from atprobe.engine.interfaces import (
@@ -24,7 +24,7 @@ from atprobe.engine.interfaces import (
     PressureProgressEvent,
     StepResultEvent,
 )
-from atprobe.infra.config.appconfig import AppConfig, load_app_config_file, parse_port_expr
+from atprobe.infra.config.appconfig import load_app_config_file, parse_port_expr
 from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
@@ -139,54 +139,30 @@ def run(
         if baud is not None:
             ports = [_replace(p, baudrate=baud) for p in ports]
 
-    # 3. 加载用例（展开目录）
-    case_paths = _resolve_case_paths(paths, app_cfg)
+    # 3. 加载用例（展开目录）——共享收集逻辑（domain/suite/collect，MCP 复用）
+    case_paths, path_warnings = collect_case_paths(paths, resolve_workspace_path(app_cfg.cases_dir))
+    for w in path_warnings:
+        typer.secho(f"警告：{w}", fg=typer.colors.YELLOW, err=True)
     if not case_paths:
         typer.secho("错误：未找到任何用例文件", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
 
-    # 套件文件识别：suite- 前缀的单文件走套件执行路径（REQ-M2 §12）
-    suite_files = [p for p in case_paths if p.name.startswith("suite-")]
-    case_files = [p for p in case_paths if not p.name.startswith("suite-")]
-
-    cases: list[Case] = []
-    suite_setups: list[Step] = []
-    suite_teardowns: list[Step] = []
-    # 套件：解析 suite，按 cases 列表载入用例（相对套件文件所在目录）
-    for sf in suite_files:
-        try:
-            suite = parse_suite_file(sf)
-        except SuiteParseError as exc:
-            typer.secho(f"套件解析失败：{exc}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(2) from exc
-        suite_setups.extend(suite.suite_setup)
-        suite_teardowns.extend(suite.suite_teardown)
-        for crel in suite.cases:
-            cpath = (sf.parent / crel).resolve()
-            try:
-                parsed = parse_case_file(cpath)
-            except CaseParseError as exc:
-                typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
-                raise typer.Exit(2) from exc
-            cases.extend(_expand_parameters(parsed))
-
-    # 普通用例文件
-    for cp in case_files:
-        try:
-            parsed = parse_case_file(cp)
-        except CaseParseError as exc:
-            typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(2) from exc
-        cases.extend(_expand_parameters(parsed))
+    # 套件文件识别（suite- 前缀）与解析在 load_cases 内完成；错误文案按异常
+    # 类型区分，与抽取前的 CLI 输出保持一致
+    try:
+        collected = load_cases(case_paths)
+    except SuiteParseError as exc:
+        typer.secho(f"套件解析失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except CaseParseError as exc:
+        typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    cases = collected.cases
+    suite_setups = collected.suite_setup
+    suite_teardowns = collected.suite_teardown
 
     # 4. 标签过滤（§3.4：多 --tag 并集；--exclude-tag 排除）
-    if tag or exclude_tag:
-        cases = [
-            c
-            for c in cases
-            if (not tag or any(t in c.tags for t in tag))
-            and not any(t in c.tags for t in exclude_tag)
-        ]
+    cases = filter_by_tags(cases, tag, exclude_tag)
     if not cases:
         typer.secho("过滤后无可用用例", fg=typer.colors.YELLOW)
         raise typer.Exit(1)
@@ -315,35 +291,6 @@ def run(
     raise typer.Exit(0)
 
 
-def _resolve_case_paths(paths: list[Path], app_cfg: AppConfig) -> list[Path]:
-    """展开位置参数为用例文件列表（目录递归，排除套件文件避免重复）."""
-    if not paths:
-        # 无位置参数时用配置的 cases_dir，锚定到工作区
-        paths = [resolve_workspace_path(app_cfg.cases_dir)]
-    result: list[Path] = []
-    seen: set[Path] = set()
-    for p in paths:
-        if p.is_dir():
-            # 同时覆盖 .yaml 与 .yml 两种后缀，与单文件分支接受的后缀保持一致
-            # （否则目录下的 .yml 用例与 suite-*.yml 会被静默漏扫）
-            for f in sorted(
-                [*p.rglob("*.yaml"), *p.rglob("*.yml")],
-                key=lambda x: str(x),
-            ):
-                if f.name.startswith("suite-"):
-                    continue
-                if f.resolve() not in seen:
-                    seen.add(f.resolve())
-                    result.append(f)
-        elif p.is_file() and p.suffix in (".yaml", ".yml"):
-            if p.resolve() not in seen:
-                seen.add(p.resolve())
-                result.append(p)
-        else:
-            typer.secho(f"警告：路径不存在 {p}", fg=typer.colors.YELLOW, err=True)
-    return result
-
-
 def _check_ports_available(ports: list[PortConfig]) -> None:
     """dry-run 端口可用性检查：列出实际可枚举端口，提示哪些请求端口不存在/被占用（REQ-M5 §3.2）."""
     try:
@@ -364,17 +311,3 @@ def _check_ports_available(ports: list[PortConfig]) -> None:
         )
     else:
         typer.secho(f"端口可用性检查：通过（可用端口：{', '.join(sorted(available))}）")
-
-
-def _expand_parameters(case: Case) -> list[Case]:
-    """参数化展开：把 parameters 矩阵的每行展开为独立 Case 实例（REQ-M2 §10.2）.
-
-    每个实例的 parameters 缩为单行，并带 param_index 序号（1-based）。
-    非参数化用例（parameters 为空）返回单元素列表（原样）。
-    """
-    if not case.parameters:
-        return [case]
-    instances: list[Case] = []
-    for idx, row in enumerate(case.parameters, start=1):
-        instances.append(case.model_copy(update={"parameters": (row,), "param_index": idx}))
-    return instances

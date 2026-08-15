@@ -602,10 +602,10 @@ class TestParameterization:
             ),
             parameters=({"val": "A"}, {"val": "B"}),
         )
-        # 手动展开（模拟 run.py 行为）
-        from atprobe.cli.commands.run import _expand_parameters
+        # 手动展开（复用 run/MCP 共享的收集逻辑，domain/suite/collect）
+        from atprobe.domain.suite.collect import expand_parameters
 
-        cases = _expand_parameters(base)
+        cases = expand_parameters(base)
         assert len(cases) == 2
         result = _engine_with_fake(fake_port).start(_cfg(cases))
         # 两个实例，name 带 #1 #2
