@@ -725,6 +725,7 @@ class MainWindow(QMainWindow):
                 baudrate=baud,
                 frame=FrameFormat.parse(frame),
                 flow_control=FlowControl(flow),
+                urc_filter=self._app_config.urc_filter,
             )
             self._port_manager.open(cfg)
             return True
@@ -816,7 +817,7 @@ class MainWindow(QMainWindow):
         if dry_run:
             was_open = self._port_manager.is_connected(port)
             try:
-                self._port_manager.open(PortConfig(name=port))
+                self._port_manager.open(PortConfig(name=port, urc_filter=self._app_config.urc_filter))
                 open_ok = True
             except Exception:  # noqa: BLE001
                 open_ok = False
@@ -835,7 +836,7 @@ class MainWindow(QMainWindow):
         # 确保端口已连接
         if not self._port_manager.is_connected(port):
             try:
-                self._port_manager.open(PortConfig(name=port))
+                self._port_manager.open(PortConfig(name=port, urc_filter=self._app_config.urc_filter))
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "端口错误", f"打开端口 {port} 失败：{exc}")
                 return
@@ -871,7 +872,7 @@ class MainWindow(QMainWindow):
 
         session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
         cfg = EngineConfig(
-            ports=(PortConfig(name=port),),
+            ports=(PortConfig(name=port, urc_filter=self._app_config.urc_filter),),
             cases=tuple(cases),  # type: ignore[arg-type]
             step_timeout_default=self._app_config.step_timeout,
             pressure_pass_threshold=float(threshold),

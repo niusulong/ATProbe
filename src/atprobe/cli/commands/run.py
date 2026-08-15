@@ -130,11 +130,14 @@ def run(
         typer.secho("错误：端口列表为空", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
 
-    # --baud 覆盖所有端口波特率（REQ-M5 §3.2）
-    if baud is not None and not vsim:
+    # --baud 覆盖所有端口波特率（REQ-M5 §3.2）；urc_filter（噪声 URC 剥离）
+    # 来自配置文件，注入所有端口（SerialConnection 构造时编译正则）
+    if not vsim:
         from dataclasses import replace as _replace
 
-        ports = [_replace(p, baudrate=baud) for p in ports]
+        ports = [_replace(p, urc_filter=app_cfg.urc_filter) for p in ports]
+        if baud is not None:
+            ports = [_replace(p, baudrate=baud) for p in ports]
 
     # 3. 加载用例（展开目录）
     case_paths = _resolve_case_paths(paths, app_cfg)

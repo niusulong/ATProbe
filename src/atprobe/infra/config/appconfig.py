@@ -57,6 +57,11 @@ class AppConfig:
     command_truncate: int = 40
     log_dir: str = "./logs"
     pressure_pass_rate_threshold: float = 95.0
+    # 噪声 URC 过滤（正则字符串元组，作用于所有端口）：匹配的行照常派发给 URC
+    # 订阅者（不丢失），但从交付给断言的响应文本中整段剥离（含紧邻空行）。
+    # 用于设备存在持续性主动上报的场景（如 N58 开启 GPS 循环输出后的
+    # $MYGPSPOS 行每秒到达）。正则对 strip 后的整行内容 search。
+    urc_filter: tuple[str, ...] = ()
 
 
 def _to_int(value: object, *, what: str, source: str | None) -> int:
@@ -168,6 +173,19 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
                     pressure["pass_rate_threshold"], what="pass_rate_threshold", source=source
                 ),
             )
+    # 噪声 URC 过滤（列表项须为字符串；编译合法性由 SerialConnection 构造时
+    # re.compile 校验——此处仅做类型收敛）
+    urc_filter_raw = raw.get("urc_filter")
+    if urc_filter_raw is not None:
+        if not isinstance(urc_filter_raw, list) or not all(
+            isinstance(x, str) for x in urc_filter_raw
+        ):
+            raise AppConfigError(
+                "'urc_filter' 必须是字符串列表（正则，匹配整行内容），"
+                f"实际：{urc_filter_raw!r}",
+                source=source,
+            )
+        cfg = _replace(cfg, urc_filter=tuple(urc_filter_raw))
     return cfg
 
 

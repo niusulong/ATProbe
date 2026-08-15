@@ -82,6 +82,12 @@ class PortConfig:
     # 行为级参数（§2.2）—— 这些在连接后也可即时改，但归集于此便于传递
     response_timeout: float = 5.0  # 秒（步骤级默认超时来源）
     send_interval_ms: int = 0
+    # 噪声 URC 过滤（正则字符串元组，匹配「行」内容）：匹配行在任何模式下都派发给
+    # URC 订阅者（不丢失），且从交付给断言的响应文本中整段剥离（含前后紧邻空行，
+    # 不污染字节级严格断言）。用于设备存在持续性主动上报的场景（如 N58 开启
+    # AT$MYGPSPOS=<TYPE>,1 循环定位输出后，$MYGPSPOS 行每秒到达）。
+    # 默认空 = 不剥离（存量行为；URC 行仍按前缀识别正常派发）。
+    urc_filter: tuple[str, ...] = ()
     # 重连参数（§4.2）
     reconnect_interval_s: float = 3.0
     reconnect_max_retries: int = 10
