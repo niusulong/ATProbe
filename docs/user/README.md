@@ -9,6 +9,7 @@
 | [testcase-guide.md](testcase-guide.md) | **用例设计说明**——YAML 用例从零编写：字段、断言、变量、控制流、套件、压测、常见陷阱 | 写测试用例的工程师 |
 | [cli-guide.md](cli-guide.md) | **命令行工具**——run/list/gui/update 全参数、--vsim 无硬件演示、退出码、CI 集成 | 命令行用户 / CI |
 | [gui-guide.md](gui-guide.md) | **图形界面**——手动调试、实时监控、用例执行、环境配置、命令库 | 桌面用户 |
+| [mcp-guide.md](mcp-guide.md) | **MCP 服务**——向大模型开放测试能力：stdio/serve 配置（Claude Desktop/Cursor）、Token 与 TLS 反代、13 工具速查、LLM 工作流与安全 | 大模型 / Agent 集成 |
 | [config-reference.md](config-reference.md) | **配置参考**——atprobe.yaml 与 env.yaml 逐字段含义、端口表达式、urc_filter 详解 | 所有人（速查） |
 
 ## 5 分钟快速上手
