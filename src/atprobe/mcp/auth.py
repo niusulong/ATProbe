@@ -1,8 +1,8 @@
 """M8 Bearer Token 认证：加载（四级优先级）+ 纯 ASGI 中间件（常量时间比较）.
 
 Token 来源优先级（设计 §7.1）：--token-file > --token > 环境变量 ATPROBE_MCP_TOKEN
-（第四级「配置 mcp.token_file」由 CLI 层在调用 load_token 前合并进 token_file 参数，
-本模块不重复实现）。Token 永不写日志（设计 §7.3）。
+> 配置 mcp.token_file（经 config_token_file 参数传入，由 CLI 层接线）。
+Token 永不写日志（设计 §7.3）。
 中间件挂在 MCPServer.streamable_http_app() 外层；非 http scope（如 lifespan）直通。
 """
 
@@ -17,17 +17,26 @@ from typing import Any
 ENV_TOKEN = "ATPROBE_MCP_TOKEN"
 
 
-def load_token(token_file: str | None, token: str | None) -> str | None:
-    """加载 Token：文件（首尾空白剥离）> 显式值 > 环境变量；全无 → None.
+def load_token(
+    token_file: str | None,
+    token: str | None,
+    config_token_file: str | None = None,
+) -> str | None:
+    """加载 Token（四级优先级）：token_file > token > 环境变量 > config_token_file.
 
+    两个文件参数均 read_text().strip()，全空白 → None；
     文件不存在抛 FileNotFoundError（CLI 转为 exit 2）。
     """
     if token_file:
-        return Path(token_file).read_text(encoding="utf-8").strip()
+        return Path(token_file).read_text(encoding="utf-8").strip() or None
     if token:
         return token
     env = os.environ.get(ENV_TOKEN, "").strip()
-    return env or None
+    if env:
+        return env
+    if config_token_file:
+        return Path(config_token_file).read_text(encoding="utf-8").strip() or None
+    return None
 
 
 def bearer_middleware(
@@ -43,11 +52,11 @@ def bearer_middleware(
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
-        }
-        auth = headers.get("authorization", "")
-        if not hmac.compare_digest(auth, f"Bearer {expected_token}"):
+        # header 名小写化做键、值保留原始 bytes：hmac.compare_digest 对 str 要求纯
+        # ASCII（非 ASCII 头会 TypeError → 500），bytes 比较则恒定返回 False → 401。
+        headers_raw = {k.lower(): v for k, v in scope.get("headers", [])}
+        auth_raw = headers_raw.get(b"authorization", b"")
+        if not hmac.compare_digest(auth_raw, b"Bearer " + expected_token.encode("utf-8")):
             await send(
                 {
                     "type": "http.response.start",
