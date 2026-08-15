@@ -101,6 +101,7 @@ steps:
 | 强制回显固件 | ATE0 后仍回显指令 | 断言包含回显前缀，或 setup 重复 ATE0 |
 | 厂商扩展指令同名不同义 | 如 `AT+HTTPACTION` 各平台参数/响应不同 | 不跨平台照搬，逐条查文档 |
 | 错误用 CMS 而非 CME | SMS 类指令错返 `+CMS ERROR` | SMS 类断言查 `+CMS ERROR`，见 `response-patterns.md` |
+| 持续性主动上报（GPS 循环输出、心跳广播等） | URC 行插队在命令应答前混入响应文本，严格字节级断言偶发失败 | atprobe.yaml 配 `urc_filter`（行正则）剥离噪声行；URC 事件仍照常派发，`wait_urc` 目标行不受影响（优先级豁免，见 SKILL.md 异步指令陷阱） |
 
 ## 勘测产物清单（新平台起步完成的标志）
 

@@ -10,7 +10,7 @@
 ## 特性
 
 - 标准 YAML 用例定义（M2），声明式「发什么、期望什么」
-- 串口通信管理（M1）：多端口、URC 监听、热插拔重连、HEX+TEXT 原始日志
+- 串口通信管理（M1）：多端口、URC 监听与噪声过滤（`urc_filter`）、热插拔重连、HEX+TEXT 原始日志
 - 测试执行引擎（M3）：串行调度、retry/poll/when、on_failure、压测统计
 - 测试报告（M4）：实时控制台 + 纯静态 HTML 报告
 - CLI（M5）与桌面 GUI（M6，PySide6）共享同一引擎

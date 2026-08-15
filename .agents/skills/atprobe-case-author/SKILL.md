@@ -376,6 +376,12 @@ steps:
 - `wait_urc` 可与 `retry` 共存（retry 包裹「发→等 URC→断言」的完整单次尝试）。
 - 框架行为细节：OK 后 `_process_incoming` 继续累积，URC 正则**匹配即立即入队返回**
   （不空等）；timeout 内无 URC → status=TIMEOUT（text 含已收到的 OK 段，断言照常跑）。
+- **持续主动上报环境**（设备周期性发 URC，如 N58 GPS 循环输出 `$MYGPSPOS`）：在
+  atprobe.yaml 配 `urc_filter`（行正则列表）——匹配行从断言文本整段剥离（含紧邻空行），
+  URC 事件照常派发。**`wait_urc` 目标行不受 `urc_filter` 影响**（逐命令的期待响应
+  声明优先于全局噪声声明），「URC 即期待响应」类指令（如 `AT$MYGPSPOS=0,1` 开启
+  循环上报后等首条上报行）可在 filter 配置下照常断言。终结行（OK）之后到达的
+  URC 行本就不进响应文本（结构化分类，零前缀假设），无需 filter 处理。
 - **纯被动 URC**（无指令前导，如平台主动下行的 `+CTM2MRECV`）本机制不直接支持——它依赖
   「前面发了指令并收到 OK」的前提。测纯被动 URC 需另设计 URC 监听用例类型。
 
