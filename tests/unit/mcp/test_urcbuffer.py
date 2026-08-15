@@ -21,11 +21,18 @@ def test_subscribe_feed_poll_flow():
     out = reg.poll(sub_id, cursor=0)
     assert [e["text"] for e in out["events"]] == ["$MYGPSPOS: 1", "$MYGPSPOS: 2"]
     assert out["next_cursor"] == 2
+    assert "truncated" not in out
 
     # 游标推进后只取增量
     reg.feed(_ev("COM5", "$MYGPSPOS: 3"))
     out2 = reg.poll(sub_id, cursor=out["next_cursor"])
     assert [e["text"] for e in out2["events"]] == ["$MYGPSPOS: 3"]
+    assert out2["next_cursor"] == 3
+
+    # 消费尽后的空页轮询：游标不回退、不虚进
+    empty = reg.poll(sub_id, cursor=out2["next_cursor"])
+    assert empty["events"] == []
+    assert empty["next_cursor"] == out2["next_cursor"]
 
 
 def test_pattern_filters_events():
@@ -52,6 +59,7 @@ def test_limit_truncates():
     out = reg.poll(sub_id, cursor=0, limit=2)
     assert [e["text"] for e in out["events"]] == ["u0", "u1"]
     assert out["next_cursor"] == 2
+    assert "truncated" not in out
 
 
 def test_ring_truncated_flag():

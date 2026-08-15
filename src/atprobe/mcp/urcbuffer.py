@@ -64,11 +64,15 @@ class UrcRegistry:
         self._subs.pop(sub_id, None)  # 幂等
 
     def feed(self, event: URCEvent) -> None:
-        """串口读线程回调入口：按端口与可选正则过滤后写入各订阅缓冲."""
+        """串口读线程回调入口：按端口与可选正则过滤后写入各订阅缓冲.
+
+        pattern 对剥离首尾空白后的文本 search（容忍行尾 CRLF 与行首空白）。
+        """
+        stripped = event.text.strip()
         for sub in tuple(self._subs.values()):  # 快照遍历，并发退订安全
             if sub.port != event.port:
                 continue
-            if sub.pattern is not None and not sub.pattern.search(event.text.strip()):
+            if sub.pattern is not None and not sub.pattern.search(stripped):
                 continue
             with sub.lock:
                 sub.seq += 1
@@ -85,9 +89,8 @@ class UrcRegistry:
             if cursor < sub.seq - len(sub.events):
                 truncated = True  # 请求的游标早于缓冲最早事件（环形已丢帧）
             page = items[:limit]
-            # 空页语义：无新事件时推进到当前 seq，缓冲溢出丢帧后老 cursor
-            # 不会在后续 poll 反复触发 truncated
-            next_cursor = page[-1][0] if page else max(cursor, sub.seq)
+            # 空页：无新事件可推进，游标保持调用值不变（调用方下次再轮询）
+            next_cursor = page[-1][0] if page else cursor
         return {
             "events": [{"seq": s, "timestamp": ts, "text": text} for (s, ts, text) in page],
             "next_cursor": next_cursor,
