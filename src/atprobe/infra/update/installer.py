@@ -33,8 +33,15 @@ def ensure_recovered(app_root: Path) -> bool:
 
     updater.bat 在动 ``_internal`` 前写 ``_internal.update.pending`` 标记，成功与
     回滚两条退出路径都会删除它。若标记残留且 ``_internal.bak`` 存在，说明上次
-    升级中途被杀（断电/强杀 bat）——当前 ``_internal`` 可能是半新状态（DLL 与
-    旧 exe 版本不匹配，直接起不来）。回滚：删半新目录、把 .bak 恢复原名。
+    升级中途被杀（断电/强杀 bat）。
+
+    复审重构（防半毁）：冻结进程的 bootloader 已锁定 ``_internal/python3xx.dll``
+    等文件——**rmtree 会把未锁文件删光而留下锁定的 dll**（半毁：后续 import
+    PySide6 直接 ModuleNotFoundError）。因此恢复只做**原子 rename**：
+    current → ``_internal.broken``（探测锁定：rename 含打开文件的目录在
+    Windows 上失败 → 说明本进程正占用 _internal，**整体放弃恢复**，原状启动
+    比半毁强）；成功后 bak → current。运行中的 exe 不可删除/替换（进程映像
+    锁定），启动侧不碰 exe——exe 的还原由 bat 的 rollback 分支负责。
 
     Returns:
         True 表示执行了回滚（调用方可提示用户重新升级）。
@@ -44,17 +51,20 @@ def ensure_recovered(app_root: Path) -> bool:
     current = app_root / _INTERNAL_NAME
     if not (pending.exists() and backup.exists()):
         return False
+    broken = app_root / (_INTERNAL_NAME + ".broken")
     try:
         if current.exists():
-            shutil.rmtree(current, ignore_errors=True)
+            # 清掉上次恢复尝试的残骸（无锁，通常可删）
+            if broken.exists():
+                shutil.rmtree(broken, ignore_errors=True)
+            try:
+                current.rename(broken)
+            except OSError:
+                # rename 失败 = _internal 被本进程锁定 → 放弃恢复（保持原状），
+                # 绝不走 rmtree（会半毁：未锁文件删光、锁定 dll 留存）
+                return False
         backup.rename(current)
         pending.unlink(missing_ok=True)
-        # exe 也可能已被换成新版（与回滚的旧 _internal 不匹配）→ 恢复 exe.bak
-        exe_bak = app_root / (_EXE_NAME + ".bak")
-        exe = app_root / _EXE_NAME
-        if exe_bak.exists() and exe.exists():
-            exe.unlink(missing_ok=True)
-            exe_bak.rename(exe)
     except OSError:
         return False
     return True
@@ -160,11 +170,14 @@ def _extract_staging(zip_path: Path, staging_root: Path) -> Path:
     with zipfile.ZipFile(zip_path) as z:
         # P3 修复（zip-slip 消毒）：成员名含 ../ 等相对路径时可写出 staging 外。
         # 当前 zip 来自可信 GitHub Releases + SHA256 校验，属纵深防御。
+        # 复审补充：`\` 分隔的 `..\evil` 对 PurePosixPath 是单段——先归一为
+        # 正斜杠再判（盘符 `C:` 同理被 posix 语义视为普通段，归一后可拦）。
         from pathlib import PurePosixPath
 
         for member in z.namelist():
-            p = PurePosixPath(member)
-            if p.is_absolute() or ".." in p.parts:
+            norm = member.replace("\\", "/")
+            p = PurePosixPath(norm)
+            if p.is_absolute() or ".." in p.parts or (len(norm) > 1 and norm[1] == ":"):
                 raise UpdateError(f"安装包含非法路径成员：{member!r}")
         z.extractall(staging_root)
     # zip 顶层目录名形如 ATProbe-<ver>/，找到含主 exe（ATProbe.exe）的目录。
@@ -226,9 +239,11 @@ def build_updater_script(
             f'    copy /y "{staging_cli}" "{cli_dest}" >nul\n'
             f"    if errorlevel 1 goto rollback\n)\n"
         )
-    # P3 修复：重启命令不放进括号块（exe 路径含 ")" 时 cmd 解析错乱）；
-    # bat 自删除放行首（已是最后一行，删除后无后续行可读，安全）
-    tail_cmd = f'del "%~f0" 2>nul\n{restart_cmd}\n'
+    # P3 修复：重启命令不放进括号块（exe 路径含 ")" 时 cmd 解析错乱）。
+    # 自删除/重启/退出必须**同一行 & 链接**——cmd 逐行读 bat，`del %~f0` 后再读
+    # 下一行会失败（实测：分行时 start 与 exit 均不执行，升级成功但不重启）；
+    # 单行在执行前整体解析，三段全部可靠执行。
+    tail_cmd = f'del "%~f0" 2>nul & {restart_cmd} & exit /b 0\n'
     return f"""@echo off
 chcp 65001 >nul
 setlocal

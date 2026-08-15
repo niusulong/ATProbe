@@ -97,6 +97,64 @@ def test_updater_script_contains_key_commands(tmp_path: Path) -> None:
         )
 
 
+def test_updater_script_tail_single_line(tmp_path: Path) -> None:
+    """复审回归：自删除/重启/退出必须在**同一行**（& 链接）.
+
+    cmd 逐行读 bat——`del %~f0` 执行后文件已删，读下一行失败：分行形态下
+    start 与 exit 均不执行（升级成功但不重启）。单行在执行前整体解析，可靠。
+    """
+    script = build_updater_script(
+        exe_path=tmp_path / "ATProbe.exe",
+        internal_path=tmp_path / "_internal",
+        staging_dir=tmp_path / "ATProbe-0.3.0",
+        pid=12345,
+    )
+    tail_lines = [ln for ln in script.splitlines() if "%~f0" in ln]
+    assert tail_lines, "缺少自删除行"
+    for ln in tail_lines:
+        assert "del" in ln
+        # del 行必须同时含后续动作（& 链接）——独立 del 行是回归
+        assert "&" in ln, f"自删除行必须单行 & 链接重启/退出，实际：{ln!r}"
+        if "start" in ln or "exit" in ln:
+            assert "start" in ln and "exit" in ln, f"del/start/exit 须同行：{ln!r}"
+
+
+def test_updater_script_findstr_space_delimited(tmp_path: Path) -> None:
+    """复审回归：PID 匹配用空格定界（tasklist 行首是映像名，/b 锚行首永不命中）."""
+    script = build_updater_script(
+        exe_path=tmp_path / "ATProbe.exe",
+        internal_path=tmp_path / "_internal",
+        staging_dir=tmp_path / "ATProbe-0.3.0",
+        pid=4242,
+    )
+    findstr_lines = [ln for ln in script.splitlines() if "| findstr" in ln]
+    assert findstr_lines
+    for ln in findstr_lines:
+        assert "/b" not in ln, f"findstr 不可用 /b 行首锚定（PID 在第 2 列）：{ln!r}"
+        assert '" 4242 "' in ln or '" %PID% "' in ln, f"须空格定界匹配 PID：{ln!r}"
+
+
+def test_ensure_recovered_rename_only_no_rmtree(tmp_path: Path) -> None:
+    """复审回归：恢复路径绝不含 rmtree(current)（会半毁被锁定的 _internal）."""
+    import inspect
+
+    from atprobe.infra.update.installer import ensure_recovered
+
+    src = inspect.getsource(ensure_recovered)
+    assert "rmtree(current" not in src and "rmtree(\n" not in src.replace(" ", ""), (
+        "恢复路径不得 rmtree current（bootloader 锁定 dll → 半毁）"
+    )
+    # 基本行为：无 pending/bak → False；有 → rename 恢复
+    assert ensure_recovered(tmp_path) is False
+    (tmp_path / "_internal.bak").mkdir()
+    (tmp_path / "_internal.bak" / "old.txt").write_text("old")
+    (tmp_path / "_internal.update.pending").write_text("pending")
+    # current 不存在 → bak 直接顶上
+    assert ensure_recovered(tmp_path) is True
+    assert (tmp_path / "_internal" / "old.txt").read_text() == "old"
+    assert not (tmp_path / "_internal.update.pending").exists()
+
+
 def test_updater_script_paths_quoted(tmp_path: Path) -> None:
     """路径含空格时 bat 内必须加引号（防 PATH/参数注入）。"""
     exe = Path("D:/my tools/ATProbe/ATProbe.exe")

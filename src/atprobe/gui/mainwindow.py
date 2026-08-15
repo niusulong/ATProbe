@@ -753,9 +753,18 @@ class MainWindow(QMainWindow):
             # 先停引擎（若在跑），避免引擎线程操作已关闭的串口
             self.stop_engine()
             # P3 修复：等待引擎线程退出（旧实现只置停止标志，窗口销毁后引擎可能
-            # 仍在 send_command 等待中继续跑到超时——信号已断但后台残留活动）
+            # 仍在 send_command 等待中继续跑到超时——信号已断但后台残留活动）。
+            # 复审补充：循环等待期间处理事件（引擎卡重连睡眠最长 ~30s 时保持
+            # UI 可响应，避免"无响应→强杀"恶化路径）
             if self._engine_thread is not None and self._engine_thread.is_alive():
-                self._engine_thread.join(timeout=5.0)
+                from PySide6.QtWidgets import QApplication
+
+                stop_evt = threading.Event()
+                waited = 0.0
+                while self._engine_thread.is_alive() and waited < 5.0:
+                    QApplication.processEvents()
+                    stop_evt.wait(0.1)  # threading 用 Event 控节拍（Thread 无 wait）
+                    waited += 0.1
             # 遍历所有 tab 调 cleanup，释放 RX 订阅/定时器/worker
             for i in range(self.tabs.count()):
                 widget = self.tabs.widget(i)
@@ -949,10 +958,12 @@ class MainWindow(QMainWindow):
         对每个端口同时订阅 TX（写侧）与 RX（读侧），每次写入或读到 chunk 即回调。
         ports 为空或端口未打开时静默跳过该端口。
         """
-        self._monitor_sink = sink
-        # 撤销上一次的订阅（切换监控端口集）
+        # 复审修复：先退订（unsubscribe 会把 sink 置 None）再设新 sink——
+        # 旧实现顺序颠倒，切换监控端口集时新订阅静默失效（当前 UI 流程
+        # toggle 互斥不可达，属潜伏缺陷）
         if self._monitor_handle is not None:
             self.unsubscribe_monitor()
+        self._monitor_sink = sink
         # P2 修复：句柄按 (tx, rx) 配对存储（旧实现平铺 tuple 用奇偶下标区分，
         # 与 subscribe 顺序强耦合，端口只订一侧时会静默错退订）
         pairs: list[tuple[object, object]] = []

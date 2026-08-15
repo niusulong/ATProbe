@@ -138,5 +138,7 @@ def _list_ports() -> None:
         return
     typer.echo("可用串口:")
     for p in ports:
-        status = "占用中" if p.in_use else "可用"
-        typer.echo(f"  {p.name:<12} ({p.description}, {status})")
+        # 注：系统级占用检测已移除（旧实现对每个端口试探性独占打开，侵入他人
+        # 进程）；in_use 仅反映本程序内连接状态，CLI 一次性进程恒为 False，
+        # 不再展示误导性的「占用中」标注。
+        typer.echo(f"  {p.name:<12} ({p.description})")

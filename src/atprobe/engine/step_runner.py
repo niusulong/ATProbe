@@ -44,6 +44,7 @@ from atprobe.domain.report.models import (
 from atprobe.infra.config.envconfig import EnvConfig
 from atprobe.infra.serial.exceptions import OperationCancelled
 from atprobe.infra.serial.interfaces import (
+    ERROR_KIND_TIMEOUT,
     CancelToken,
     ICommandSender,
     Response,
@@ -358,9 +359,11 @@ def _run_poll(
             )
             return attempt, iterations
         # P2 修复（耗时口径）：间隔等待计入步骤总耗时——旧实现只累计发送/等待
-        # 时长，报告与压测 avg 系统性低估（retry.count=3、interval=1s 时差 ~3s）
+        # 时长，报告与压测 avg 系统性低估（retry.count=3、interval=1s 时差 ~3s）。
+        # 复审补充：sleep 按剩余预算截断——贴 deadline 到达的响应通过检查后仍
+        # sleep 满 interval 会残余溢出约 interval+0.05s（复审实测 11.04s/预算 10s）。
         t_wait = clock()
-        sleep(interval)
+        sleep(min(interval, max(deadline - clock(), 0.0)))
         total_duration += (clock() - t_wait) * 1000.0
         attempt.duration_ms = total_duration
 
@@ -411,7 +414,7 @@ def _single_attempt(
             step_passed=False,
             step_error=resp.error or "响应超时（部分数据不参与断言）",
             duration_ms=dt,
-            error_kind="TIMEOUT",
+            error_kind=ERROR_KIND_TIMEOUT,
         )
 
     if step.extract:

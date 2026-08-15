@@ -710,16 +710,20 @@ class ManualDebugWidget(QWidget):
         （"QThread destroyed while running"，release 下 UB/崩溃）。改为
         循环等待（最长约 write_timeout + 余量），期间处理事件保持 UI 响应；
         确认退出后才允许 widget 析构。
+        复审修复：processEvents 期间 thread.finished → _on_file_thread_done 会把
+        self._file_thread 置 None——循环用**局部引用**持有线程对象，避免对 None
+        调 wait/isRunning 抛 AttributeError。
         """
         if self._file_cancel_token is not None:
             self._file_cancel_token.cancel()
-        if self._file_thread is not None and self._file_thread.isRunning():
-            self._file_thread.quit()
+        th = self._file_thread  # 局部引用：正常完成路径置 None 不影响本循环
+        if th is not None and th.isRunning():
+            th.quit()
             # 单块写最长阻塞 ~5s（write_timeout），2s 一步循环等待直至退出
             waited = 0
-            while self._file_thread.isRunning() and waited < 15000:
+            while th.isRunning() and waited < 15000:
                 QApplication.processEvents()
-                self._file_thread.wait(200)
+                th.wait(200)
                 waited += 200
 
     # ------------------------------------------------------------------

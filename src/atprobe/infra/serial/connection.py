@@ -105,6 +105,12 @@ class SerialConnection:
         # buffer 被替换/清空的时刻同步归零（响应交付/非等待截断/入口清排/超时清空）。
         # 与 _buffer 同受 _buffer_lock 保护。
         self._urc_dispatched = 0
+        # 复审回归修复（offset 竞态）：读线程在锁外拆行/派发（handler 可耗时），
+        # 期间引擎线程可能清空 buffer 并归零 offset（命令切换/超时）——读线程
+        # 回写陈旧偏移会覆盖归零，下一条命令的单 chunk 响应被误判"历史行"跳过
+        # → 假 TIMEOUT。代次计数器：buffer 每次被清/换自增；回写 offset 前校验
+        # 代次未变，变了（buffer 已被引擎重置）则放弃本次回写。
+        self._buffer_generation = 0
 
         # URC 订阅
         self._urc_handlers: list[URCHandler] = []
@@ -289,6 +295,7 @@ class SerialConnection:
         with self._buffer_lock:
             self._buffer.clear()
             self._urc_dispatched = 0  # 缓冲已清空，URC 去重偏移同步归零
+            self._buffer_generation += 1  # 使读线程在途的陈旧回写失效
             if wait_urc is not None:
                 self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
         # 先 set awaiting 再排空队列（B3 修复：消除 set 与 drain 之间读线程恰好检测到断连
@@ -347,6 +354,7 @@ class SerialConnection:
                 partial = bytes(self._buffer)
                 self._buffer.clear()
                 self._urc_dispatched = 0  # 缓冲已清空，URC 去重偏移同步归零
+                self._buffer_generation += 1  # 使读线程在途的陈旧回写失效
             text = partial.decode("utf-8", errors="replace")
             err = "响应超时" if wait_urc is None else "等待 URC 超时"
             return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
@@ -413,6 +421,10 @@ class SerialConnection:
                     break
                 chunk = self._serial.read(256)  # type: ignore[union-attr]
             except (SerialException, OSError):
+                # 复审回归修复：close() 关句柄会使阻塞 read 抛 OSError——此时
+                # stop_event 已置，绝不能走重连（否则端口被重开/双读线程）。
+                if self._stop_event.is_set():
+                    break
                 # 断连：退避后再重试，避免 read 立即抛错导致的忙循环（100% CPU 空转）
                 self._handle_disconnect()
                 # P1 修复（热插拔自愈）：断连后由读线程限频主动重连（≤1 次/秒）。
@@ -462,6 +474,7 @@ class SerialConnection:
             data = bytes(self._buffer)
             wait_urc_re = self._wait_urc_re
             dispatched_offset = self._urc_dispatched
+            generation = self._buffer_generation  # 竞态校验用（见字段注释）
 
         # 按行处理
         awaiting = self._awaiting.is_set()
@@ -498,6 +511,7 @@ class SerialConnection:
                         resp_bytes = bytes(self._buffer)
                         self._buffer = bytearray(tail)
                         self._urc_dispatched = 0  # buffer 已替换，偏移归零
+                        self._buffer_generation += 1
                     resp_text = resp_bytes.decode("utf-8", errors="replace")
                     self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
                     # P3 修复：匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们
@@ -514,7 +528,10 @@ class SerialConnection:
                 if _URC_LINE_RE.match(stripped):
                     self._dispatch_urc(stripped.decode("utf-8", errors="replace"))
             with self._buffer_lock:
-                self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
+                # 代次校验：锁外派发期间 buffer 若被引擎清/换（命令切换/超时），
+                # 陈旧偏移会覆盖归零 → 下一条命令单 chunk 响应被误判历史行（假超时）
+                if self._buffer_generation == generation:
+                    self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
             return
 
         # --------------------------------------------------------------
@@ -540,6 +557,7 @@ class SerialConnection:
                     # 保留终结行之后的数据（tail）作为下一轮缓冲
                     self._buffer = bytearray(tail)
                     self._urc_dispatched = 0  # buffer 已替换，偏移归零
+                    self._buffer_generation += 1
                 resp_text = resp_bytes.decode("utf-8", errors="replace")
                 self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
                 found_terminator = True
@@ -560,10 +578,13 @@ class SerialConnection:
                 with self._buffer_lock:
                     self._buffer = bytearray(tail)
                     self._urc_dispatched = 0  # buffer 已替换，偏移归零
+                    self._buffer_generation += 1
             else:
-                # 等待中但未终结：推进已处理偏移（下个 chunk 不再重复派发历史行）
+                # 等待中但未终结：推进已处理偏移（下个 chunk 不再重复派发历史行）。
+                # 代次校验防陈旧回写（见 wait_urc 分支同款注释）
                 with self._buffer_lock:
-                    self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
+                    if self._buffer_generation == generation:
+                        self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
 
     def _dispatch_urc(self, text: str) -> None:
         # P3 修复：timestamp 填实际时间（旧实现恒空串）
@@ -602,7 +623,10 @@ class SerialConnection:
         成功：清掉死句柄期间的残留缓冲（半截字节不作数），返回 True（调用方
         无需额外退避——reconnect 本身耗时）；失败（未到限频间隔/端口仍不可用）
         返回 False，调用方按 100ms 退避。
+        复审回归修复：close 进行中（stop_event 已置）绝不重连。
         """
+        if self._stop_event.is_set():
+            return False
         now = time.monotonic()
         if now - self._last_reconnect_attempt < 1.0:
             return False
@@ -611,6 +635,7 @@ class SerialConnection:
             with self._buffer_lock:
                 self._buffer.clear()
                 self._urc_dispatched = 0
+                self._buffer_generation += 1  # 使读线程在途的陈旧回写失效
             return True
         return False
 
@@ -633,7 +658,12 @@ class SerialConnection:
 
         重开后调 _ensure_reader 保证读线程存活（B2 修复：旧实现重连后不重启读线程，
         导致重连成功的端口无消费线程，send_command 必然超时卡死）。
+        复审回归修复：stop 已请求（close 进行中）时直接拒绝——否则读线程的
+        断连路径会重开刚被 close 的端口，甚至经 _ensure_reader 的
+        _stop_event.clear() 起第二个读线程（同一句柄双读）。
         """
+        if self._stop_event.is_set():
+            return False
         with self._reconnecting:
             try:
                 if self._serial is not None:
@@ -642,6 +672,15 @@ class SerialConnection:
                     except Exception:  # noqa: BLE001
                         pass
                 if self._try_open_once():
+                    # open 期间（可阻塞秒级）stop 可能被请求——复核，置位则放弃
+                    if self._stop_event.is_set():
+                        try:
+                            self._serial.close()  # type: ignore[union-attr,attr-defined]
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._serial = None  # type: ignore[assignment]
+                        self._connected = False
+                        return False
                     self._ensure_reader()
                     return True
                 return False

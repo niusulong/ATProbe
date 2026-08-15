@@ -145,7 +145,9 @@ def run_pressure(
 
     # 构建每步统计
     step_stats = tuple(
-        _build_step_stat(idx, case.steps[idx - 1], step_rt[idx], step_suc[idx], step_fail[idx])
+        _build_step_stat(
+            idx, case.steps[idx - 1], step_rt[idx], step_suc[idx], step_fail[idx], step_skip[idx]
+        )
         for idx in sorted(step_rt.keys())
     )
 
@@ -178,7 +180,7 @@ def _step_command(step: Step) -> str:
 
 
 def _build_step_stat(
-    idx: int, step: Step, times: list[float], suc: int, fail: int
+    idx: int, step: Step, times: list[float], suc: int, fail: int, skip: int = 0
 ) -> StepPressureStats:
     cmd = _step_command(step)
     if times:
@@ -192,6 +194,7 @@ def _build_step_stat(
             command=cmd,
             success_count=suc,
             fail_count=fail,
+            skipped_count=skip,
             min_ms=s[0],
             max_ms=s[-1],
             avg_ms=avg,
@@ -203,6 +206,7 @@ def _build_step_stat(
         command=cmd,
         success_count=suc,
         fail_count=fail,
+        skipped_count=skip,
     )
 
 

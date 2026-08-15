@@ -74,6 +74,24 @@ def test_save_if_dirty_noop_when_clean(qapp, tmp_path: Path) -> None:  # type: i
     assert env_file.stat().st_mtime_ns == mtime_before
 
 
+def test_is_dirty_false_for_numeric_scalar_on_disk(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """复审回归：磁盘数值/布尔标量 vs 表单字符串不算 dirty.
+
+    旧实现直接 !=：磁盘 `port: 21`（int）vs 表单 "21"（str）恒不等 →
+    含数值参数的配置永久 dirty，每次 run 重写文件（修复声称消除的行为）。
+    """
+    env_file = tmp_path / "env.yaml"
+    env_file.write_text("tcp:\n  port: 21\n  host: 1.2.3.4\nmqtt:\n  tls: true\n", encoding="utf-8")
+    w = _make_widget(qapp, _FakeMain(str(env_file)))
+
+    # 未编辑：表单收集的是 str("21")/"true"，磁盘是 int/bool → 归一后相等
+    assert w.is_dirty() is False
+
+    # 真编辑仍能感知
+    w._group_widgets["tcp"]["port"].setText("22")
+    assert w.is_dirty() is True
+
+
 def test_current_env_empty_not_none(qapp) -> None:  # type: ignore[no-untyped-def]
     """空表单 current_env() 返回空 EnvConfig（非 None），保证 run_cases 不中断."""
     w = _make_widget(qapp, _FakeMain(None))

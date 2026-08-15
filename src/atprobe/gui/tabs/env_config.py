@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -183,7 +185,16 @@ class EnvConfigWidget(QWidget):
         无 path（从未保存过）→ True；否则**结构化比对**（解析磁盘 YAML 后与内存
         组比较）。P2 修复：旧实现比对 dump 文本——dump 丢失注释/格式/键序，
         语义等价的配置也算 dirty → 每次 run 都重写文件。
+        复审修复：标量**归一为字符串**后比对——表单收集的值恒为 str，而磁盘
+        YAML 的 `port: 21` 解析为 int、`flag: true` 为 bool，直接 != 恒不等
+        → 含数值/布尔参数的配置永久 dirty（修复声称消除的行为对非字符串无效）。
         """
+
+        def _norm(groups: "Mapping[str, Mapping[str, object]]") -> dict[str, dict[str, str]]:
+            from atprobe.infra.config.envconfig import _to_str
+
+            return {g: {k: _to_str(v) for k, v in params.items()} for g, params in groups.items()}
+
         if self._path is None or not self._path.exists():
             return True
         try:
@@ -194,7 +205,9 @@ class EnvConfigWidget(QWidget):
             )
         except Exception:  # noqa: BLE001 - 解析失败视为有差异（需重写修复）
             return True
-        return dict(on_disk.groups()) != {g: dict(p) for g, p in self._env.groups().items()}
+        return _norm(cast("Mapping[str, Mapping[str, object]]", on_disk.groups())) != _norm(
+            cast("Mapping[str, Mapping[str, object]]", self._env.groups())
+        )
 
     def save_if_dirty(self) -> None:
         """若有未保存改动则静默写盘（run_cases 前调用，保证内存=磁盘单一数据源）.

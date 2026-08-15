@@ -103,7 +103,26 @@ class Engine:
         if self._raw_logger is not None:
             self._raw_logger.start()
 
-        sender, port_manager = self._resolve_sender(config)
+        # 复审修复：sender 解析纳入兜底——第三方 sender 工厂抛异常时旧实现
+        # 直接逃出 start()（状态卡 RUNNING），与「引擎内部错误不逃逸」承诺不符。
+        sender: Any = None
+        port_manager: Any = None
+        try:
+            sender, port_manager = self._resolve_sender(config)
+        except KeyboardInterrupt:
+            self._state = EngineState.FINISHED
+            if self._owns_raw_logger and self._raw_logger is not None:
+                self._raw_logger.stop()
+            return ExecutionResult(
+                summary=Summary(start_time="", end_time="", duration_ms=0.0),
+                case_results=(),
+                error="被用户中断（Ctrl-C）",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._state = EngineState.ERROR
+            if self._owns_raw_logger and self._raw_logger is not None:
+                self._raw_logger.stop()
+            return self._error_result(config, f"sender 解析失败：{exc!r}")
         cancel = CancelToken()
         self._cancel_token = cancel
 
@@ -125,6 +144,14 @@ class Engine:
                 self._state = EngineState.ERROR
                 if self._owns_raw_logger and self._raw_logger is not None:
                     self._raw_logger.stop()
+                # 复审修复：补发 EngineFinishedEvent——GUI 进度面板以该事件收尾，
+                # 旧实现此路径不发 → 面板悬挂（pre-existing，与兜底承诺对齐）
+                if handler is not None:
+                    handler(
+                        EngineFinishedEvent(
+                            summary=Summary(start_time="", end_time="", duration_ms=0.0)
+                        )
+                    )
                 return self._error_result(config, f"端口打开失败：{exc}")
 
         default_port = config.ports[0].name if config.ports else ""
@@ -133,6 +160,7 @@ class Engine:
         session = config.session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         log_dir = Path(config.log_dir)
         engine_error: str = ""  # P1 修复：主循环兜底异常记录（见下方 except）
+        interrupted = False  # KeyboardInterrupt：状态 FINISHED 而非 ERROR
 
         try:
             # 套件级前置（REQ-M2 §12.2）：cases 循环前执行一次。用独立 CaseContext
@@ -260,6 +288,11 @@ class Engine:
                     self._emit_step(handler, r)
                 except Exception:  # noqa: BLE001 - suite_teardown 失败仅记录，不影响结果
                     _log.debug("suite_teardown 步骤执行异常", exc_info=True)
+        except KeyboardInterrupt:
+            # P1 修复补充：CLI Ctrl-C（BaseException，不被 except Exception 捕获）——
+            # 转干净的中断结果（已完成用例的统计保留），状态 FINISHED 而非 ERROR。
+            engine_error = "被用户中断（Ctrl-C）"
+            interrupted = True
         except Exception as exc:  # noqa: BLE001 - P1 修复：引擎主循环兜底
             # 旧实现此层只有 finally：任意非 OperationCancelled 异常（第三方 sender
             # 缺陷、渲染路径漏洞等）直接逃出 start() → _state 永久卡 RUNNING、
@@ -289,9 +322,16 @@ class Engine:
             )
             if handler is not None:
                 handler(EngineFinishedEvent(summary=summary))
-            self._state = EngineState.ERROR
+            self._state = EngineState.FINISHED if interrupted else EngineState.ERROR
+            # 复审修复：兜底结果补齐 env_snapshot 与套件前后置（与正常路径同构，
+            # 旧实现三项落默认空 → 引擎内部错误时报告数据静默缺失）
             return ExecutionResult(
-                summary=summary, case_results=tuple(case_results), error=engine_error
+                summary=summary,
+                case_results=tuple(case_results),
+                env_snapshot=self._env_snapshot(config),
+                suite_setup_results=tuple(locals().get("suite_setup_results", ())),
+                suite_teardown_results=tuple(locals().get("suite_teardown_results", ())),
+                error=engine_error,
             )
 
         # 计算本次执行的耗时与时间区间（P1-1：之前始终为空/0，报告无法追溯执行时刻）
@@ -424,16 +464,17 @@ class Engine:
                     cancel=cancel,
                     on_progress=on_progress,
                 )
-                if pr.aborted and cancel.cancelled:
-                    status = CaseStatus.INTERRUPTED
-                    error_msg = "被中断"
-                elif pr.aborted and pr.abort_reason == "abort_on_failure":
-                    # P2 修复：区分「按 abort_on_failure 主动中止」与「阈值不达标」
+                # 复审修复：abort_on_failure 与用户取消同帧并发时，先报真实中止
+                # 原因（旧实现 INTERRUPTED 分支优先，掩盖"失败即中止"信息）
+                if pr.aborted and pr.abort_reason == "abort_on_failure":
                     status = CaseStatus.FAIL
                     error_msg = (
                         f"压测按 abort_on_failure 中止（成功率 {pr.stats.success_rate:.1f}%，"
                         f"阈值 {pr.stats.pass_threshold:.1f}%）"
                     )
+                elif pr.aborted and cancel.cancelled:
+                    status = CaseStatus.INTERRUPTED
+                    error_msg = "被中断"
                 elif pr.stats.passed:
                     status = CaseStatus.PASS
                 else:

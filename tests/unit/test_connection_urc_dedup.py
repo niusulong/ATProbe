@@ -136,3 +136,73 @@ class TestWaitUrcAnchor:
         assert resp is not None
         assert resp.status is ResponseStatus.COMPLETE
         assert "+X:ok" in resp.text
+
+
+class TestOffsetRaceWithEngineReset:
+    """复审回归：读线程锁外派发期间引擎清 buffer → 陈旧 offset 不得覆盖归零.
+
+    场景（修复前）：读线程快照 offset 后在锁外做 URC 派发（handler 耗时），
+    引擎 send_command 入口恰在此时清 buffer+归零 offset；读线程随后回写陈旧
+    偏移（如 12）→ 下一条命令的单 chunk 响应（le <= 12）被误判历史行跳过
+    → 终结行不被识别 → 假 TIMEOUT。代次计数器修复后：回写被代次校验拦截。
+    """
+
+    def test_stale_offset_write_discarded_after_engine_reset(self, monkeypatch) -> None:
+        conn = _make_connection(monkeypatch)
+
+        # 读线程视角构造：先喂一个含 URC 的 chunk 使 offset 推进有值可写
+        conn._awaiting.set()
+        conn._process_incoming(b"\r\n+U: 1\r\n")
+        assert conn._urc_dispatched > 0
+        stale_offset = conn._urc_dispatched
+
+        # 模拟读线程已快照（generation、offset），在锁外派发期间引擎重置 buffer
+        with conn._buffer_lock:
+            generation = conn._buffer_generation
+        # 引擎入口重置（等价 send_command 开头）：清 buffer + 归零 + 代次自增
+        with conn._buffer_lock:
+            conn._buffer.clear()
+            conn._urc_dispatched = 0
+            conn._buffer_generation += 1
+
+        # 读线程现在回写陈旧 offset（修复后的代码路径：代次变了 → 放弃）
+        with conn._buffer_lock:
+            if conn._buffer_generation == generation:  # pragma: no cover
+                conn._urc_dispatched = stale_offset  # 旧代码无条件写
+
+        assert conn._urc_dispatched == 0, "代次变化后陈旧 offset 必须被丢弃"
+
+        # 后续单 chunk 完整响应正常终结（le > 0 不被跳过）
+        conn._process_incoming(b"\r\nOK\r\n")
+        resp = conn._response_q.get_nowait()
+        assert resp.status is ResponseStatus.COMPLETE
+
+    def test_close_prevents_reader_reconnect(self, monkeypatch) -> None:
+        """复审回归：close 置 stop_event 后读线程断连路径不得重开端口."""
+        opened: list[bool] = []
+        conn = _make_connection(monkeypatch)
+        monkeypatch.setattr(
+            type(conn),
+            "_try_open_once",
+            lambda self: (opened.append(True), True)[1],
+        )
+        # close 置 stop_event（真实 close 会碰串口句柄，这里只置事件语义）
+        conn._stop_event.set()
+        assert conn._maybe_reconnect() is False  # stop 已置 → 拒绝
+        assert conn.reconnect() is False
+        assert opened == []  # 从未尝试打开
+
+
+class TestCrlfAcrossChunks:
+    """边界：CRLF 跨 chunk（\\r 在尾、\\n 在头）的等待模式去重."""
+
+    def test_crlf_split_chunks_single_dispatch(self, monkeypatch) -> None:
+        conn = _make_connection(monkeypatch)
+        received: list[str] = []
+        conn.add_urc_handler(lambda evt: received.append(evt.text))
+
+        conn._awaiting.set()
+        conn._process_incoming(b"\r\n+U: 1\r")  # 尾部悬置 \r
+        conn._process_incoming(b"\n+U: 2\r\n")  # 头部补 \n
+
+        assert received == ["+U: 1", "+U: 2"]  # 各恰好一次

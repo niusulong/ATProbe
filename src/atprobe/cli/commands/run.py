@@ -103,6 +103,8 @@ def run(
     # （旧实现该配置字段无消费者）
     if log_level is None:
         log_level = app_cfg.log_level
+    # 复审修复：大小写归一——YAML 写 DEBUG/Debug 曾静默退化为 progress 行为
+    log_level = log_level.strip().lower()
 
     # 2. 解析端口（§3.3）。--vsim 模式忽略端口参数，统一用虚拟端口
     if vsim:

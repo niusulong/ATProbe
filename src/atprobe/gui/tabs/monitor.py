@@ -87,6 +87,10 @@ class _PortSubView(QWidget):
         """
         if hex_mode:
             hex_line = " ".join(f"{b:02X}" for b in data)
+            # 复审修复：HEX 模式期间丢弃文本模式的跨行/跨字符残留（与
+            # manual_debug 的 HEX 分支一致）——否则切回 TEXT 时旧半行拼新数据错位
+            self._line_buffer = ""
+            self._decoder.reset()
             if hex_line:
                 self.buffer.append((direction, ts, hex_line))
             return
@@ -129,7 +133,18 @@ class _PortSubView(QWidget):
         )
 
     def flush(self) -> None:
-        """把 buffer 批量渲染为 HTML 写入 view 并滚到底."""
+        """把 buffer 批量渲染为 HTML 写入 view 并滚到底.
+
+        复审补充：行尾悬置 ``\\r``（设备用纯 CR 刷新进度行，如 ``42%\\r``）的半行
+        也在此刻作为未完行渲染——否则该行永远滞留 _line_buffer 不上屏（进度
+        不可见），导出（to_plain_text 经 flush）也丢尾部。清空后设备下一次刷新
+        会重新送整行，进度行语义正确；普通等 ``\\n`` 的半行不受影响（不提前打断）。
+        """
+        if self._line_buffer.endswith("\r"):
+            pending = self._line_buffer.rstrip("\r")
+            if pending:
+                self.buffer.append((self.buffer[-1][0] if self.buffer else "RX", "", pending))
+            self._line_buffer = ""
         if not self.buffer:
             return
         html = "".join(self._format_line_html(d, ts, t) for d, ts, t in self.buffer)

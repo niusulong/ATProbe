@@ -87,6 +87,8 @@ class StepPressureStats:
     command: str
     success_count: int = 0
     fail_count: int = 0
+    # 复审修复：when 跳过轮计数落地（旧实现 step_skip 收集后从不进统计，死数据）
+    skipped_count: int = 0
     # 响应时间分布统计量（毫秒，仅成功的，§5.4：超时不计入分布）。
     # 不保留全量 response_times 数组 —— 它是计算百分位的中间实现细节，
     # 且随轮数线性增长会放大内存占用（零消费者）。模型只持有统计结论，

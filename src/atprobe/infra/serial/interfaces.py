@@ -66,9 +66,11 @@ class ResponseStatus(str, Enum):
 #   NONE        无错误（ok=True）
 #   DISCONNECT  端口断连 / 重连失败（§4.2 热插拔路径）—— 触发断连安全阀与重发判定
 #   SEND        发送侧失败（写超时、I/O 错误等）—— 不触发断连安全阀
+#   TIMEOUT     响应超时（引擎侧：部分缓冲不参与断言，step_runner 产出）
 ERROR_KIND_NONE = "NONE"
 ERROR_KIND_DISCONNECT = "DISCONNECT"
 ERROR_KIND_SEND = "SEND"
+ERROR_KIND_TIMEOUT = "TIMEOUT"
 
 
 @dataclass(frozen=True)

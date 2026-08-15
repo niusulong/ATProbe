@@ -273,6 +273,67 @@ class TestMonitorLineRendering:
         assert "+CSQ: 12,99" in text and "OK" in text
         assert "12,99OK" not in text
 
+    def test_cr_progress_lines_visible_after_flush(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """复审回归：孤立 \\r 刷新的进度行在 flush 时必须可见（不滞留缓冲）.
+
+        设备用纯 CR 刷进度（42%\\r50%\\r）：旧实现只按 \\n 切分，这些行永不
+        入 buffer；修复后 feed 切分 + flush 把悬置半行渲染出来。
+        """
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget._on_data("COM5", "RX", b"progress 42%\r")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        assert "42%" in text, f"CR 进度行应在 flush 后可见: {text!r}"
+
+    def test_cr_then_crlf_no_phantom_blank(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """复审回归："b\\r" + "\\r\\n" 不得产生伪空行（hold 语义）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget._on_data("COM5", "RX", b"done\r")  # noqa: SLF001
+        widget._on_data("COM5", "RX", b"\r\nnext\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        assert "done" in " ".join(lines)
+        assert "next" in " ".join(lines)
+
+    def test_hex_switch_clears_text_residue(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """复审回归：TEXT→HEX 切换清掉半行残留（切回不串行）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        widget._on_data("COM5", "RX", b"half-line-no-newline")  # noqa: SLF001
+        widget.hex_check.setChecked(True)  # 切 HEX
+        widget._on_data("COM5", "RX", b"\r\nOK\r\n")  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        # HEX 模式：全部按十六进制展示，旧半行文本不得混入
+        assert "half-line-no-newline" not in text
+
+    def test_utf8_multibyte_across_chunks(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """复审回归：中文 3 字节字符被 chunk 边界切开仍完整（incremental decoder）."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = MonitorWidget(TabBinding(type_name="monitor", params={}), object())  # type: ignore[arg-type]
+        raw = "注册状态:已注册\r\n".encode()
+        mid = 7  # 切在多字节字符中间
+        widget._on_data("COM5", "RX", raw[:mid])  # noqa: SLF001
+        widget._on_data("COM5", "RX", raw[mid:])  # noqa: SLF001
+        widget._flush_all()  # noqa: SLF001
+
+        text = widget._current_sub_view().view.toPlainText()  # noqa: SLF001
+        assert "注册状态:已注册" in text, f"跨 chunk 中文应完整重组: {text!r}"
+
 
 class TestMonitorMemoryBounding:
     """长会话内存治理：QTextEdit 块上限 + 定时器随订阅起停 + 关子页释放控件."""
