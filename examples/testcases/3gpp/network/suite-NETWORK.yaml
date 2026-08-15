@@ -1,0 +1,19 @@
+name: 网络注册与基础查询指令测试套件
+description: |
+  3GPP TS 27.007 通用网络/SIM 指令测试集合。覆盖：
+    1. RESP 响应格式：CEREG/CGATT/CPIN/CSQ 查询的严格字节格式 + 取值范围校验
+    2. PARA 参数：CEREG=<n> 设置 URC 上报开关
+    3. FUNC 功能：CEREG poll 轮询等待注册（网络类测试通用前置模式）
+  注：CPIN/CSQ/CEREG/CGATT 是跨平台通用 AT 指令（3GPP 标准），不同模组实现一致。
+tags: [NETWORK, 3gpp-standard]
+
+cases:
+  # RESP 类
+  - NETWORK-CEREG-RESP-QUERY_FORMAT.yaml
+  - NETWORK-CGATT-RESP-QUERY_STATE.yaml
+  - NETWORK-CPIN-RESP-READY.yaml
+  - NETWORK-CSQ-RESP-QUERY_FORMAT.yaml
+  # PARA 类
+  - NETWORK-CEREG-PARA-VALID_DISABLE_URC.yaml
+  # FUNC 类
+  - NETWORK-CEREG-FUNC-POLL_REGISTERED.yaml   # 需 SIM+网络覆盖，无网设备超时失败属预期

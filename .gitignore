@@ -68,6 +68,12 @@ env.yaml
 !examples/**/atprobe.yaml
 !examples/**/env.yaml
 
+# 测试用例：仅 3GPP 通用指令用例（examples/testcases/3gpp/）纳入版本控制；
+# 平台专属用例（N58/ 等按平台分组的目录）与回归用例为公司核心资产，仅保留在本地
+examples/testcases/**
+!examples/testcases/3gpp/
+!examples/testcases/3gpp/**
+
 # 临时/调试产物
 _*.bat
 _*.txt
@@ -128,3 +134,7 @@ docs/
 # .zcode/ 为本地工具目录；packaging/build.log 为构建日志，均不纳入版本控制
 .zcode/
 packaging/build.log
+
+# 本地自用 skills（pdf / skill-creator），与本项目无关，不入库
+.agents/skills/pdf/
+.agents/skills/skill-creator/

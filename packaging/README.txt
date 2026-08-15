@@ -8,7 +8,7 @@ ATProbe — 串口 AT 命令自动化测试工具
 
 【命令行用法】（可选，给会命令行的工程师）
   atprobe-cli.exe list cases
-  atprobe-cli.exe run examples\testcases\ntp\ntp-updatetime_query.yaml --port COM5:115200
+  atprobe-cli.exe run examples\testcases\3gpp\network\NETWORK-CSQ-RESP-QUERY_FORMAT.yaml --port COM5:115200
   atprobe-cli.exe --version
 
 【自定义】

@@ -1,0 +1,23 @@
+name: CEREG-合法设置-关闭URC上报(严格字节级)
+description: |
+  场景前提：任意状态。CEREG 设置（<n>）改变 URC 上报开关，需 setup 查初始值 + teardown 恢复。
+  验证目标：AT+CEREG=0（关闭网络注册 URC 上报）→ 严格 \r\nOK\r\n。
+  文档依据：3GPP TS 27.007 §6.1，AT+CEREG=<n> 设置 URC 上报模式；<n>=0 关闭主动上报。
+tags: [NETWORK, CEREG, PARA, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+  - command: AT+CEREG?               # 查初始 <n>
+    extract:
+      init_n: '\+CEREG:\s*(\d)'
+    assert: { contains: "OK" }
+
+steps:
+  # 设置 <n>=0 关闭 URC 上报 → 严格 OK
+  - command: 'AT+CEREG=0'
+    assert: { matches: '^\r\nOK\r\n$' }
+
+teardown:
+  - command: 'AT+CEREG={{init_n}}'   # 恢复初始上报开关

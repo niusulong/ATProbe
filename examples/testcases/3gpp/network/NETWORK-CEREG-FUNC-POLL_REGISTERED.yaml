@@ -1,0 +1,26 @@
+name: CEREG-轮询等待注册成功(poll机制)
+description: |
+  场景前提：SIM 卡已插且在网覆盖下。注网是异步过程，CGATT=1 的 OK 仅表示「指令受理」，
+    实际注网需数秒，须用 poll 轮询 AT+CEREG? 直到 <stat> ∈ {1,5}（家用/漫游注册）。
+  验证目标：演示 poll 机制——在 timeout 内反复查询 CEREG，直到注册成功或超时。
+    这是网络类测试的通用前置等待模式（回归用例 setup 也常用此套路）。
+  文档依据：3GPP TS 27.007 §6.1，+CEREG: <n>,<stat>；<stat>=1 家用注册、5 漫游注册。
+tags: [NETWORK, CEREG, FUNC, p1]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # poll：在 60s 内每 2s 查一次 CEREG?，直到 stat ∈ {1,5}。
+  # 注意 poll 与 retry/wait_urc 互斥；poll 的 until 条件引用 extract 的变量（裸名）。
+  - command: AT+CEREG?
+    extract:
+      cereg_stat: '\+CEREG:\s*\d+,(\d)'
+    poll:
+      until: 'cereg_stat == "1" or cereg_stat == "5"'
+      timeout: 60
+      interval: 2000
+    assert:
+      - { name: 已注册家用或漫游, var: cereg_stat, op: in, values: ["1", "5"] }

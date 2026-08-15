@@ -1,0 +1,19 @@
+name: CPIN-查询SIM卡PIN状态(严格字节级)
+description: |
+  场景前提：已插入 SIM 卡（无卡时返回 +CME ERROR: 10，不在本用例覆盖范围）。
+  验证目标：AT+CPIN? 查询返回 +CPIN: READY（SIM 就绪、无需 PIN），格式严格。
+  文档依据：3GPP TS 27.007 §8.3，+CPIN: <status>；<status> 常见 READY / SIM PIN / SIM PUK 等。
+tags: [NETWORK, CPIN, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  - command: AT+CPIN?
+    extract:
+      pin_status: '\+CPIN:\s*(\w+)'
+    assert:
+      - { name: CPIN严格格式, matches: '^\r\n\+CPIN: [A-Z ]+\r\nOK\r\n$' }
+      - { name: SIM就绪, var: pin_status, op: in, values: ["READY"] }

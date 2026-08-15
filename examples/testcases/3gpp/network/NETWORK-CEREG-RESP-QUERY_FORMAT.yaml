@@ -1,0 +1,23 @@
+name: CEREG-查询响应格式(严格字节级)
+description: |
+  场景前提：任意状态（CEREG 查询不改变模组状态，无副作用）。
+  验证目标：AT+CEREG? 查询响应的 +CEREG: <n>,<stat> 字节格式，且 <stat> 在合法取值范围 0..5。
+  文档依据：3GPP TS 27.007 §6.1，+CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]；
+    <stat>：0 未注册、1 家用注册、2 搜索中、3 拒绝、4 未知、5 漫游注册。
+tags: [NETWORK, CEREG, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  # CEREG 查询响应格式：<n>,<stat> 前两段必现；<stat> 限 0..5。
+  - command: AT+CEREG?
+    extract:
+      cereg_n: '\+CEREG:\s*(\d)'
+      cereg_stat: '\+CEREG:\s*\d+,(\d)'
+    assert:
+      - { name: CEREG严格格式, matches: '^\r\n\+CEREG: \d+,\d+\r\nOK\r\n$' }
+      - { name: 上报开关n合法, var: cereg_n, op: in, values: ["0", "1", "2"] }
+      - { name: 注册状态stat合法, var: cereg_stat, op: in, values: ["0", "1", "2", "3", "4", "5"] }

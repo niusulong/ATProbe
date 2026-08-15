@@ -1,0 +1,22 @@
+name: CSQ-查询信号质量(严格字节级)
+description: |
+  场景前提：任意状态（CSQ 查询不改状态）。
+  验证目标：AT+CSQ 查询返回 +CSQ: <rssi>,<ber>，<rssi> ∈ 0..31（99=未知），<ber> 同理。
+  文档依据：3GPP TS 27.007 §8.5，+CSQ: <rssi>,<ber>；
+    <rssi>：0 -113dBm 或更差 … 31 -51dBm 或更好，99 未知。
+tags: [NETWORK, CSQ, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  - command: AT+CSQ
+    extract:
+      rssi: '\+CSQ:\s*(\d+)'
+      ber: '\+CSQ:\s*\d+,(\d+)'
+    assert:
+      - { name: CSQ严格格式, matches: '^\r\n\+CSQ: \d+,\d+\r\nOK\r\n$' }
+      - { name: rssi合法范围, var: rssi, op: in, values: ["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","99"] }
+      - { name: ber合法范围, var: ber, op: in, values: ["0","1","2","3","4","5","6","7","99"] }

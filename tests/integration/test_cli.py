@@ -25,19 +25,19 @@ class TestListCases:
             ["list", "cases", "--config", str(examples_dir / "atprobe.yaml")],
         )
         assert result.exit_code == 0
-        assert "NETAPN-查询响应格式" in result.stdout
-        assert "UPDATETIME-查询设置响应格式" in result.stdout
+        assert "CSQ-查询信号质量" in result.stdout
+        assert "CEREG-查询响应格式" in result.stdout
 
     def test_list_with_tag_filter(self, examples_dir: Path) -> None:  # type: ignore[no-unbuilt-def]
         result = runner.invoke(
             app,
-            ["list", "cases", "--config", str(examples_dir / "atprobe.yaml"), "--tag", "NTP"],
+            ["list", "cases", "--config", str(examples_dir / "atprobe.yaml"), "--tag", "CPIN"],
         )
         assert result.exit_code == 0
-        assert "UPDATETIME" in result.stdout
-        # tcp 用例被过滤（tag=NTP 只剩 NTP 块，TCP 用例不应出现）
-        assert "NETAPN" not in result.stdout
-        assert "TCPSETUP" not in result.stdout
+        assert "CPIN-查询SIM卡PIN状态" in result.stdout
+        # 其它用例被过滤（tag=CPIN 只剩 CPIN 用例，CEREG/CSQ 用例不应出现）
+        assert "CEREG" not in result.stdout
+        assert "CSQ" not in result.stdout
 
 
 class TestRunDryRun:
@@ -46,14 +46,14 @@ class TestRunDryRun:
             app,
             [
                 "run",
-                str(examples_dir / "testcases" / "N58" / "tcp" / "TCP-NETAPN-PARA-VALID_APN.yaml"),
+                str(examples_dir / "testcases" / "3gpp" / "network" / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"),
                 "--port",
                 "COM99",
                 "--dry-run",
             ],
         )
         assert result.exit_code == 0
-        assert "NETAPN-合法APN设置" in result.stdout
+        assert "CSQ-查询信号质量" in result.stdout
         assert "COM99" in result.stdout
 
     def test_no_port_errors(self, examples_dir: Path) -> None:  # type: ignore[no-unbuilt-def]
@@ -62,7 +62,7 @@ class TestRunDryRun:
             app,
             [
                 "run",
-                str(examples_dir / "testcases" / "N58" / "tcp" / "TCP-NETAPN-PARA-VALID_APN.yaml"),
+                str(examples_dir / "testcases" / "3gpp" / "network" / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"),
                 "--config",
                 "nonexistent.yaml",
                 "--dry-run",

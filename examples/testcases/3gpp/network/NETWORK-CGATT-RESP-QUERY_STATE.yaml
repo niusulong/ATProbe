@@ -1,0 +1,19 @@
+name: CGATT-查询附着状态(严格字节级)
+description: |
+  场景前提：任意状态（CGATT? 查询不改状态）。
+  验证目标：AT+CGATT? 查询 PS 域附着状态响应 +CGATT: <state>，<state> ∈ {0,1}。
+  文档依据：3GPP TS 27.007 §6.9，+CGATT: <state>；<state>=0 未附着、1 已附着。
+tags: [NETWORK, CGATT, RESP, p0]
+port: COM5
+
+setup:
+  - command: ATE0
+    assert: { matches: '^\r\nOK\r\n$' }
+
+steps:
+  - command: AT+CGATT?
+    extract:
+      cgatt_state: '\+CGATT:\s*(\d)'
+    assert:
+      - { name: CGATT严格格式, matches: '^\r\n\+CGATT: \d+\r\nOK\r\n$' }
+      - { name: 附着状态合法, var: cgatt_state, op: in, values: ["0", "1"] }
