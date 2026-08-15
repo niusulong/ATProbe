@@ -18,14 +18,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 import httpx2
 import pytest
@@ -38,6 +35,9 @@ from atprobe.infra.serial.vsim import VSIM_PORT
 from atprobe.mcp.auth import bearer_middleware
 from atprobe.mcp.server import build_server
 from atprobe.mcp.service import McpService
+from conftest import make_case_yaml, payload, wait_finished
+
+pytestmark = pytest.mark.anyio
 
 TOKEN = "it-bearer-token"
 HTTP_PORT = 18942  # 固定高位端口：被占即环境问题，不递增
@@ -60,23 +60,6 @@ EXPECTED_TOOLS = {
     "unsubscribe_urc",
 }
 
-# 最小用例（与 conftest.MINIMAL_CASE 同构；format 占位 i 用于批量改名）
-CASE_YAML = """\
-name: it{i:02d}
-tags: [smoke]
-steps:
-  - command: "AT"
-    port: VSIM0
-    assert:
-      - contains: "OK"
-"""
-
-
-def _payload(res: Any) -> dict[str, Any]:
-    """解析 call_tool 出参：错误文本带 ``Error executing tool <name>: `` 前缀，从首个 { 起取."""
-    text = res.content[0].text
-    return json.loads(text[text.index("{") :])
-
 
 @asynccontextmanager
 async def _session(base_url: str, token: str = TOKEN) -> AsyncIterator[ClientSession]:
@@ -88,28 +71,12 @@ async def _session(base_url: str, token: str = TOKEN) -> AsyncIterator[ClientSes
                 yield session
 
 
-async def _wait_finished(
-    session: ClientSession, job_id: str, timeout: float = 30.0
-) -> dict[str, Any]:
-    """轮询 get_job 至终态（0.2s 间隔；超时抛 AssertionError）."""
-    deadline = time.monotonic() + timeout
-    while True:
-        res = await session.call_tool("get_job", {"job_id": job_id})
-        assert res.is_error is not True
-        snap = _payload(res)
-        if snap["status"] != "running":
-            return snap
-        if time.monotonic() > deadline:
-            raise AssertionError(f"job {job_id} 未在 {timeout}s 内结束")
-        await asyncio.sleep(0.2)
-
-
 @pytest.fixture(scope="module")
 def many_case_paths(tmp_path_factory: pytest.TempPathFactory) -> list[Path]:
     """100 个最小用例：保证 start_run 返回后作业可观测地运行（BUSY 断言窗口）."""
     d = tmp_path_factory.mktemp("cases")
     for i in range(100):
-        (d / f"it{i:02d}.yaml").write_text(CASE_YAML.format(i=i), encoding="utf-8")
+        make_case_yaml(d, f"it{i:02d}")
     return sorted(d.glob("*.yaml"))
 
 
@@ -142,9 +109,10 @@ def base_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     yield BASE_URL
     server.should_exit = True
     thread.join(timeout=15.0)
+    if thread.is_alive():
+        raise RuntimeError("uvicorn 线程未在 15s 内退出")
 
 
-@pytest.mark.anyio
 async def test_http_auth_and_manual_tools(base_url: str) -> None:
     # 错误 Token 之中间件契约：裸 HTTP 直测（401 + JSON 体，确定性断言）
     async with httpx2.AsyncClient() as raw:
@@ -163,44 +131,43 @@ async def test_http_auth_and_manual_tools(base_url: str) -> None:
 
         res = await session.call_tool("open_port", {"port_expr": VSIM_EXPR})
         assert res.is_error is not True
-        assert _payload(res)["name"] == VSIM_PORT
+        assert payload(res)["name"] == VSIM_PORT
 
         res = await session.call_tool(
             "send_at", {"port": VSIM_PORT, "command": "AT", "timeout": 5.0}
         )
         assert res.is_error is not True
-        assert "OK" in _payload(res)["text"]
+        assert "OK" in payload(res)["text"]
 
         res = await session.call_tool("subscribe_urc", {"port": VSIM_PORT})
-        sub_id = _payload(res)["subscription_id"]
+        sub_id = payload(res)["subscription_id"]
 
         # vsim 默认不主动上报 → 空页（游标语义正常）
         res = await session.call_tool("poll_urc", {"subscription_id": sub_id})
-        assert _payload(res)["events"] == []
+        assert payload(res)["events"] == []
 
         res = await session.call_tool("unsubscribe_urc", {"subscription_id": sub_id})
-        assert _payload(res) == {"unsubscribed": True}
+        assert payload(res) == {"unsubscribed": True}
 
         res = await session.call_tool("close_port", {"port": VSIM_PORT})
-        assert _payload(res) == {"closed": True, "port": VSIM_PORT}
+        assert payload(res) == {"closed": True, "port": VSIM_PORT}
 
 
-@pytest.mark.anyio
 async def test_http_run_job_full_flow(base_url: str, many_case_paths: list[Path]) -> None:
     async with _session(base_url) as session:
         # 手动打开的端口：scheduler 只关闭自己新开的端口 → 作业后 send_at 无需重开
         await session.call_tool("open_port", {"port_expr": VSIM_EXPR})
         res = await session.call_tool("start_run", {"paths": [str(p) for p in many_case_paths]})
-        job_id = _payload(res)["job_id"]
+        job_id = payload(res)["job_id"]
 
         # BUSY 互斥：作业运行期间手动发送被拒（kind 枚举判定，detail 携带占用作业 id）
         busy = await session.call_tool("send_at", {"port": VSIM_PORT, "command": "AT"})
         assert busy.is_error is True
-        payload = _payload(busy)
-        assert payload["kind"] == "BUSY"
-        assert payload["detail"]["job_id"] == job_id
+        data = payload(busy)
+        assert data["kind"] == "BUSY"
+        assert data["detail"]["job_id"] == job_id
 
-        snap = await _wait_finished(session, job_id)
+        snap = await wait_finished(session, job_id)
         assert snap["status"] == "finished"
         assert snap["summary"]["passed"] == len(many_case_paths)
         assert snap["summary"]["failed"] == 0
@@ -210,20 +177,19 @@ async def test_http_run_job_full_flow(base_url: str, many_case_paths: list[Path]
         # 互斥解除：作业结束后手动通道立即恢复
         res = await session.call_tool("send_at", {"port": VSIM_PORT, "command": "AT"})
         assert res.is_error is not True
-        assert "OK" in _payload(res)["text"]
+        assert "OK" in payload(res)["text"]
 
 
-@pytest.mark.anyio
 async def test_http_error_channel(base_url: str) -> None:
     async with _session(base_url) as session:
         # get_job 未知 id → is_error=True + 结构化 JSON（kind 枚举判定，非文案匹配）
         res = await session.call_tool("get_job", {"job_id": "no-such-job"})
         assert res.is_error is True
-        payload = _payload(res)
-        assert payload["kind"] == "NOT_FOUND"
-        assert payload["detail"]["job_id"] == "no-such-job"
+        data = payload(res)
+        assert data["kind"] == "NOT_FOUND"
+        assert data["detail"]["job_id"] == "no-such-job"
 
         # send_at 端口未开（用从未打开的端口名，与其他测试顺序无关）→ INVALID_INPUT
         res = await session.call_tool("send_at", {"port": "VSIM_NEVER_OPENED", "command": "AT"})
         assert res.is_error is True
-        assert _payload(res)["kind"] == "INVALID_INPUT"
+        assert payload(res)["kind"] == "INVALID_INPUT"
