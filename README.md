@@ -44,7 +44,9 @@ uv run atprobe gui           # 桌面端 GUI（PySide6）
 
 ## 文档
 
-用例编写规范随仓库维护（`.agents/skills/atprobe-case-author/`）；指令参考（`docs/at-ref/`）与需求、技术设计文档（PRD/REQ/TSD）仅在本地维护，不随仓库分发。
+用户手册随仓库维护（[`docs/user/`](docs/user/README.md)）：用例设计、CLI、GUI、
+配置参考与快速上手。用例编写规范另见 `.agents/skills/atprobe-case-author/`；
+指令参考（`docs/at-ref/`）与需求、技术设计文档（PRD/REQ/TSD）仅在本地维护，不随仓库分发。
 
 ## 技术栈
 

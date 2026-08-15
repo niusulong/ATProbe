@@ -17,6 +17,13 @@ ATProbe — 串口 AT 命令自动化测试工具
   ATProbe.exe 同级目录，按需修改后重启程序
 - 运行日志在 logs\，HTML 报告在 reports\
 
+【详细文档】docs\ 目录内附完整用户手册：
+- docs\README.md           快速上手（5 分钟）
+- docs\testcase-guide.md   用例设计说明（YAML 字段/断言/控制流/常见陷阱）
+- docs\cli-guide.md        命令行用法（全部参数/退出码/CI 集成）
+- docs\gui-guide.md        图形界面用法（手动调试/监控/用例执行/环境配置）
+- docs\config-reference.md 配置参考（atprobe.yaml / env.yaml 逐字段说明）
+
 【系统要求】
 - Windows 10/11 x64
 - 无需安装 Python，本程序已内置运行环境

@@ -85,6 +85,10 @@ def expose_user_assets(version: str) -> Path:
         app_dir / "examples",
         dirs_exist_ok=True,
     )
+    # 用户手册外露（docs/user/ 随仓库分发；本地设计文档 docs/ 其余部分不带）
+    user_docs = REPO_ROOT / "docs" / "user"
+    if user_docs.exists():
+        shutil.copytree(user_docs, app_dir / "docs", dirs_exist_ok=True)
     # 用户配置模板 + README + LICENSE（MIT 要求副本附带许可声明）
     shutil.copy2(
         PACKAGING / "atprobe.yaml.template",
