@@ -1,7 +1,7 @@
 """McpService 设备门面测试（M8 Task 6）：vsim 全链路、错误契约、URC 转发.
 
-零 mock 原则：除 DEVICE_ERROR 转换路径允许 monkeypatch 外全部用真实对象
-（VsimPortManager 进程内应答；真 PortManager 只在不触碰硬件的错误路径上构造）。
+零 mock 原则：全部用真实对象（VsimPortManager 进程内应答；真 PortManager
+只在不触碰硬件的错误路径上构造——DEVICE_ERROR 用真实不存在的端口名触发）。
 """
 
 from __future__ import annotations
@@ -313,6 +313,33 @@ def test_start_run_resolve_inputs_errors(tmp_path):
     with pytest.raises(McpError) as ei:
         real.start_run(paths=[str(case)], ports=["COM3:notanumber"])
     assert ei.value.kind == "INVALID_INPUT"
+
+
+def test_start_run_bad_env_config(tmp_path):
+    """坏 env.yaml（YAML 语法错误）→ start_run INVALID_INPUT（EnvConfigError 转译）."""
+    bad_env = tmp_path / "bad_env.yaml"
+    bad_env.write_text("not: [valid", encoding="utf-8")
+    svc = McpService(_app_cfg(tmp_path, env_config=str(bad_env)), vsim=True)
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    with pytest.raises(McpError) as ei:
+        svc.start_run(paths=[str(case)])
+    assert ei.value.kind == "INVALID_INPUT"
+
+
+def test_resolve_run_inputs_urc_filter_injection(tmp_path):
+    """urc_filter 注入：真实串口分支注入配置元组，vsim 分支跳过（对齐 run.py）."""
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    cfg = _app_cfg(tmp_path, ports=(), urc_filter=("^\\$X:",))
+    inputs = {"paths": [str(case)], "ports": ["COM3:115200:8N1"], "tags": []}
+
+    real = McpService(cfg, vsim=False)
+    port_configs, *_ = real._resolve_run_inputs(**inputs)
+    assert port_configs[0].urc_filter == ("^\\$X:",)
+
+    # vsim=True 同输入：注入跳过（PortConfig 默认空元组）
+    vsim = McpService(cfg, vsim=True)
+    port_configs_v, *_ = vsim._resolve_run_inputs(**inputs)
+    assert port_configs_v[0].urc_filter == ()
 
 
 def test_get_job_unknown(tmp_path):

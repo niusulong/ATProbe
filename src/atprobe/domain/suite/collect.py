@@ -1,8 +1,9 @@
 """M2/M8 用例收集共享逻辑（从 cli/commands/run.py 抽取，CLI 与 MCP 共用）.
 
-纯函数：目录展开、套件/用例加载、参数化展开、标签过滤。副作用（警告打印）
-由调用方处理——本模块返回 warnings 列表；解析失败原样上抛
-（CaseParseError / SuiteParseError），呈现方式由调用方决定。
+纯函数：目录展开、套件/用例加载、参数化展开、标签过滤，以及套件文件
+元信息的轻量读取（read_suite_meta，供 CLI list 与 MCP list_suites 展示）。
+副作用（警告打印）由调用方处理——本模块返回 warnings 列表；解析失败
+原样上抛（CaseParseError / SuiteParseError），呈现方式由调用方决定。
 """
 
 from __future__ import annotations

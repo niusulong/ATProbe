@@ -11,6 +11,7 @@ send_at 与作业互斥：引擎持有端口期间手动发送一律 BUSY。
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -47,8 +48,13 @@ class McpService:
     """MCP 工具的设备门面（资源发现 / 手动调试 / URC 监控 / 批量测试）.
 
     vsim=True 时端口管理器为进程内虚拟模组（演示/联调），否则为真实
-    PortManager。所有公开方法返回 JSON 可序列化的 dict，失败抛 McpError
-    （tools.py 统一转 is_error=True 的结构化 JSON 文本）。
+    PortManager。所有公开方法返回 JSON 可序列化的 dict 或 list[dict]，
+    失败抛 McpError（tools.py 统一转 is_error=True 的结构化 JSON 文本）。
+
+    线程模型（对齐 JobManager 锁纪律）：公开方法由 SDK 线程池并发调用；
+    ``_port_urc_handles`` 的「检查已挂转发 + 挂接」/「pop + 摘除」两个
+    check-then-act 段经 ``_urc_handles_lock`` 互斥——pm 层挂接/摘除是
+    快操作（仅改内部 dict/列表）可在锁内，端口 open/close 等重活不持锁。
     """
 
     def __init__(
@@ -64,8 +70,10 @@ class McpService:
         )
         self.jobs = JobManager(report_root or resolve_workspace_path(app_cfg.report_dir))
         self.urc_registry = UrcRegistry()
-        # port → pm 层 URC 转发句柄（每端口只挂一次 urc_registry.feed）
+        # port → pm 层 URC 转发句柄（每端口只挂一次 urc_registry.feed）；
+        # 挂接/摘除必须持 _urc_handles_lock（check-then-act 互斥，见类 docstring）
         self._port_urc_handles: dict[str, object] = {}
+        self._urc_handles_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 资源发现
@@ -147,10 +155,16 @@ class McpService:
         return {"name": cfg.name, "baud": cfg.baudrate, "frame": str(cfg.frame)}
 
     def close_port(self, port: str) -> dict[str, Any]:
-        """关闭端口（幂等）；同时拆除该端口的 URC 转发（生命周期见 subscribe_urc）."""
-        handle = self._port_urc_handles.pop(port, None)
-        if handle is not None:
-            self.port_manager.unsubscribe_urc(handle)
+        """关闭端口（幂等）；同时拆除该端口的 URC 转发（生命周期见 subscribe_urc）.
+
+        摘除段持 ``_urc_handles_lock``：与 subscribe_urc 的挂接段互斥，
+        避免并发下漏拆/重复摘除同一转发；pm.unsubscribe_urc 是快操作
+        （仅改内部 dict/列表）放锁内可接受，close 本身是重活在锁外。
+        """
+        with self._urc_handles_lock:
+            handle = self._port_urc_handles.pop(port, None)
+            if handle is not None:
+                self.port_manager.unsubscribe_urc(handle)
         self.port_manager.close(port)
         return {"closed": True, "port": port}
 
@@ -198,14 +212,18 @@ class McpService:
         if not self.port_manager.is_connected(port):
             raise invalid_input(f"端口未打开：{port}（请先 open_port）", port=port)
         sub_id = self.urc_registry.subscribe(port, pattern)
-        if port not in self._port_urc_handles:
-            try:
-                self._port_urc_handles[port] = self.port_manager.subscribe_urc(
-                    port, self.urc_registry.feed
-                )
-            except KeyError as exc:  # PortManager 对未开端口抛 KeyError（契约 4）
-                self.urc_registry.unsubscribe(sub_id)  # 回滚，不留悬挂订阅
-                raise invalid_input(f"端口未打开：{port}（请先 open_port）", port=port) from exc
+        # 挂接段持锁：保护「检查 port 是否已挂转发 + 挂接」的 check-then-act
+        # 窗口——并发 subscribe 不重复挂接，且与 close_port 的摘除段互斥。
+        # pm.subscribe_urc 是快操作（仅改内部 dict/列表），放锁内可接受。
+        with self._urc_handles_lock:
+            if port not in self._port_urc_handles:
+                try:
+                    self._port_urc_handles[port] = self.port_manager.subscribe_urc(
+                        port, self.urc_registry.feed
+                    )
+                except KeyError as exc:  # PortManager 对未开端口抛 KeyError（契约 4）
+                    self.urc_registry.unsubscribe(sub_id)  # 回滚，不留悬挂订阅
+                    raise invalid_input(f"端口未打开：{port}（请先 open_port）", port=port) from exc
         return {"subscription_id": sub_id}
 
     def poll_urc(self, subscription_id: str, cursor: int = 0, limit: int = 100) -> dict[str, Any]:

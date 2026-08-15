@@ -7,7 +7,13 @@
   出参：service 返回的 dict/list 序列化为 JSON 文本（``ensure_ascii=False``）。
 - 错误：McpError → 结构化 JSON ``{"kind", "message", "detail"}`` 包在
   ToolError 里抛出 → SDK 转 ``is_error=True``（文本含该 JSON，LLM 可按
-  kind 枚举判定，禁止文案匹配——对齐 errors.py 契约）。
+  kind 枚举判定，禁止文案匹配——对齐 errors.py 契约）。非 McpError 的
+  逃逸异常由 ``_wrap`` 兜底转同构 INTERNAL（errors.py 该枚举的生产者）。
+  注意 SDK 在
+  ``Tool.run`` 会再包一层前缀 ``"Error executing tool <name>: "``（对
+  ToolError 亦然，mcp 2.0.0 base.py），JSON 不在消息最前——客户端解析
+  应从首个 ``{`` 起取（Task 8 err_payload 同此约定），该前缀无法在
+  tools 层去除。
 - ``structured_output=False``：实测 mcp 2.0.0 对 ``-> str`` 返回注解默认
   开启结构化输出（包成 ``{"result": "<json 文本>"}`` 的 structured_content，
   客户端需二次解析），故显式关闭，纯文本出参。
@@ -50,6 +56,17 @@ def _wrap(fn: Callable[..., Any]) -> Callable[..., str]:
             raise ToolError(
                 json.dumps(
                     {"kind": exc.kind, "message": exc.message, "detail": exc.detail},
+                    ensure_ascii=False,
+                )
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - 兜底：非 McpError 逃逸也走结构化 JSON 通道
+            raise ToolError(
+                json.dumps(
+                    {
+                        "kind": "INTERNAL",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "detail": {},
+                    },
                     ensure_ascii=False,
                 )
             ) from exc

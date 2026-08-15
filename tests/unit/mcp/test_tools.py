@@ -17,7 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from atprobe.infra.config.appconfig import AppConfig
 from atprobe.infra.serial.vsim import VSIM_PORT
 from atprobe.mcp.service import McpService
-from atprobe.mcp.tools import INSTRUCTIONS, register
+from atprobe.mcp.tools import INSTRUCTIONS, _wrap, register
 
 EXPECTED_TOOLS = {
     "list_ports",
@@ -89,3 +89,22 @@ async def test_call_tool_error_structured_json(server):  # type: ignore[no-untyp
     payload = json.loads(text[text.index("{") :])
     assert payload["kind"] == "INVALID_INPUT"
     assert payload["detail"] == {"port": "NOPE"}
+
+
+def test_wrap_internal_fallback():
+    """非 McpError 逃逸 → 同构 INTERNAL 结构化 JSON ToolError（errors.py INTERNAL 枚举的生产者）.
+
+    直接调 _wrap 包装后的函数（不经 SDK call_tool）：ToolError 消息即纯 JSON，
+    无 ``"Error executing tool <name>: "`` 前缀（该前缀由 Tool.run 添加）。
+    """
+
+    @_wrap
+    def boom() -> dict[str, str]:
+        raise ValueError("意外逃逸")
+
+    with pytest.raises(ToolError) as ei:
+        boom()
+    payload = json.loads(str(ei.value))
+    assert payload["kind"] == "INTERNAL"
+    assert "ValueError" in payload["message"]
+    assert payload["detail"] == {}
