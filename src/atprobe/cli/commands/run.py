@@ -157,7 +157,9 @@ def run(
     except CaseParseError as exc:
         typer.secho(f"用例解析失败：{exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc
-    cases = collected.cases
+    # Collected 字段已 tuple 化（跨线程安全）；cases 后续要经 filter_by_tags
+    # 重新赋值为 list，故先拷贝为局部 list（tuple(...) 进 EngineConfig 不变）
+    cases = list(collected.cases)
     suite_setups = collected.suite_setup
     suite_teardowns = collected.suite_teardown
 

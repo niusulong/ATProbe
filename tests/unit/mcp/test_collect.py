@@ -16,6 +16,7 @@ import pytest
 
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import CaseParseError
+from atprobe.domain.suite import SuiteParseError
 from atprobe.domain.suite.collect import (
     collect_case_paths,
     expand_parameters,
@@ -55,6 +56,36 @@ class TestCollectCasePaths:
         assert files2 == []
         assert len(warnings2) == 1  # 路径不存在 → 警告（CLI 打印、MCP 记日志）
 
+    def test_dir_scan_covers_yml_suffix(self, tmp_path: Path) -> None:
+        # 历史坑钉住：目录扫描必须同时覆盖 .yml（否则会被静默漏扫）
+        _write(tmp_path / "a.yaml", MINIMAL_CASE)
+        _write(tmp_path / "b.yml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert sorted(f.name for f in files) == ["a.yaml", "b.yml"]
+
+    def test_skips_suite_prefix_in_dir_scan(self, tmp_path: Path) -> None:
+        # suite- 前缀对两种后缀一致排除（.yml 同样不能漏）
+        _write(tmp_path / "suite-x.yaml", "name: s\n")
+        _write(tmp_path / "suite-y.yml", "name: s\n")
+        _write(tmp_path / "b.yaml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert [f.name for f in files] == ["b.yaml"]
+
+    def test_dir_scan_recurses_into_subdirs(self, tmp_path: Path) -> None:
+        # 嵌套目录递归：子目录里的用例也要被扫到（rglob 而非 iterdir）
+        _write(tmp_path / "sub" / "nested.yaml", MINIMAL_CASE)
+        _write(tmp_path / "top.yaml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert sorted(f.name for f in files) == ["nested.yaml", "top.yaml"]
+
+    def test_dir_and_explicit_file_overlap_dedups_by_resolve(self, tmp_path: Path) -> None:
+        # 目录 + 显式文件重叠：resolve 去重后 a.yaml 只出现一次
+        a = _write(tmp_path / "a.yaml", MINIMAL_CASE)
+        _write(tmp_path / "b.yaml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path, a], cases_dir=tmp_path)
+        assert sorted(f.name for f in files) == ["a.yaml", "b.yaml"]
+        assert sum(1 for f in files if f.name == "a.yaml") == 1
+
     def test_empty_paths_scan_cases_dir(self, tmp_path: Path) -> None:
         # paths 为 None/空 → 扫 cases_dir（CLI 省略位置参数、MCP start_run 缺省）
         _write(tmp_path / "a.yaml", MINIMAL_CASE)
@@ -62,17 +93,13 @@ class TestCollectCasePaths:
         assert [f.name for f in files] == ["a.yaml"]
         assert warnings == []
 
-    def test_skips_suite_prefix_in_dir_scan(self, tmp_path: Path) -> None:
-        _write(tmp_path / "suite-x.yaml", "name: s\n")
-        _write(tmp_path / "b.yaml", MINIMAL_CASE)
-        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
-        assert [f.name for f in files] == ["b.yaml"]
-
     def test_explicit_suite_file_kept(self, tmp_path: Path) -> None:
-        # 显式指定的 suite- 文件不跳过（单文件分支不走目录扫描的排除规则）
-        sf = _write(tmp_path / "suite-x.yaml", "name: s\n")
-        files, _ = collect_case_paths([sf], cases_dir=tmp_path)
-        assert files == [sf]
+        # 显式指定的 suite- 文件不跳过（单文件分支不走目录扫描的排除规则）；
+        # .yml 后缀同样保留（与 .yaml 一致）
+        sf_yaml = _write(tmp_path / "suite-x.yaml", "name: s\n")
+        sf_yml = _write(tmp_path / "suite-y.yml", "name: s\n")
+        files, _ = collect_case_paths([sf_yaml, sf_yml], cases_dir=tmp_path)
+        assert files == [sf_yaml, sf_yml]
 
 
 class TestLoadCases:
@@ -81,8 +108,17 @@ class TestLoadCases:
         collected = load_cases([tmp_path / "c.yaml"])
         assert len(collected.cases) == 1
         assert collected.cases[0].name == "mini"
-        assert collected.suite_setup == []
-        assert collected.suite_teardown == []
+        # Collected tuple 化（TSD §5.1 跨线程安全）：空值为 ()
+        assert collected.suite_setup == ()
+        assert collected.suite_teardown == ()
+
+    def test_collected_fields_are_tuples(self, tmp_path: Path) -> None:
+        # 钉住不可变形态：frozen + tuple 字段，append 被类型系统挡住
+        _write(tmp_path / "c.yaml", MINIMAL_CASE)
+        collected = load_cases([tmp_path / "c.yaml"])
+        assert isinstance(collected.cases, tuple)
+        assert isinstance(collected.suite_setup, tuple)
+        assert isinstance(collected.suite_teardown, tuple)
 
     def test_suite_references_and_setup_teardown(self, tmp_path: Path) -> None:
         # suite- 前缀走套件路径：setup/teardown 汇入，用例相对套件目录载入
@@ -110,6 +146,12 @@ class TestLoadCases:
         )
         with pytest.raises(CaseParseError):
             load_cases([tmp_path / "bad.yaml"])
+
+    def test_bad_suite_raises_suite_parse_error(self, tmp_path: Path) -> None:
+        # 套件文件解析失败同样原样上抛（与 CaseParseError 对称）
+        _write(tmp_path / "suite-bad.yaml", "- not\n- a mapping\n")
+        with pytest.raises(SuiteParseError):
+            load_cases([tmp_path / "suite-bad.yaml"])
 
 
 class TestFilterByTags:

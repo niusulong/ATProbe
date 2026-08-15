@@ -7,21 +7,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import parse_case_file
-from atprobe.domain.suite import parse_suite_file
+from atprobe.domain.suite.parser import parse_suite_file
 
 
 @dataclass(frozen=True)
 class Collected:
-    """一次收集的完整结果：展开参数化后的用例 + 套件级前后置步骤."""
+    """一次收集的完整结果：展开参数化后的用例 + 套件级前后置步骤.
 
-    cases: list[Case] = field(default_factory=list)
-    suite_setup: list[Step] = field(default_factory=list)
-    suite_teardown: list[Step] = field(default_factory=list)
+    字段用 tuple（而非 list）：frozen dataclass 持 list 防不住 append()，
+    tuple 化保证实例真正不可变，可安全跨线程传递（TSD §5.1，MCP 异步 job）。
+    """
+
+    cases: tuple[Case, ...] = ()
+    suite_setup: tuple[Step, ...] = ()
+    suite_teardown: tuple[Step, ...] = ()
 
 
 def collect_case_paths(paths: list[Path] | None, cases_dir: Path) -> tuple[list[Path], list[str]]:
@@ -70,20 +75,27 @@ def load_cases(case_paths: list[Path]) -> Collected:
     suite_files = [p for p in case_paths if p.name.startswith("suite-")]
     case_files = [p for p in case_paths if not p.name.startswith("suite-")]
 
-    collected = Collected()
+    # 内部用局部 list 累积，末尾一次性构造不可变 Collected（见类 docstring）
+    cases: list[Case] = []
+    suite_setup: list[Step] = []
+    suite_teardown: list[Step] = []
     # 套件：解析 suite，按 cases 列表载入用例（相对套件文件所在目录）
     for sf in suite_files:
         suite = parse_suite_file(sf)
-        collected.suite_setup.extend(suite.suite_setup)
-        collected.suite_teardown.extend(suite.suite_teardown)
+        suite_setup.extend(suite.suite_setup)
+        suite_teardown.extend(suite.suite_teardown)
         for crel in suite.cases:
             cpath = (sf.parent / crel).resolve()
-            collected.cases.extend(expand_parameters(parse_case_file(cpath)))
+            cases.extend(expand_parameters(parse_case_file(cpath)))
 
     # 普通用例文件
     for cp in case_files:
-        collected.cases.extend(expand_parameters(parse_case_file(cp)))
-    return collected
+        cases.extend(expand_parameters(parse_case_file(cp)))
+    return Collected(
+        cases=tuple(cases),
+        suite_setup=tuple(suite_setup),
+        suite_teardown=tuple(suite_teardown),
+    )
 
 
 def expand_parameters(case: Case) -> list[Case]:
@@ -100,7 +112,7 @@ def expand_parameters(case: Case) -> list[Case]:
     ]
 
 
-def filter_by_tags(cases: list[Case], tags: list[str], exclude_tags: list[str]) -> list[Case]:
+def filter_by_tags(cases: Sequence[Case], tags: list[str], exclude_tags: list[str]) -> list[Case]:
     """标签过滤（REQ-M5 §3.4：多 --tag 并集；--exclude-tag 排除）.
 
     tags 为空表示不过滤（全保留）；命中任一排除标签即剔除。
