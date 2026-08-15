@@ -91,8 +91,10 @@ def main() -> int:
         return 2
 
     res = AtResponder(rssi=args.rssi, cereg=args.cereg)
-    log(f"[vsim] {args.port} @ {args.baud}bps | rssi={res.rssi} cereg={res.cereg} "
-        f"urc={'on ' + str(args.urc_interval) + 's' if args.urc_interval else 'off'}")
+    log(
+        f"[vsim] {args.port} @ {args.baud}bps | rssi={res.rssi} cereg={res.cereg} "
+        f"urc={'on ' + str(args.urc_interval) + 's' if args.urc_interval else 'off'}"
+    )
 
     stop = threading.Event()
 
@@ -101,7 +103,7 @@ def main() -> int:
             return
         urcs = [
             "+CEREG: 1",
-            "+CMTI: \"ME\",12",
+            '+CMTI: "ME",12',
             "+CGEV: NW DETACH",
             "RING",
         ]

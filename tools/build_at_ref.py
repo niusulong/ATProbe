@@ -63,7 +63,9 @@ CHAPTERS: list[tuple[int, str, int, int]] = [
 ]
 
 NOISE_RE = [
-    re.compile(r"^N\d{2,4}[A-Z]?\s*AT\s*命令手册.*$"),  # N58 AT命令手册 / N58 AT 命令手册 / N510M...
+    re.compile(
+        r"^N\d{2,4}[A-Z]?\s*AT\s*命令手册.*$"
+    ),  # N58 AT命令手册 / N58 AT 命令手册 / N510M...
     re.compile(r"^第\d+\s*章.*$"),
     re.compile(r"^深圳市有方.*$"),
     re.compile(r"^版权所有.*$"),
@@ -79,6 +81,7 @@ def is_noise(s: str) -> bool:
 # ---------------------------------------------------------------------------
 # 坐标 span
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Span:
@@ -117,6 +120,7 @@ def page_spans(page: fitz.Page, pno: int) -> list[Span]:
 # 有框表（参数表/对照表）
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FTable:
     y0: float
@@ -134,7 +138,10 @@ def collect_ftables(page: fitz.Page, pno: int) -> list[FTable]:
         raw = t.extract()
         rows: list[list[str]] = []
         for r in raw:
-            row = [("".join(c) if isinstance(c, list) else (c or "")).replace("\n", " ").strip() for c in r]
+            row = [
+                ("".join(c) if isinstance(c, list) else (c or "")).replace("\n", " ").strip()
+                for c in r
+            ]
             rows.append(row)
         # 去噪空列
         if rows:
@@ -160,8 +167,7 @@ def table_md(rows: list[list[str]]) -> str:
         return ""
     ncol = max(len(r) for r in rows)
     rows = [r + [""] * (ncol - len(r)) for r in rows]
-    out = ["| " + " | ".join(rows[0]) + " |",
-           "| " + " | ".join("---" for _ in rows[0]) + " |"]
+    out = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join("---" for _ in rows[0]) + " |"]
     for r in rows[1:]:
         out.append("| " + " | ".join(r) + " |")
     return "\n".join(out)
@@ -170,6 +176,7 @@ def table_md(rows: list[list[str]]) -> str:
 # ---------------------------------------------------------------------------
 # 有序元素流
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Elem:
@@ -190,7 +197,7 @@ def page_elems(page: fitz.Page, pno: int) -> list[Elem]:
             if ft.y0 - 2 <= s.yc <= ft.y1 + 2:
                 in_table[i] = True
     elems: list[Elem] = []
-    for s, used in zip(spans, in_table):
+    for s, used in zip(spans, in_table, strict=True):
         if not used:
             elems.append(Elem(s.yc, pno, "text", s.text, s.xc, s.yc))
     for ft in ftables:
@@ -268,17 +275,23 @@ def render_fmt(buf: list[Elem]) -> str:
     if not points:
         return ""
     rows: list[tuple[str, str, str]] = []
-    cur_type = ""; cur_cmd: list[str] = []; cur_resp: list[str] = []
+    cur_type = ""
+    cur_cmd: list[str] = []
+    cur_resp: list[str] = []
 
     def flush() -> None:
         nonlocal cur_type, cur_cmd, cur_resp
         if cur_type or cur_cmd or cur_resp:
             rows.append((cur_type, " ".join(cur_cmd).strip(), " ".join(cur_resp).strip()))
-        cur_type = ""; cur_cmd = []; cur_resp = []
+        cur_type = ""
+        cur_cmd = []
+        cur_resp = []
 
     for xc, _yc, t in sorted(points, key=lambda p: p[1]):
         if t in TYPE_VALUES:
-            flush(); cur_type = t; continue
+            flush()
+            cur_type = t
+            continue
         if xc < FMT_X_TYPE:
             cur_type = (cur_type + " " + t).strip() if cur_type else t
         elif xc < FMT_X_CMD:
@@ -301,13 +314,16 @@ def _header_only(rows: list[list[str]]) -> bool:
 
 def render_param(buf: list[Elem]) -> str:
     ftables = [e.payload for e in buf if e.kind == "ftable"]
-    text_lines = [str(e.payload).strip() for e in buf if e.kind == "text" and str(e.payload).strip()]
+    text_lines = [
+        str(e.payload).strip() for e in buf if e.kind == "text" and str(e.payload).strip()
+    ]
     if ftables:
         blocks = [table_md(ft.rows) for ft in ftables if ft.rows]  # type: ignore[union-attr]
         intro_txt = " ".join(text_lines).strip()
         parts = []
         if intro_txt:
-            parts.append(intro_txt); parts.append("")
+            parts.append(intro_txt)
+            parts.append("")
         parts.extend(blocks)
         return "\n".join(parts)
     # 无框：参数名/说明成对
@@ -321,10 +337,13 @@ def render_param(buf: list[Elem]) -> str:
             desc = []
             j = i + 1
             while j < n and not _is_name(text_lines[j]):
-                desc.append(text_lines[j]); j += 1
-            pairs.append((s, " ".join(desc).strip())); i = j
+                desc.append(text_lines[j])
+                j += 1
+            pairs.append((s, " ".join(desc).strip()))
+            i = j
         else:
-            pairs.append(("", s)); i += 1
+            pairs.append(("", s))
+            i += 1
     merged: list[tuple[str, str]] = []
     for name, desc in pairs:
         if not name and merged and desc:
@@ -364,26 +383,31 @@ def render_example(buf: list[Elem]) -> str:
 def render_command(cmd: Command) -> str:
     out = [f"### {cmd.num} {cmd.name} — {cmd.desc}", ""]
     sections: list[tuple[str, list[Elem]]] = []
-    cur_label = "preamble"; cur_buf: list[Elem] = []
+    cur_label = "preamble"
+    cur_buf: list[Elem] = []
+
+    def start_section(label: str) -> None:
+        nonlocal cur_label, cur_buf
+        if cur_buf:
+            sections.append((cur_label, cur_buf[:]))
+            cur_buf.clear()
+        cur_label = label
+
     for e in cmd.elems:
         if e.kind == "text":
             s = str(e.payload).strip()
             if s == SEC_FMT:
-                if cur_buf:
-                    sections.append((cur_label, cur_buf[:])); cur_buf.clear()
-                cur_label = "fmt"; continue
+                start_section("fmt")
+                continue
             if s == SEC_PARAM:
-                if cur_buf:
-                    sections.append((cur_label, cur_buf[:])); cur_buf.clear()
-                cur_label = "param"; continue
+                start_section("param")
+                continue
             if s == SEC_EXAMPLE:
-                if cur_buf:
-                    sections.append((cur_label, cur_buf[:])); cur_buf.clear()
-                cur_label = "example"; continue
+                start_section("example")
+                continue
             if s in SUB_MARKS:
-                if cur_buf:
-                    sections.append((cur_label, cur_buf[:])); cur_buf.clear()
-                cur_label = s; continue
+                start_section(s)
+                continue
         cur_buf.append(e)
     if cur_buf:
         sections.append((cur_label, cur_buf[:]))
@@ -395,7 +419,8 @@ def render_command(cmd: Command) -> str:
         if label == "preamble":
             txt = " ".join(str(e.payload) for e in body if e.kind == "text").strip()
             if txt:
-                out.append(txt); out.append("")
+                out.append(txt)
+                out.append("")
         elif label == "fmt":
             tbl = render_fmt(buf)
             if tbl:
@@ -419,17 +444,25 @@ def process_chapter(doc: fitz.Document, num: int, title: str, start: int, end: i
     for pno in range(start - 1, end - 1):
         elems.extend(page_elems(doc[pno], pno))
     intro, cmds = split_commands(elems, num)
-    out = [f"# 第 {num} 章 {title}", "",
-           f"> 来源：《N58 AT 命令手册 v2.0》（2024-12-03）第 {num} 章",
-           "> PDF 提取并结构化重建；命令格式表按坐标分列、参数表按边框重建。", "", "---", ""]
+    out = [
+        f"# 第 {num} 章 {title}",
+        "",
+        f"> 来源：《N58 AT 命令手册 v2.0》（2024-12-03）第 {num} 章",
+        "> PDF 提取并结构化重建；命令格式表按坐标分列、参数表按边框重建。",
+        "",
+        "---",
+        "",
+    ]
     if intro:
         intro_txt = " ".join(str(e.payload) for e in intro if e.kind == "text").strip()
         # 去章大标题残留
         intro_txt = re.sub(rf"^{num}\s+\S.+", "", intro_txt).strip()
         if intro_txt:
-            out.append(intro_txt); out.append("")
+            out.append(intro_txt)
+            out.append("")
     for cmd in cmds:
-        out.append(render_command(cmd)); out.append("")
+        out.append(render_command(cmd))
+        out.append("")
     return "\n".join(out)
 
 
@@ -442,7 +475,8 @@ def main() -> int:
         want = {int(a.removeprefix("ch").split(".")[0]) for a in args}
         targets = [c for c in CHAPTERS if c[0] in want]
     if not targets:
-        print("无匹配章节", file=sys.stderr); return 1
+        print("无匹配章节", file=sys.stderr)
+        return 1
     doc = fitz.open(str(PDF))
     for num, title, start, end in targets:
         md = process_chapter(doc, num, title, start, end)

@@ -125,7 +125,9 @@ def apply_update(
     try:
         subprocess.Popen(  # noqa: S603,S607 - cmd 是 Windows 系统命令
             ["cmd", "/c", "start", "/b", "", str(bat_path)],
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+            # CREATE_NEW_PROCESS_GROUP 仅 Windows 存在；Linux（CI 单测）取 0。
+            # 升级流程本身只在 Windows 运行，此处仅为让单测跨平台通过。
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             close_fds=True,
         )
     except OSError as exc:

@@ -49,7 +49,10 @@ def main() -> int:
 
     csq_line = next(ln for ln in lines if ln.startswith("+CSQ:"))
     m = re.search(r"\+CSQ:\s*(\d+)", csq_line)
-    _assert(m is not None and int(m.group(1)) >= 10, f"rssi 提取值 >=10（满足用例断言）：{m.group(1) if m else None}")
+    _assert(
+        m is not None and int(m.group(1)) >= 10,
+        f"rssi 提取值 >=10（满足用例断言）：{m.group(1) if m else None}",
+    )
 
     # 3) AT+CEREG? → +CEREG: <n>,<stat>，stat 正则命中且 ==1
     frame = r.respond("AT+CEREG?")
@@ -64,7 +67,9 @@ def main() -> int:
 
     # 5) AT+CGDCONT? → 至少一行 +CGDCONT
     frame = r.respond("AT+CGDCONT?")
-    _assert(any(ln.startswith("+CGDCONT:") for ln in _frame_lines(frame)), "AT+CGDCONT? 返回 PDP 上下文")
+    _assert(
+        any(ln.startswith("+CGDCONT:") for ln in _frame_lines(frame)), "AT+CGDCONT? 返回 PDP 上下文"
+    )
 
     # 6) 写指令 AT+CEREG=1 → OK 且 n 被置位
     _assert(r.respond("AT+CEREG=1").rstrip().endswith(b"OK"), "AT+CEREG=1 返回 OK")

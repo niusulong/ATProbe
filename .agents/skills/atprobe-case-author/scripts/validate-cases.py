@@ -36,9 +36,9 @@ from pathlib import Path
 # 优先用已安装的 atprobe（不假设仓库路径——本 skill 可在任意工作区运行）。
 # 导入失败说明当前 Python 环境没装 atprobe，给清晰的安装指引后退出。
 try:
+    from atprobe.domain.case.evaluator import ExpressionError, evaluate
     from atprobe.domain.case.parser import CaseParseError, parse_case
     from atprobe.domain.case.templater import find_references
-    from atprobe.domain.case.evaluator import ExpressionError, evaluate
     from atprobe.domain.suite import SuiteParseError, parse_suite_file
     from atprobe.infra.config.envconfig import EnvConfig, load_env_config_file
 
@@ -58,7 +58,9 @@ except ImportError:
 
 # 文件名四段规范：<功能块>-<指令>-<类型>-<变体>.yaml，全大写字母/数字/下划线
 # 类型段：FUNC/RESP/PARA（指令中心用例）或 REGRESS（bug 回归用例，变体段放 BUGID）
-_FILENAME_RE = re.compile(r"^([A-Z][A-Z0-9_]*)-([A-Z][A-Z0-9_]*)-(FUNC|RESP|PARA|REGRESS)-([A-Z][A-Z0-9_]*)\.yaml$")
+_FILENAME_RE = re.compile(
+    r"^([A-Z][A-Z0-9_]*)-([A-Z][A-Z0-9_]*)-(FUNC|RESP|PARA|REGRESS)-([A-Z][A-Z0-9_]*)\.yaml$"
+)
 # 合法类型
 _VALID_TYPES = {"FUNC", "RESP", "PARA", "REGRESS"}
 
@@ -84,7 +86,11 @@ def _check_filename(path: Path, block_name: str | None) -> list[str]:
 def _iter_regexes(case) -> list[tuple[str, str]]:
     """从 Case 模型提取所有正则字符串（来源标注, 正则）。只收集，不编译。"""
     out: list[tuple[str, str]] = []
-    for phase_name, steps in (("setup", case.setup), ("steps", case.steps), ("teardown", case.teardown or ())):
+    for phase_name, steps in (
+        ("setup", case.setup),
+        ("steps", case.steps),
+        ("teardown", case.teardown or ()),
+    ):
         for i, step in enumerate(steps):
             prefix = f"{phase_name}[{i}]"
             if step.extract:
@@ -120,7 +126,11 @@ def _check_condition_exprs(case) -> list[str]:
     语义判定（变量未定义→null）不影响解析校验。
     """
     errs: list[str] = []
-    for phase_name, steps in (("setup", case.setup), ("steps", case.steps), ("teardown", case.teardown or ())):
+    for phase_name, steps in (
+        ("setup", case.setup),
+        ("steps", case.steps),
+        ("teardown", case.teardown or ()),
+    ):
         for i, step in enumerate(steps):
             prefix = f"{phase_name}[{i}]"
             exprs: list[tuple[str, str]] = []
@@ -175,7 +185,9 @@ def _check_env_refs(case, env: EnvConfig | None) -> tuple[list[str], list[str]]:
     return errs, list(dict.fromkeys(missing))  # 去重保序
 
 
-def validate_file(path: Path, env: EnvConfig | None, block_name: str | None) -> tuple[list[str], list[str]]:
+def validate_file(
+    path: Path, env: EnvConfig | None, block_name: str | None
+) -> tuple[list[str], list[str]]:
     """验证单个用例文件。返回 (errors, env_missing)。"""
     errs: list[str] = []
     text = path.read_text(encoding="utf-8")
@@ -228,19 +240,21 @@ def _run_basic_only(case_dir: Path) -> int:
         from ruamel.yaml import YAML
         from ruamel.yaml.error import YAMLError
     except ImportError:
-        print("错误：降级校验需要 ruamel.yaml（atprobe 的依赖），请先安装 atprobe。", file=sys.stderr)
+        print(
+            "错误：降级校验需要 ruamel.yaml（atprobe 的依赖），请先安装 atprobe。", file=sys.stderr
+        )
         return 2
 
     yaml_loader = YAML(typ="safe")
-    # 用正则匹配 YAML 值里的正则特征（含 \+ \d \r \n 等）——粗筛，可能漏报但不误报
-    re_value = re.compile(r"[\\\.()\[\]\d\*]")
 
     yaml_files = sorted(p for p in case_dir.rglob("*.yaml") if not p.name.startswith("suite-"))
     total_errs = 0
     for path in yaml_files:
         file_errs: list[str] = []
         # 文件名
-        file_errs.extend(_check_filename(path, path.parent.name.upper() if path.parent.name else None))
+        file_errs.extend(
+            _check_filename(path, path.parent.name.upper() if path.parent.name else None)
+        )
         # YAML 语法
         try:
             text = path.read_text(encoding="utf-8")
@@ -263,7 +277,7 @@ def _run_basic_only(case_dir: Path) -> int:
 
     print(f"\n{'=' * 40}")
     if total_errs == 0:
-        print(f"✓ 基础校验通过（降级模式，未做 schema/env 校验）")
+        print("✓ 基础校验通过（降级模式，未做 schema/env 校验）")
         return 0
     print(f"✗ 失败: {total_errs} 个错误（降级模式）")
     return 1
@@ -414,7 +428,9 @@ def main() -> int:
         if all_missing:
             print(f"  （{len(all_missing)} 个文件有 env 待补充项，见上）")
         return 0
-    print(f"✗ 失败: {total_errs} 个错误，涉及文件见上（共扫描 {total_files} 个用例 + {total_suites} 个套件）")
+    print(
+        f"✗ 失败: {total_errs} 个错误，涉及文件见上（共扫描 {total_files} 个用例 + {total_suites} 个套件）"
+    )
     return 1
 
 
