@@ -147,3 +147,6 @@ packaging/build.log
 # 厂商 AT 指令手册 PDF 与真实设备 COM5 配置（含 IMEI/固件串），本地文件不入库
 /neoway_n58_at命令手册_v2.0_20241203.pdf
 examples/atprobe-com5.yaml
+
+# superpowers 技能的本地计划/设计文档（工作产物，不入库）
+.agents/skills/docs/
