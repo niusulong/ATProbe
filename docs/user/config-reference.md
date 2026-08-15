@@ -58,9 +58,15 @@
 | `log.dir` | 字符串 | `./logs` | 原始日志根目录（按会话留存，手动清理） |
 | `pressure.pass_rate_threshold` | 数值（%） | `95` | 压测用例 PASS 的成功率阈值 |
 | `urc_filter` | 字符串列表 | `[]` | 噪声 URC 过滤正则（§3.8 重点） |
+| `mcp.host` | 字符串 | `127.0.0.1` | MCP serve 监听地址；默认故意回环（最小暴露面），远程访问需显式 `0.0.0.0` |
+| `mcp.port` | 整数 | `8470` | MCP serve 监听端口 |
+| `mcp.token_file` | 字符串 | 不设置 | serve 形态的 Token 文件（可选；Token 四级优先级的第 4 级） |
 
 注意：`log.keep`（日志保留份数）字段**已移除**——它从未接入任何清理逻辑，
 写进文件会被静默忽略；日志目录按会话留存，需手动清理。
+
+`mcp.*` 三键仅 `serve` 形态消费（`stdio` 形态忽略），命令行
+`--host`/`--port`/`--token-file` 优先于配置；详见 `mcp-guide.md` §4.2/§7。
 
 ### 3.2 ports：复合端口表达式
 
@@ -291,6 +297,11 @@ log:
 
 pressure:
   pass_rate_threshold: 95        # 压测用例 PASS 阈值（成功率 %）
+
+mcp:                             # MCP 服务（仅 serve 形态消费，stdio 忽略；见 mcp-guide.md §7）
+  host: 127.0.0.1                # serve 监听地址：默认回环，远程访问需显式 0.0.0.0
+  port: 8470                     # serve 监听端口
+  # token_file: ./mcp-token.txt  # 可选：serve 的第 4 级 Token 来源（mcp-guide.md §4.2）
 ```
 
 ### 5.2 env.yaml（节选带注释，完整 18 组见 examples/env.yaml）

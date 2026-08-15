@@ -14,7 +14,7 @@ def test_setup_logging_configures_root_logger(tmp_path, monkeypatch):
 
     # 把工作区定向到 tmp_path，避免污染真实 logs/
     monkeypatch.setattr(logging_config, "_log_dir", lambda: tmp_path / "logs")
-    # 重置根 logger（清理其他测试可能挂的 handler）
+    # 记录进入测试前的根 logger handler 快照（teardown 差集关闭的基准）
     root = logging.getLogger()
     saved_handlers = root.handlers[:]
     saved_level = root.level
@@ -28,12 +28,13 @@ def test_setup_logging_configures_root_logger(tmp_path, monkeypatch):
         assert any(issubclass(t, logging.StreamHandler) for t in handler_types)
         assert root.level == logging.INFO
     finally:
-        # 恢复根 logger，避免污染其他测试
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
-        for h in saved_handlers:
-            root.addHandler(h)
+        # 差集关闭：只 close setup_logging 新挂的 handler；进入测试前已有的
+        # （pytest 等）不 close、原样恢复——否则后台线程（如 M8 job daemon）
+        # 后续写日志会命中已关闭的 handler，报 Logging error
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
         root.setLevel(saved_level)
 
 
@@ -42,6 +43,10 @@ def test_thread_excepthook_logs_exception(tmp_path, monkeypatch):
     from atprobe.infra import logging_config
 
     monkeypatch.setattr(logging_config, "_log_dir", lambda: tmp_path / "logs")
+    # 快照须在 setup_logging 之前取（差集关闭的基准）
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
     log_path = logging_config.setup_logging(level=logging.INFO)
 
     captured: list[BaseException] = []
@@ -69,11 +74,12 @@ def test_thread_excepthook_logs_exception(tmp_path, monkeypatch):
     finally:
         threading.excepthook = saved_thread_hook
         sys.excepthook = saved_sys_hook
-        # 清理根 logger handler
-        root = logging.getLogger()
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
+        # 差集关闭：只 close 本测试新挂的 handler，进入前已有的原样恢复
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
 
 
 def test_setup_logging_falls_back_to_temp_on_permission_error(monkeypatch):
@@ -96,11 +102,13 @@ def test_setup_logging_falls_back_to_temp_on_permission_error(monkeypatch):
         assert str(log_path).startswith(tempfile.gettempdir())
         assert log_path.name == "atprobe.log"
     finally:
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
-        for h in saved_handlers:
-            root.addHandler(h)
+        # 差集关闭：只 close setup_logging 新挂的 handler；进入测试前已有的
+        # （pytest 等）不 close、原样恢复——否则后台线程（如 M8 job daemon）
+        # 后续写日志会命中已关闭的 handler，报 Logging error
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
         root.setLevel(saved_level)
 
 
@@ -119,11 +127,13 @@ def test_setup_logging_is_idempotent(monkeypatch, tmp_path):
         count_after_second = len(root.handlers)
         assert count_after_second == count_after_first  # 不重复挂
     finally:
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
-        for h in saved_handlers:
-            root.addHandler(h)
+        # 差集关闭：只 close setup_logging 新挂的 handler；进入测试前已有的
+        # （pytest 等）不 close、原样恢复——否则后台线程（如 M8 job daemon）
+        # 后续写日志会命中已关闭的 handler，报 Logging error
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
         root.setLevel(saved_level)
 
 
@@ -139,9 +149,11 @@ def test_setup_logging_debug_level(monkeypatch, tmp_path):
         logging_config.setup_logging(level=logging.DEBUG)
         assert root.level == logging.DEBUG
     finally:
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
-        for h in saved_handlers:
-            root.addHandler(h)
+        # 差集关闭：只 close setup_logging 新挂的 handler；进入测试前已有的
+        # （pytest 等）不 close、原样恢复——否则后台线程（如 M8 job daemon）
+        # 后续写日志会命中已关闭的 handler，报 Logging error
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
         root.setLevel(saved_level)

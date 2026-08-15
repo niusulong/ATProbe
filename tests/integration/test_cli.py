@@ -2,13 +2,36 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from atprobe.cli.main import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging():
+    """差集恢复 root logger：CLI run 进程内调 setup_logging 的清理兜底.
+
+    run 命令在本进程调用 setup_logging（run.py），会把 RotatingFileHandler
+    （真实工作区 logs/）与 StreamHandler（invoke 期间的捕获 stderr）挂上
+    root 且无人摘除——invoke 结束后捕获流被关闭，后续任何通过 root 的日志
+    （如 M8 job daemon 线程的「job 完成」）命中已关闭流，报 Logging error。
+    测试结束差集关闭新挂 handler 并恢复原状（同 test_logging_config.py）。
+    """
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    saved_level = root.level
+    yield
+    for h in list(root.handlers):
+        if h not in saved:
+            h.close()
+    root.handlers = saved
+    root.setLevel(saved_level)
 
 
 class TestVersion:

@@ -1,6 +1,6 @@
 """M8 McpService 设备门面：把端口/用例/URC/作业粘成 MCP 工具的单一入口.
 
-分层定位（TSD §5.4）：本模块是 mcp 入口层的领域门面——只做参数解析、
+分层定位（TSD §11）：本模块是 mcp 入口层的领域门面——只做参数解析、
 错误转译（→ McpError kind 枚举）与跨组件编排，不含协议细节（tools.py）
 与业务状态机（JobManager / UrcRegistry）。
 
