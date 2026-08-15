@@ -181,8 +181,7 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
             isinstance(x, str) for x in urc_filter_raw
         ):
             raise AppConfigError(
-                "'urc_filter' 必须是字符串列表（正则，匹配整行内容），"
-                f"实际：{urc_filter_raw!r}",
+                f"'urc_filter' 必须是字符串列表（正则，匹配整行内容），实际：{urc_filter_raw!r}",
                 source=source,
             )
         cfg = _replace(cfg, urc_filter=tuple(urc_filter_raw))

@@ -641,9 +641,7 @@ class SerialConnection:
                     # urc_filter 不得剥离（keep_re）——否则「URC 即期待响应」类
                     # 命令（如 AT$MYGPSPOS=0,1 的 $MYGPSPOS 循环上报）在全局
                     # filter 配置下永远无法在响应文本中见到自己的目标行。
-                    resp_text = self._strip_filtered_urcs(
-                        _decode(resp_bytes), keep_re=wait_urc_re
-                    )
+                    resp_text = self._strip_filtered_urcs(_decode(resp_bytes), keep_re=wait_urc_re)
                     self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
                     # P3 修复：匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们
                     # 既不在缓冲也未被派发）——按 URC 分流补派发一次。
@@ -731,9 +729,7 @@ class SerialConnection:
                     if self._buffer_generation == generation:
                         self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
 
-    def _strip_filtered_urcs(
-        self, text: str, keep_re: re.Pattern[bytes] | None = None
-    ) -> str:
+    def _strip_filtered_urcs(self, text: str, keep_re: re.Pattern[bytes] | None = None) -> str:
         """从响应文本剥离 urc_filter 匹配的 URC 行（含吸附紧邻空行）.
 
         设备主动上报的发射单元自带空行包裹（实测 N58：\\r\\n$MYGPSPOS: ...\\r\\n\\r\\n），

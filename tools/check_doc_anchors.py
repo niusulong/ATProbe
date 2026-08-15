@@ -6,6 +6,7 @@
 用法：python tools/check_doc_anchors.py
 退出码：0 全部命中；1 有缺失（CI 可用）。
 """
+
 from __future__ import annotations
 
 import re

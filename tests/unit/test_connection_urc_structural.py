@@ -98,9 +98,7 @@ class TestPostTerminatorUrcHandling:
         conn.add_urc_handler(lambda evt: received.append(evt.text))
 
         conn._awaiting.set()
-        conn._process_incoming(
-            b"\r\n+CSQ: 10,99\r\nOK\r\n\r\n" + _GPS + b"\r\n\r\n"
-        )
+        conn._process_incoming(b"\r\n+CSQ: 10,99\r\nOK\r\n\r\n" + _GPS + b"\r\n\r\n")
 
         resp = conn._response_q.get_nowait()
         assert resp.status is ResponseStatus.COMPLETE
@@ -135,9 +133,7 @@ class TestPostTerminatorUrcHandling:
         conn._awaiting.set()
         conn._process_incoming(b"\r\n" + _GPS + b"\r\n\r\n")
         # 命令应答 + 同 chunk 尾随 2 条
-        conn._process_incoming(
-            b"\r\nOK\r\n\r\n" + _GPS + b"\r\n\r\n\r\n" + _GPS + b"\r\n\r\n"
-        )
+        conn._process_incoming(b"\r\nOK\r\n\r\n" + _GPS + b"\r\n\r\n\r\n" + _GPS + b"\r\n\r\n")
         resp = conn._response_q.get_nowait()
         # 交付后再来 1 条（空闲）
         conn._awaiting.clear()
@@ -219,9 +215,7 @@ class TestUrcFilterStripping:
         conn, _ = self._conn(monkeypatch)
         conn._awaiting.set()
         # 业务码行（无 OK 终结）+ 插队噪声 URC 单元
-        conn._process_incoming(
-            b"\r\n+UPDATETIME: No PPP Link\r\n" + b"\r\n" + _GPS + b"\r\n\r\n"
-        )
+        conn._process_incoming(b"\r\n+UPDATETIME: No PPP Link\r\n" + b"\r\n" + _GPS + b"\r\n\r\n")
         # 模拟 send_command 超时路径：取 buffer 快照
         with conn._buffer_lock:
             partial = bytes(conn._buffer)
@@ -449,9 +443,7 @@ class TestWaitUrcTargetPriorityOverFilter:
 
     def test_non_target_noise_still_stripped_in_wait_urc(self, monkeypatch) -> None:
         """wait_urc 等待期间插队的其它 filter 行仍被剥离（只有目标行豁免）."""
-        conn = _make_connection(
-            monkeypatch, urc_filter=(r"^\$MYGPSPOS:", r"^\+NOISE:")
-        )
+        conn = _make_connection(monkeypatch, urc_filter=(r"^\$MYGPSPOS:", r"^\+NOISE:"))
         conn._awaiting.set()
         with conn._buffer_lock:
             conn._wait_urc_re = re.compile(rb"\+TARGET: 1")
@@ -475,9 +467,7 @@ class TestWaitUrcTargetPriorityOverFilter:
         with conn._buffer_lock:
             partial = bytes(conn._buffer)
             keep_re = conn._wait_urc_re
-        text = conn._strip_filtered_urcs(
-            partial.decode("utf-8", errors="replace"), keep_re=keep_re
-        )
+        text = conn._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
         # OK 段保留 + 悬置的半条目标行保留（keep_re 豁免使其不被当噪声剥离）
         assert text.startswith("\r\nOK\r\n")
         assert "$MYGPSPOS" in text
@@ -505,9 +495,7 @@ class TestWaitUrcModeWithVendorPrefix:
         with conn._buffer_lock:
             conn._wait_urc_re = re.compile(rb"\+CIPOPEN: 0,0")
         conn._process_incoming(b"\r\nOK\r\n")
-        conn._process_incoming(
-            b"\r\n+CIPOPEN: 0,0\r\n\r\n" + _GPS + b"\r\n\r\n"
-        )
+        conn._process_incoming(b"\r\n+CIPOPEN: 0,0\r\n\r\n" + _GPS + b"\r\n\r\n")
 
         resp = conn._response_q.get_nowait()
         assert resp.status is ResponseStatus.COMPLETE

@@ -817,7 +817,9 @@ class MainWindow(QMainWindow):
         if dry_run:
             was_open = self._port_manager.is_connected(port)
             try:
-                self._port_manager.open(PortConfig(name=port, urc_filter=self._app_config.urc_filter))
+                self._port_manager.open(
+                    PortConfig(name=port, urc_filter=self._app_config.urc_filter)
+                )
                 open_ok = True
             except Exception:  # noqa: BLE001
                 open_ok = False
@@ -836,7 +838,9 @@ class MainWindow(QMainWindow):
         # 确保端口已连接
         if not self._port_manager.is_connected(port):
             try:
-                self._port_manager.open(PortConfig(name=port, urc_filter=self._app_config.urc_filter))
+                self._port_manager.open(
+                    PortConfig(name=port, urc_filter=self._app_config.urc_filter)
+                )
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "端口错误", f"打开端口 {port} 失败：{exc}")
                 return
