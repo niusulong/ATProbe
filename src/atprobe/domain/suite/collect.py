@@ -10,10 +10,57 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import parse_case_file
 from atprobe.domain.suite.parser import parse_suite_file
+
+
+class SuiteMeta(NamedTuple):
+    """套件文件轻量元信息（list 展示与 MCP list_suites 共用）.
+
+    字段全可空：文件不可读/结构异常时返回全空值，调用方以文件名兜底展示。
+    """
+
+    name: str | None
+    description: str | None
+    case_count: int | None
+    tags: tuple[str, ...]
+
+
+def read_suite_meta(path: Path) -> SuiteMeta:
+    """轻量解析套件文件的 name/description/cases 数量/tags.
+
+    套件自有简单 schema，不走 Suite 模型完整解析（引用的用例文件不打开，
+    cases 仅计数）——CLI list 与 MCP list_suites 共享（M8 Task 6 抽取）。
+    """
+    from io import StringIO
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        raw = YAML(typ="safe").load(StringIO(path.read_text(encoding="utf-8")))
+    except (YAMLError, OSError):
+        return SuiteMeta(None, None, None, ())
+    if not isinstance(raw, dict):
+        return SuiteMeta(None, None, None, ())
+    name = raw.get("name")
+    desc = raw.get("description")
+    cases = raw.get("cases")
+    case_count = len(cases) if isinstance(cases, list) else None
+    raw_tags = raw.get("tags")
+    tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, list) else ()
+    if isinstance(name, str) and name:
+        name = name.strip() or None
+    else:
+        name = None
+    if not (isinstance(desc, str) and desc.strip()):
+        desc = None
+    else:
+        desc = desc.strip()
+    return SuiteMeta(name, desc, case_count, tags)
 
 
 @dataclass(frozen=True)

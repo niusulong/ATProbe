@@ -4,4 +4,6 @@
     errors    — McpError 结构化错误（kind 枚举判定，全模块共用）
     urcbuffer — URC 订阅注册表（游标式环形缓冲）
     jobs      — JobManager 异步作业状态机（单并发 BUSY/进度快照/报告渲染）
+    service   — McpService 设备门面（资源发现/手动调试/URC/批量测试编排）
+    tools     — 13 个 MCP 工具注册（官方 SDK @server.tool，JSON 文本出参）
 """

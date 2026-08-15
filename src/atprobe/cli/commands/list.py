@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from atprobe.domain.case.parser import CaseParseError, parse_case_file
+from atprobe.domain.suite.collect import read_suite_meta
 from atprobe.infra.config.appconfig import load_app_config_file
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
@@ -79,7 +80,7 @@ def _list_suites(cases_dir: Path) -> None:
     # M5 修复：同时扫 suite-*.yaml 与 suite-*.yml，与 run.py 一致
     suite_files = sorted({*cases_dir.rglob("suite-*.yaml"), *cases_dir.rglob("suite-*.yml")})
     for f in suite_files:
-        name, desc, case_count, tags = _parse_suite_meta(f)
+        name, desc, case_count, tags = read_suite_meta(f)
         rel = f.relative_to(cases_dir)
         display_name = name or f.stem
         parts = [f"  {rel}", display_name]
@@ -92,36 +93,6 @@ def _list_suites(cases_dir: Path) -> None:
         typer.echo("  ".join(parts))
         count += 1
     typer.echo(f"共 {count} 个套件")
-
-
-def _parse_suite_meta(path: Path) -> tuple[str | None, str | None, int | None, tuple[str, ...]]:
-    """轻量解析套件文件的 name/description/cases 数量/tags（套件自有简单 schema，不走 Case 模型）."""
-    from io import StringIO
-
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    try:
-        raw = YAML(typ="safe").load(StringIO(path.read_text(encoding="utf-8")))
-    except (YAMLError, OSError):
-        return None, None, None, ()
-    if not isinstance(raw, dict):
-        return None, None, None, ()
-    name = raw.get("name")
-    desc = raw.get("description")
-    cases = raw.get("cases")
-    case_count = len(cases) if isinstance(cases, list) else None
-    raw_tags = raw.get("tags")
-    tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, list) else ()
-    if isinstance(name, str) and name:
-        name = name.strip() or None
-    else:
-        name = None
-    if not (isinstance(desc, str) and desc.strip()):
-        desc = None
-    else:
-        desc = desc.strip()
-    return name, desc, case_count, tags
 
 
 def _list_ports() -> None:
