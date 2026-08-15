@@ -83,4 +83,4 @@ uv run python packaging/build.py
 
 ## 许可
 
-MIT
+[MIT](LICENSE) © 2026 牛苏龙 (Niu Sulong)

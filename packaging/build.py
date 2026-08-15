@@ -85,12 +85,13 @@ def expose_user_assets(version: str) -> Path:
         app_dir / "examples",
         dirs_exist_ok=True,
     )
-    # 用户配置模板 + README
+    # 用户配置模板 + README + LICENSE（MIT 要求副本附带许可声明）
     shutil.copy2(
         PACKAGING / "atprobe.yaml.template",
         app_dir / "atprobe.yaml.template",
     )
     shutil.copy2(PACKAGING / "README.txt", app_dir / "README.txt")
+    shutil.copy2(REPO_ROOT / "LICENSE", app_dir / "LICENSE")
     return app_dir
 
 

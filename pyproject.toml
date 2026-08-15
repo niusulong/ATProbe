@@ -9,7 +9,7 @@ description = "串口 AT 命令自动化测试工具 (Serial AT Command Automati
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "ATProbe" }]
+authors = [{ name = "牛苏龙 (Niu Sulong)" }]
 keywords = ["serial", "at-command", "embedded", "testing", "automation"]
 
 # 运行时依赖（见 TSD §3.1）
