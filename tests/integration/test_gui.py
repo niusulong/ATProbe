@@ -63,26 +63,43 @@ class TestMainWindow:
         win.new_tab("env_config")
         assert win.tabs.count() == initial + 2
 
-    def test_theme_toggle_persists(self, qapp) -> None:  # type: ignore[no-untyped-def]
-        """C1：主题切换更新全局状态 + QSettings 记忆."""
+    def test_theme_toggle_persists(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """C1：主题切换更新全局状态 + QSettings 记忆.
+
+        P2 修复配套：改用 INI 后端 + tmp_path——注册表后端在受限环境（沙箱/CI
+        策略拒绝 HKCU 写入）下 setValue 静默落空（仅置 status），测试必假失败；
+        INI 落盘路径由 setPath 注入，环境无关且不污染真实用户偏好。
+        """
         from PySide6.QtCore import QSettings
 
         from atprobe.gui.mainwindow import MainWindow
         from atprobe.gui.theme import current_theme_is_dark
 
-        QSettings("ATProbe", "ATProbe").setValue("theme/dark", False)
-        win = MainWindow()
-        assert win._dark is False  # noqa: SLF001
-        # 切到深色
-        win._toggle_theme(True)  # noqa: SLF001
-        assert current_theme_is_dark() is True
-        assert bool(QSettings("ATProbe", "ATProbe").value("theme/dark", False, type=bool)) is True
-        assert win._theme_action.text() == "切换浅色主题"  # noqa: SLF001
-        # 切回浅色
-        win._toggle_theme(False)  # noqa: SLF001
-        assert current_theme_is_dark() is False
-        # 清理
-        QSettings("ATProbe", "ATProbe").setValue("theme/dark", False)
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+        try:
+            _probe = QSettings("ATProbe", "ATProbe")
+            _probe.setValue("theme/dark", False)
+            _probe.sync()
+            if _probe.status() is not QSettings.Status.NoError:
+                # 受限环境（沙箱策略拒绝 Qt C++ 侧文件/注册表写入，setValue 静默落空）：
+                # 持久化断言在此环境不可能通过，显式跳过而非假失败。
+                pytest.skip("QSettings 持久化在当前环境不可写（仅内存缓存）")
+            QSettings("ATProbe", "ATProbe").setValue("theme/dark", False)
+            win = MainWindow()
+            assert win._dark is False  # noqa: SLF001
+            # 切到深色
+            win._toggle_theme(True)  # noqa: SLF001
+            assert current_theme_is_dark() is True
+            assert (
+                bool(QSettings("ATProbe", "ATProbe").value("theme/dark", False, type=bool)) is True
+            )
+            assert win._theme_action.text() == "切换浅色主题"  # noqa: SLF001
+            # 切回浅色
+            win._toggle_theme(False)  # noqa: SLF001
+            assert current_theme_is_dark() is False
+        finally:
+            QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
 
     def test_subscribe_monitor_wires_tx_rx(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """监控订阅同时接 TX（写侧）与 RX（读侧），双向数据都到 sink（REQ-M6 §6.2）."""

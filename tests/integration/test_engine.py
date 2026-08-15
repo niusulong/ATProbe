@@ -536,7 +536,7 @@ steps:
         assert len(cr.step_results) == 2  # 后续步骤执行
         assert cr.status is CaseStatus.FAIL  # 第一步FAIL导致用例FAIL
 
-    def test_setup_skip_aborts_case(self, fake_port) -> None:  # type: ignore[no-unbuilt-def]
+    def test_setup_skip_aborts_case(self, fake_port) -> None:  # type: ignore[no-untyped-def]
         # setup 步骤 on_failure:skip 仍应跳过整个用例（前提未满足），
         # 而非让用例继续执行 body（REQ-M2 §7：setup 失败一律跳过整个用例）
         fake_port.script_text("COM3", "ERROR\r\n", match="AT+SETUP", persistent=True)
@@ -642,7 +642,7 @@ steps:
         result = _engine_with_fake(fake_port).start(cfg)
         assert result.summary.passed == 1
 
-    def test_suite_setup_failure_skips_cases(self, fake_port) -> None:  # type: ignore[no-unbuilt-def]
+    def test_suite_setup_failure_skips_cases(self, fake_port) -> None:  # type: ignore[no-untyped-def]
         # suite_setup 失败（AT+CFUN=1 返回 ERROR）→ 不应执行 cases
         fake_port.script_text("COM3", "ERROR\r\n", match="AT+CFUN=1", persistent=True)
         # case 用 AT——若 cases 被错误执行会返回 OK

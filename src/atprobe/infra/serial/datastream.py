@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from atprobe.infra.serial.config import DataStreamSpec, Terminator
+from atprobe.infra.serial.config import DataStreamSpec
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.interfaces import CancelToken
 
@@ -56,7 +56,9 @@ def send_data_stream(
                 sleep(spec.chunk_interval_ms / 1000.0)
 
     if spec.append_terminator:
-        term = Terminator.CRLF.value.encode("ascii")
+        # P3 修复：结束符按连接配置而非硬编码 CRLF（与 write_command 的连接级
+        # 终结符语义一致）
+        term = conn.config.terminator.value.encode("ascii")
         _write_with_cancel(conn, term, cancel)
 
 

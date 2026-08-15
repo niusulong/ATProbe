@@ -70,10 +70,13 @@ def setup_logging(level: int = logging.INFO) -> Path:
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
-    # 控制台 handler（开发态 / CLI 有用；GUI console=False 时无害）
-    stream_handler = logging.StreamHandler(sys.stderr)
-    stream_handler.setFormatter(formatter)
-    root.addHandler(stream_handler)
+    # 控制台 handler（开发态 / CLI 有用）。P3 修复：冻结 windowed GUI（console=False）
+    # 下 sys.stderr 为 None，无条件挂载会让每次 emit 抛 AttributeError（被
+    # handleError 静默吞但平添开销）且控制台日志彻底丢失——仅在 stderr 存在时挂载
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
 
     return log_path
 

@@ -143,8 +143,27 @@ def format_step_line(
     [HH:MM:SS]   → [COM3] AT+CSQ ...... PASS (120ms)
     """
     ts = now_ts()
-    cmd = command if len(command) <= truncate else command[: truncate - 1] + "…"
-    dots = "." * max(2, 40 - len(cmd))
+    # P3 修复：按显示宽度截断/补点——CJK 字符占 2 列，按码点数（len）计算会使
+    # 中文命令的省略号列错位。用 east_asian_width 估宽（宽字符 W/F 记 2）。
+    import unicodedata
+
+    def _disp_width(s: str) -> int:
+        return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+    if _disp_width(command) <= truncate:
+        cmd = command
+    else:
+        # 按显示宽度截断（避免切出半个宽字符）
+        cmd = ""
+        w = 0
+        for ch in command:
+            cw = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if w + cw > truncate - 1:
+                break
+            cmd += ch
+            w += cw
+        cmd += "…"
+    dots = "." * max(2, 40 - _disp_width(cmd))
     status_str = _status_color(status, color=color)
     extra = f" {error_msg}" if error_msg and status == "FAIL" else ""
     return f"[{ts}]   → [{port}] {cmd} {dots} {status_str} ({duration_ms:.0f}ms){extra}"

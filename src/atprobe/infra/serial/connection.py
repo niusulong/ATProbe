@@ -99,6 +99,12 @@ class SerialConnection:
         # URC 才把整段响应（OK+URC）入队。由 send_command 进入时设置、退出时复位。
         # 读线程在 _process_incoming 持有 _buffer_lock 时读写，无需额外锁。
         self._wait_urc_re: re.Pattern[bytes] | None = None
+        # P1 修复（URC 去重）：等待模式下 buffer 不截断，每个新 chunk 会对全量缓冲
+        # 重新拆行处理——若无状态，历史 URC 行会被逐 chunk 重复派发给订阅者。
+        # 本字段记录「当前 buffer 内已完成拆行处理的字节偏移」，只派发新完成的行；
+        # buffer 被替换/清空的时刻同步归零（响应交付/非等待截断/入口清排/超时清空）。
+        # 与 _buffer 同受 _buffer_lock 保护。
+        self._urc_dispatched = 0
 
         # URC 订阅
         self._urc_handlers: list[URCHandler] = []
@@ -113,6 +119,8 @@ class SerialConnection:
 
         # 重连
         self._reconnecting = threading.Lock()
+        # P1 修复（热插拔自愈）：上次主动重连尝试时刻（monotonic），限频 1 次/秒
+        self._last_reconnect_attempt = 0.0
 
     def add_rx_observer(self, observer: Callable[[bytes], None]) -> None:
         """订阅原始 RX 字节流（每个读到 chunk 即回调，读线程上下文）."""
@@ -174,6 +182,10 @@ class SerialConnection:
     def open(self) -> None:
         if not _PYSERIAL_AVAILABLE:  # pragma: no cover
             raise PortOpenError(self.config.name, "pyserial 未安装")
+        # P3 修复：二次 open 防护——直接 open→open（不经 close）会静默替换 _serial
+        # 并泄漏旧句柄（PortManager 幂等逻辑挡住常规路径，连接对象被直接使用时无防护）
+        if self._serial is not None:
+            self.close()
         try:
             self._serial = self._build_serial()
         except (SerialException, OSError) as exc:
@@ -214,17 +226,34 @@ class SerialConnection:
     def close(self) -> None:
         self._stop_event.set()
         self._connected = False
+        # P3 修复：close 唤醒等待中的 send_command——否则阻塞在 _response_q.get 的
+        # 调用方只能等满自己的超时才返回 TIMEOUT（而非立即感知断连）
+        if self._awaiting.is_set():
+            self._response_q.put(
+                Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error="端口已关闭",
+                    error_kind=ERROR_KIND_DISCONNECT,
+                )
+            )
         # 先让读线程退出（serial.read 有 100ms 超时，最多等 ~100ms 它会看到 stop_event），
         # 再关闭 serial——避免读线程阻塞在 read 中时底层 overlapped 结构被释放，
         # 引发 "byref() argument must be NoneType" 的 TypeError（Windows pyserial）。
-        if self._read_thread is not None and self._read_thread is not threading.current_thread():
+        called_from_reader = (
+            self._read_thread is not None and self._read_thread is threading.current_thread()
+        )
+        if self._read_thread is not None and not called_from_reader:
             self._read_thread.join(timeout=2.0)
         if self._serial is not None:
             try:
                 self._serial.close()  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001 - 关闭容错
                 pass
-        self._read_thread = None
+        # P3 修复：close 若从读线程内调用，读线程仍存活——保留引用而非置 None，
+        # 避免紧随的 _ensure_reader 起第二个读线程双读同一句柄
+        if not called_from_reader:
+            self._read_thread = None
 
     @property
     def is_connected(self) -> bool:
@@ -259,6 +288,7 @@ class SerialConnection:
         # 切换到「等待响应」状态，清空缓冲；wait_urc 模式设置 URC 终结正则
         with self._buffer_lock:
             self._buffer.clear()
+            self._urc_dispatched = 0  # 缓冲已清空，URC 去重偏移同步归零
             if wait_urc is not None:
                 self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
         # 先 set awaiting 再排空队列（B3 修复：消除 set 与 drain 之间读线程恰好检测到断连
@@ -316,6 +346,7 @@ class SerialConnection:
             with self._buffer_lock:
                 partial = bytes(self._buffer)
                 self._buffer.clear()
+                self._urc_dispatched = 0  # 缓冲已清空，URC 去重偏移同步归零
             text = partial.decode("utf-8", errors="replace")
             err = "响应超时" if wait_urc is None else "等待 URC 超时"
             return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
@@ -384,7 +415,11 @@ class SerialConnection:
             except (SerialException, OSError):
                 # 断连：退避后再重试，避免 read 立即抛错导致的忙循环（100% CPU 空转）
                 self._handle_disconnect()
-                self._stop_event.wait(0.1)  # 100ms 退避，且响应停止信号
+                # P1 修复（热插拔自愈）：断连后由读线程限频主动重连（≤1 次/秒）。
+                # 旧实现只被动等 send_command 触发 reconnect（引擎路径）——纯监控/
+                # 手动调试会话拔插 USB 后读线程永远轮询失效句柄，订阅形同虚设。
+                if not self._maybe_reconnect():
+                    self._stop_event.wait(0.1)  # 100ms 退避，且响应停止信号
                 continue
             except Exception:
                 # 其他异常（如 close 期间 overlapped 结构释放引发的 TypeError）：
@@ -392,7 +427,8 @@ class SerialConnection:
                 if self._stop_event.is_set():
                     break
                 self._handle_disconnect()
-                self._stop_event.wait(0.1)
+                if not self._maybe_reconnect():
+                    self._stop_event.wait(0.1)
                 continue
             if not chunk:
                 # 无数据：短暂退避，避免 read 立即返回空导致的忙循环
@@ -414,11 +450,18 @@ class SerialConnection:
                 pass
 
     def _process_incoming(self, chunk: bytes) -> None:
-        """处理读到的字节：累积、判定完整性、分流 URC."""
+        """处理读到的字节：累积、判定完整性、分流 URC.
+
+        P1 修复（URC 去重）：等待响应期间 buffer 不截断（需保留完整文本交付），
+        每个新 chunk 都会对全量缓冲重新拆行。用 ``_urc_dispatched`` 记录已完成
+        拆行处理的字节偏移——只对**新完成**的行做 URC 派发，历史行不再重复派发。
+        buffer 被替换/清空时偏移同步归零。
+        """
         with self._buffer_lock:
             self._buffer.extend(chunk)
             data = bytes(self._buffer)
             wait_urc_re = self._wait_urc_re
+            dispatched_offset = self._urc_dispatched
 
         # 按行处理
         awaiting = self._awaiting.is_set()
@@ -426,44 +469,69 @@ class SerialConnection:
         # 最后一行可能不完整
         *complete_lines, tail = lines
 
+        # 预计算每个完整行的字节跨度 [start, end)（end 含换行符），
+        # end <= dispatched_offset 的行是历史 chunk 已处理过的，跳过派发。
+        spans: list[tuple[int, int]] = []
+        _pos = 0
+        for _line in complete_lines:
+            spans.append((_pos, _pos + len(_line) + 1))
+            _pos += len(_line) + 1
+
         # --------------------------------------------------------------
         # wait_urc 模式（异步指令）：OK 仅受理不终结，须等匹配 wait_urc 正则的
         # URC 才把整段响应（OK+URC）作为 COMPLETE 入队。
         # --------------------------------------------------------------
         if wait_urc_re is not None and awaiting:
-            for line in complete_lines:
+            for mi, (line, (_ls, le)) in enumerate(zip(complete_lines, spans, strict=True)):
+                if le <= dispatched_offset:
+                    continue  # 历史 chunk 已处理过的行（去重）
                 stripped = line.strip()
                 if not stripped:
                     continue
-                # 目标 URC 匹配：整段响应（含 OK）入队终结
-                if wait_urc_re.search(line):
+                # 目标 URC 匹配：整段响应（含 OK）入队终结。
+                # P1 修复：正则作用在 strip 后的行上——split(b"\\n") 保留行尾 \\r，
+                # 旧实现用原始行匹配，含 $ 锚点的合法正则（如 \\+X:ok$）永不命中。
+                if wait_urc_re.search(stripped):
                     # URC 行也按常规分流给订阅者（§6.4）
-                    self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+                    self._dispatch_urc(stripped.decode("utf-8", errors="replace"))
                     with self._buffer_lock:
                         resp_bytes = bytes(self._buffer)
                         self._buffer = bytearray(tail)
+                        self._urc_dispatched = 0  # buffer 已替换，偏移归零
                     resp_text = resp_bytes.decode("utf-8", errors="replace")
                     self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
+                    # P3 修复：匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们
+                    # 既不在缓冲也未被派发）——按 URC 分流补派发一次
+                    for rest in complete_lines[mi + 1 :]:
+                        s2 = rest.strip()
+                        if s2 and _URC_LINE_RE.match(s2):
+                            self._dispatch_urc(s2.decode("utf-8", errors="replace"))
                     return
                 # OK/ERROR 等终结行：仅受理不终结，继续等 URC（已累积进 buffer）
                 if _TERMINATOR_RE.match(stripped):
                     continue
                 # 其它 URC 行：分流给订阅者，继续累积
-                if _URC_LINE_RE.match(line):
-                    self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+                if _URC_LINE_RE.match(stripped):
+                    self._dispatch_urc(stripped.decode("utf-8", errors="replace"))
+            with self._buffer_lock:
+                self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
             return
 
         # --------------------------------------------------------------
         # 常规模式（wait_urc 未启用）：OK 即终结
         # --------------------------------------------------------------
         found_terminator = False
-        for line in complete_lines:
+        for line, (_ls, le) in zip(complete_lines, spans, strict=True):
+            if le <= dispatched_offset:
+                continue  # 历史 chunk 已处理过的行（去重；终结判定也无需重做）
             stripped = line.strip()
             if not stripped:
                 continue
-            # 等待响应期间，URC 行同时提取（§6.4）
-            if _URC_LINE_RE.match(line):
-                self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+            # 等待响应期间，URC 行同时提取（§6.4）。
+            # P1 修复：仅 awaiting 时在此派发——空闲态由下方专门分支统一派发，
+            # 旧实现（含重构前）两个循环都会派发 → 空闲态每条 URC 双派发。
+            if awaiting and _URC_LINE_RE.match(stripped):
+                self._dispatch_urc(stripped.decode("utf-8", errors="replace"))
             if _TERMINATOR_RE.match(stripped) and awaiting:
                 # 响应完整：交付
                 with self._buffer_lock:
@@ -471,6 +539,7 @@ class SerialConnection:
                     resp_bytes = bytes(self._buffer)
                     # 保留终结行之后的数据（tail）作为下一轮缓冲
                     self._buffer = bytearray(tail)
+                    self._urc_dispatched = 0  # buffer 已替换，偏移归零
                 resp_text = resp_bytes.decode("utf-8", errors="replace")
                 self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
                 found_terminator = True
@@ -479,18 +548,32 @@ class SerialConnection:
         if not found_terminator:
             # 非等待响应状态：空闲收到的数据全部按 URC 处理（§6.4 基本策略）
             if not awaiting:
-                for line in complete_lines:
+                for line, (_ls, le) in zip(complete_lines, spans, strict=True):
+                    if le <= dispatched_offset:
+                        continue
                     stripped = line.strip()
                     if stripped:
-                        self._dispatch_urc(line.decode("utf-8", errors="replace").strip())
+                        self._dispatch_urc(stripped.decode("utf-8", errors="replace"))
                 # 已处理的完整行从 buffer 截断，只保留最后一个不完整行（tail）。
                 # 否则设备持续发 URC/心跳而无人调用 send_command 时，buffer 会无限累积
                 # 所有历史字节，长会话内存缓慢增长甚至 OOM。
                 with self._buffer_lock:
                     self._buffer = bytearray(tail)
+                    self._urc_dispatched = 0  # buffer 已替换，偏移归零
+            else:
+                # 等待中但未终结：推进已处理偏移（下个 chunk 不再重复派发历史行）
+                with self._buffer_lock:
+                    self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
 
     def _dispatch_urc(self, text: str) -> None:
-        evt = URCEvent(port=self.config.name, text=text, timestamp="")
+        # P3 修复：timestamp 填实际时间（旧实现恒空串）
+        from datetime import datetime
+
+        evt = URCEvent(
+            port=self.config.name,
+            text=text,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        )
         with self._urc_lock:
             handlers = list(self._urc_handlers)
         for h in handlers:
@@ -512,6 +595,24 @@ class SerialConnection:
                     error_kind=ERROR_KIND_DISCONNECT,
                 )
             )
+
+    def _maybe_reconnect(self) -> bool:
+        """断连后限频主动重连（读线程内调用，热插拔自愈，P1 修复）.
+
+        成功：清掉死句柄期间的残留缓冲（半截字节不作数），返回 True（调用方
+        无需额外退避——reconnect 本身耗时）；失败（未到限频间隔/端口仍不可用）
+        返回 False，调用方按 100ms 退避。
+        """
+        now = time.monotonic()
+        if now - self._last_reconnect_attempt < 1.0:
+            return False
+        self._last_reconnect_attempt = now
+        if self.reconnect():
+            with self._buffer_lock:
+                self._buffer.clear()
+                self._urc_dispatched = 0
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # 原始日志

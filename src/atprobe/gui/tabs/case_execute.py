@@ -182,14 +182,26 @@ class CaseExecuteWidget(QWidget):
             files = [path]
         else:
             return
+        # P3 修复：解析失败的用例不再静默跳过——收集后一次性提示（用户否则
+        # 无法得知哪些文件损坏/不合规）
+        failed: list[str] = []
         for f in files:
             if f.name.startswith("suite-"):
                 continue
             try:
                 c = parse_case_file(f)
-            except CaseParseError:
+            except CaseParseError as exc:
+                failed.append(f"{f.name}：{exc}")
                 continue
             self._cases.append((c.name, c.tags, str(f)))
+        if failed:
+            from PySide6.QtWidgets import QMessageBox
+
+            preview = "\n".join(failed[:8])
+            more = f"\n…（共 {len(failed)} 个）" if len(failed) > 8 else ""
+            QMessageBox.warning(
+                self, "部分用例解析失败", f"以下 {len(failed)} 个文件未加载：\n{preview}{more}"
+            )
         self._refresh_tag_combo()
         self._populate("")
 

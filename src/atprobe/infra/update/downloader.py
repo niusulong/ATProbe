@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -101,7 +102,14 @@ def download(
                 while True:
                     if cancel_token is not None and cancel_token():
                         raise DownloadCancelled("用户取消下载")
-                    chunk = resp.read(_CHUNK)
+                    try:
+                        chunk = resp.read(_CHUNK)
+                    except http.client.HTTPException as exc:
+                        # P2 修复：读流中断（IncompleteRead 等 HTTPException）收敛为
+                        # DownloadError（旧实现裸抛到 CLI）
+                        raise DownloadError(f"下载中断：{exc}") from exc
+                    except (TimeoutError, OSError) as exc:
+                        raise DownloadError(f"下载中断：{exc}") from exc
                     if not chunk:
                         break
                     try:

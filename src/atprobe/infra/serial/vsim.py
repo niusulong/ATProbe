@@ -89,9 +89,9 @@ class VsimPortManager(FakePortManager):
         if not frame:
             return Response(text="", status=ResponseStatus.ERROR, error="空指令")
         text = frame.decode("utf-8", errors="replace")
+        # 注：ERROR 也是完整响应（由断言判定失败），无需单独状态——旧实现此处
+        # 有一行无意义的死赋值（status = COMPLETE），已清理
         status = ResponseStatus.COMPLETE
-        if text.rstrip().endswith("ERROR"):
-            status = ResponseStatus.COMPLETE  # ERROR 也是完整响应，由断言判定失败
         if self._echo:
             sys.stderr.write(f"[vsim] > {command}\n")
             for line in text.split("\r\n"):

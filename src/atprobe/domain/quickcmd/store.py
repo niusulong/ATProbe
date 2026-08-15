@@ -66,7 +66,12 @@ def load_library(path: Path) -> CommandLibrary:
         name = proj_raw.get("name")
         if not isinstance(name, str) or not name.strip():
             raise QuickCmdStoreError(f"第 {i + 1} 个项目缺少 'name' 或为空")
-        lib.add_project(name)
+        try:
+            lib.add_project(name)
+        except ValueError as exc:
+            # P2 修复：重复项目名收敛为 QuickCmdStoreError（模块契约：格式非法 →
+            # QuickCmdStoreError；旧实现裸 ValueError 逃逸到调用方）
+            raise QuickCmdStoreError(f"项目名重复：{exc}") from exc
         groups_raw = proj_raw.get("groups", []) or []
         if not isinstance(groups_raw, list):
             raise QuickCmdStoreError(f"项目 {name!r} 的 'groups' 必须是列表")
@@ -76,12 +81,17 @@ def load_library(path: Path) -> CommandLibrary:
             gname = grp_raw.get("name")
             if not isinstance(gname, str) or not gname.strip():
                 raise QuickCmdStoreError(f"项目 {name!r} 第 {j + 1} 个功能组缺少 'name' 或为空")
-            grp = lib.add_group(name, gname)
+            try:
+                grp = lib.add_group(name, gname)
+            except ValueError as exc:
+                raise QuickCmdStoreError(f"功能组名重复：{exc}") from exc
             cmds_raw = grp_raw.get("commands", []) or []
             if not isinstance(cmds_raw, list):
                 raise QuickCmdStoreError(f"功能组 {name!r}/{gname!r} 的 'commands' 必须是列表")
             for c in cmds_raw:
-                # 强制转 str，兼容用户手写整数等
+                # 强制转 str，兼容用户手写整数等；None（YAML ~）跳过而非存 "None"
+                if c is None:
+                    continue
                 grp.commands.append(str(c))
     return lib
 

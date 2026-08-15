@@ -180,15 +180,21 @@ class EnvConfigWidget(QWidget):
     def is_dirty(self) -> bool:
         """内存值是否与磁盘不一致（有未保存改动）.
 
-        无 path（从未保存过）→ True；否则比对序列化文本。
+        无 path（从未保存过）→ True；否则**结构化比对**（解析磁盘 YAML 后与内存
+        组比较）。P2 修复：旧实现比对 dump 文本——dump 丢失注释/格式/键序，
+        语义等价的配置也算 dirty → 每次 run 都重写文件。
         """
         if self._path is None or not self._path.exists():
             return True
         try:
-            on_disk = self._path.read_text(encoding="utf-8")
-        except OSError:
+            from atprobe.infra.config.envconfig import load_env_config
+
+            on_disk = load_env_config(
+                self._path.read_text(encoding="utf-8"), source=str(self._path)
+            )
+        except Exception:  # noqa: BLE001 - 解析失败视为有差异（需重写修复）
             return True
-        return dump_env_config(self._env) != on_disk
+        return dict(on_disk.groups()) != {g: dict(p) for g, p in self._env.groups().items()}
 
     def save_if_dirty(self) -> None:
         """若有未保存改动则静默写盘（run_cases 前调用，保证内存=磁盘单一数据源）.
@@ -214,5 +220,11 @@ class EnvConfigWidget(QWidget):
                 return
             self._path = Path(f)
         text = dump_env_config(self._env)
-        self._path.write_text(text, encoding="utf-8")
+        try:
+            self._path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            # P2 修复：写盘失败（如打包态 _internal 只读兜底）不再裸抛进槽，
+            # 弹窗告知（内存值仍生效）
+            QMessageBox.warning(self, "保存失败", f"无法写入 {self._path}：{exc}")
+            return
         QMessageBox.information(self, "已保存", f"配置已保存到 {self._path}")

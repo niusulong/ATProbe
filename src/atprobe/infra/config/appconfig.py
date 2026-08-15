@@ -1,13 +1,19 @@
 """M5 atprobe.yaml 应用配置加载（REQ-M5 §3.5）.
 
 集中所有可变参数的默认值，命令行参数覆盖之（M5 §3.2 优先级）。
+
+P2 修复（异常收敛）：所有「配置值非法」路径统一抛 AppConfigError（旧实现
+FrameFormat 帧格式错误/非字符串端口项/数值转换失败裸抛 ValueError/
+AttributeError/TypeError，CLI 直面 traceback）。CLI 入口对 AppConfigError
+统一 exit 2。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -25,11 +31,19 @@ class AppConfigError(ValueError):
         super().__init__(f"[{source}] {message}" if source else message)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AppConfig:
-    """atprobe.yaml 配置（M5 §3.5）."""
+    """atprobe.yaml 配置（M5 §3.5）.
 
-    ports: list[PortConfig] = field(default_factory=list)
+    P3 修复：frozen（与 EnvConfig/UpdateConfig 一致）——跨模块共享的可变配置
+    对象任何一处误改会全局生效；需要覆盖时用 dataclasses.replace（run.py 已有
+    此用法）。
+
+    注：log.keep 保留份数字段已移除（从未接入任何清理逻辑，静默无效误导用户）；
+    日志目录按会话留存，手动清理。
+    """
+
+    ports: tuple[PortConfig, ...] = ()
     step_timeout: float = 5.0
     baud: int = 115200
     log_level: str = "progress"
@@ -42,8 +56,25 @@ class AppConfig:
     console_color: bool = True
     command_truncate: int = 40
     log_dir: str = "./logs"
-    log_keep: int = 0
     pressure_pass_rate_threshold: float = 95.0
+
+
+def _to_int(value: object, *, what: str, source: str | None) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str, float)):
+        raise AppConfigError(f"{what} 必须是整数，实际为 {value!r}", source=source)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise AppConfigError(f"{what} 必须是整数，实际为 {value!r}", source=source) from exc
+
+
+def _to_float(value: object, *, what: str, source: str | None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise AppConfigError(f"{what} 必须是数值，实际为 {value!r}", source=source)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise AppConfigError(f"{what} 必须是数值，实际为 {value!r}", source=source) from exc
 
 
 def load_app_config(data: str | bytes | None, *, source: str | None = None) -> AppConfig:
@@ -59,35 +90,100 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
         line = getattr(getattr(exc, "problem_mark", None), "line", None)
         loc = f"第 {line + 1} 行" if line is not None else "未知行"
         raise AppConfigError(f"YAML 语法错误（{loc}）：{exc}", source=source) from exc
+    except UnicodeDecodeError as exc:
+        raise AppConfigError(f"配置文件不是有效 UTF-8：{exc}", source=source) from exc
     if raw is None:
         return cfg
     if not isinstance(raw, dict):
         raise AppConfigError(f"配置根节点必须是映射，实际为 {type(raw).__name__}", source=source)
 
+    # P2 修复（default.baud 覆盖链）：端口表达式未显式给波特率（无冒号段）时，
+    # 用 default.baud 填充——旧实现 default.baud 是死字段（配置 9600 实际仍按
+    # 115200 连接）。显式写了波特率的端口不受影响。
+    default_baud: int | None = None
+
     if "ports" in raw:
-        cfg.ports = [_parse_port_expr(p) for p in raw["ports"]]
+        raw_ports = raw["ports"]
+        if not isinstance(raw_ports, list):
+            raise AppConfigError(
+                f"'ports' 必须是列表，实际为 {type(raw_ports).__name__}", source=source
+            )
+        ports: list[PortConfig] = []
+        for i, p in enumerate(raw_ports):
+            if not isinstance(p, str):
+                raise AppConfigError(
+                    f"ports 第 {i + 1} 项必须是字符串（如 'COM3:115200:8N1'），实际为 {p!r}",
+                    source=source,
+                )
+            ports.append(parse_port_expr(p, source=source))
+        cfg = _replace(cfg, ports=tuple(ports))
+
     default = raw.get("default") or {}
     if isinstance(default, dict):
-        cfg.step_timeout = float(default.get("step_timeout", cfg.step_timeout))
-        cfg.baud = int(default.get("baud", cfg.baud))
-        cfg.log_level = str(default.get("log_level", cfg.log_level))
-    cfg.cases_dir = str(raw.get("cases_dir", cfg.cases_dir))
-    cfg.report_dir = str(raw.get("report_dir", cfg.report_dir))
-    cfg.env_config = str(raw.get("env_config", cfg.env_config))
+        if "step_timeout" in default:
+            cfg = _replace(
+                cfg,
+                step_timeout=_to_float(default["step_timeout"], what="step_timeout", source=source),
+            )
+        if "baud" in default:
+            default_baud = _to_int(default["baud"], what="default.baud", source=source)
+            cfg = _replace(cfg, baud=default_baud)
+        if "log_level" in default:
+            cfg = _replace(cfg, log_level=str(default["log_level"]))
+    if default_baud is not None and cfg.ports:
+        filled = tuple(
+            _replace_port_baud_if_absent(p, raw_expr, default_baud)
+            for p, raw_expr in zip(cfg.ports, raw["ports"], strict=False)
+        )
+        cfg = _replace(cfg, ports=filled)
+
+    cfg = _replace(
+        cfg,
+        cases_dir=str(raw.get("cases_dir", cfg.cases_dir)),
+        report_dir=str(raw.get("report_dir", cfg.report_dir)),
+        env_config=str(raw.get("env_config", cfg.env_config)),
+    )
     console = raw.get("console") or {}
     if isinstance(console, dict):
-        cfg.console_color = bool(console.get("color", cfg.console_color))
-        cfg.command_truncate = int(console.get("command_truncate", cfg.command_truncate))
+        if "color" in console:
+            cfg = _replace(cfg, console_color=bool(console["color"]))
+        if "command_truncate" in console:
+            cfg = _replace(
+                cfg,
+                command_truncate=_to_int(
+                    console["command_truncate"], what="command_truncate", source=source
+                ),
+            )
     log = raw.get("log") or {}
     if isinstance(log, dict):
-        cfg.log_dir = str(log.get("dir", cfg.log_dir))
-        cfg.log_keep = int(log.get("keep", cfg.log_keep))
+        if "dir" in log:
+            cfg = _replace(cfg, log_dir=str(log["dir"]))
+        # log.keep 已移除（从未生效的死配置，见 AppConfig docstring）
     pressure = raw.get("pressure") or {}
     if isinstance(pressure, dict):
-        cfg.pressure_pass_rate_threshold = float(
-            pressure.get("pass_rate_threshold", cfg.pressure_pass_rate_threshold)
-        )
+        if "pass_rate_threshold" in pressure:
+            cfg = _replace(
+                cfg,
+                pressure_pass_rate_threshold=_to_float(
+                    pressure["pass_rate_threshold"], what="pass_rate_threshold", source=source
+                ),
+            )
     return cfg
+
+
+def _replace(cfg: AppConfig, **changes: Any) -> AppConfig:
+    from dataclasses import replace as _dc_replace
+
+    return _dc_replace(cfg, **changes)
+
+
+def _replace_port_baud_if_absent(p: PortConfig, raw_expr: object, default_baud: int) -> PortConfig:
+    """端口表达式未显式给波特率（无任何冒号段）时填充 default.baud."""
+    if isinstance(raw_expr, str) and ":" not in raw_expr.strip() and p.baudrate == 115200:
+        from dataclasses import replace as _dc_replace
+
+        return _dc_replace(p, baudrate=default_baud)
+    return p
 
 
 def load_app_config_file(path: str | Path) -> AppConfig:
@@ -104,21 +200,25 @@ def load_app_config_file(path: str | Path) -> AppConfig:
 # ---------------------------------------------------------------------------
 # §3.3 --port 复合表达式解析（也用于配置文件 ports 列表）
 # ---------------------------------------------------------------------------
-def parse_port_expr(expr: str) -> PortConfig:
+def parse_port_expr(expr: str, *, source: str | None = None) -> PortConfig:
     """解析复合端口表达式 ``COM3:115200:8N1``（M5 §3.3 BNF）."""
     parts = expr.split(":")
     name = parts[0].strip()
     if not name:
-        raise AppConfigError(f"端口表达式无效：{expr!r}")
+        raise AppConfigError(f"端口表达式无效：{expr!r}", source=source)
     baud = 115200
     frame = FrameFormat()
     if len(parts) >= 2 and parts[1].strip():
         try:
             baud = int(parts[1].strip())
         except ValueError as exc:
-            raise AppConfigError(f"波特率无效：{parts[1]!r}") from exc
+            raise AppConfigError(f"波特率无效：{parts[1]!r}", source=source) from exc
     if len(parts) >= 3 and parts[2].strip():
-        frame = FrameFormat.parse(parts[2].strip())
+        try:
+            frame = FrameFormat.parse(parts[2].strip())
+        except ValueError as exc:
+            # P2 修复：帧格式错误收敛为 AppConfigError（旧实现裸 ValueError 逃逸）
+            raise AppConfigError(f"帧格式无效：{parts[2]!r}（{exc}）", source=source) from exc
     return PortConfig(name=name, baudrate=baud, frame=frame)
 
 

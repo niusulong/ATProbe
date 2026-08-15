@@ -51,7 +51,9 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="只校验不实际执行"),
     no_report: bool = typer.Option(False, "--no-report", help="不生成 HTML 报告"),
     report_dir: Path | None = typer.Option(None, "--report-dir", help="报告输出目录"),
-    log_level: str = typer.Option("progress", "--log-level", help="progress / debug"),
+    log_level: str | None = typer.Option(
+        None, "--log-level", help="progress / debug（缺省用配置文件 default.log_level）"
+    ),
     vsim: bool = typer.Option(
         False,
         "--vsim",
@@ -89,7 +91,18 @@ def run(
         cfg_path = resolve_workspace_path("atprobe.yaml")
     else:
         cfg_path = Path("atprobe.yaml")
-    app_cfg = load_app_config_file(cfg_path)
+    # P2 修复：配置加载错误收敛为 exit 2（旧实现 AppConfigError 直面 traceback）
+    from atprobe.infra.config.appconfig import AppConfigError
+
+    try:
+        app_cfg = load_app_config_file(cfg_path)
+    except AppConfigError as exc:
+        typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    # P2 修复（覆盖链补全）：--log-level 未给时用配置文件 default.log_level
+    # （旧实现该配置字段无消费者）
+    if log_level is None:
+        log_level = app_cfg.log_level
 
     # 2. 解析端口（§3.3）。--vsim 模式忽略端口参数，统一用虚拟端口
     if vsim:

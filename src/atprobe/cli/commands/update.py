@@ -15,7 +15,6 @@ from atprobe.infra.runtime import app_root, is_frozen
 from atprobe.infra.update import (
     DownloadCancelled,
     DownloadError,
-    UpdateCheckError,
     UpdateError,
 )
 from atprobe.infra.update.checker import fetch_latest, is_newer
@@ -33,7 +32,9 @@ def update(
     local = current_version()
     try:
         info = fetch_latest()
-    except UpdateCheckError as exc:
+    except UpdateError as exc:
+        # P2 修复：捕获 UpdateError 基类——旧实现只捕 UpdateCheckError，漏掉
+        # AssetNotFoundError（Release 缺 Windows 安装包时 checker 抛它）→ 裸 traceback
         typer.secho(f"检查失败：{exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
 

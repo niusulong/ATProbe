@@ -28,7 +28,7 @@ class TestListCases:
         assert "CSQ-查询信号质量" in result.stdout
         assert "CEREG-查询响应格式" in result.stdout
 
-    def test_list_with_tag_filter(self, examples_dir: Path) -> None:  # type: ignore[no-unbuilt-def]
+    def test_list_with_tag_filter(self, examples_dir: Path) -> None:  # type: ignore[no-untyped-def]
         result = runner.invoke(
             app,
             ["list", "cases", "--config", str(examples_dir / "atprobe.yaml"), "--tag", "CPIN"],
@@ -41,12 +41,18 @@ class TestListCases:
 
 
 class TestRunDryRun:
-    def test_dry_run_lists_cases(self, examples_dir: Path) -> None:  # type: ignore[no-unbuilt-def]
+    def test_dry_run_lists_cases(self, examples_dir: Path) -> None:  # type: ignore[no-untyped-def]
         result = runner.invoke(
             app,
             [
                 "run",
-                str(examples_dir / "testcases" / "3gpp" / "network" / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"),
+                str(
+                    examples_dir
+                    / "testcases"
+                    / "3gpp"
+                    / "network"
+                    / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"
+                ),
                 "--port",
                 "COM99",
                 "--dry-run",
@@ -56,13 +62,19 @@ class TestRunDryRun:
         assert "CSQ-查询信号质量" in result.stdout
         assert "COM99" in result.stdout
 
-    def test_no_port_errors(self, examples_dir: Path) -> None:  # type: ignore[no-unbuilt-def]
+    def test_no_port_errors(self, examples_dir: Path) -> None:  # type: ignore[no-untyped-def]
         # 不提供 --port 且配置文件 ports 也读不到（用不存在配置）
         result = runner.invoke(
             app,
             [
                 "run",
-                str(examples_dir / "testcases" / "3gpp" / "network" / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"),
+                str(
+                    examples_dir
+                    / "testcases"
+                    / "3gpp"
+                    / "network"
+                    / "NETWORK-CSQ-RESP-QUERY_FORMAT.yaml"
+                ),
                 "--config",
                 "nonexistent.yaml",
                 "--dry-run",
@@ -118,7 +130,7 @@ steps:
 
 
 class TestRunSuite:
-    def test_run_suite_executes_cases_in_order(self, tmp_path: Path) -> None:  # type: ignore[no-unbuilt-def]
+    def test_run_suite_executes_cases_in_order(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         # 建套件 + 两个用例
         (tmp_path / "a.yaml").write_text(
             """
@@ -155,7 +167,7 @@ cases:
         assert "用例A" in result.stdout
         assert "用例B" in result.stdout
 
-    def test_run_suite_with_tag_filter(self, tmp_path: Path) -> None:  # type: ignore[no-unbuilt-def]
+    def test_run_suite_with_tag_filter(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         (tmp_path / "a.yaml").write_text(
             """
 name: 用例A

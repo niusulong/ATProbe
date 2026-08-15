@@ -50,6 +50,10 @@ def parse_case(data: str | bytes | dict[str, Any], *, source: str | None = None)
             line = getattr(getattr(exc, "problem_mark", None), "line", None)
             loc = f"第 {line + 1} 行" if line is not None else "未知行"
             raise CaseParseError(f"YAML 语法错误（{loc}）：{exc}", source=source) from exc
+        except UnicodeDecodeError as exc:
+            # P3 修复：bytes 输入含非法 UTF-8 时收敛为 CaseParseError（带 source），
+            # 旧实现裸 UnicodeDecodeError 违反「解析失败抛 CaseParseError」契约
+            raise CaseParseError(f"文件不是有效 UTF-8：{exc}", source=source) from exc
 
     if not isinstance(raw, dict):
         raise CaseParseError(f"用例根节点必须是映射，实际为 {type(raw).__name__}", source=source)

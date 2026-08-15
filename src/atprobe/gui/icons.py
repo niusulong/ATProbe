@@ -76,8 +76,19 @@ _ICONS: dict[str, str] = {
 }
 
 
+_ICON_CACHE: dict[tuple[str, str], "QIcon"] = {}
+
+
 def make_icon(name: str, color: str = "#cbd5e1") -> QIcon:
-    """渲染指定名称的图标为 QIcon（按当前屏幕 DPR 输出清晰位图）."""
+    """渲染指定名称的图标为 QIcon（按当前屏幕 DPR 输出清晰位图）.
+
+    P3 修复：按 (name, color) 缓存——图标为纯静态位图（QPixmap 复制共享），
+    命令库 refresh_tree 每次对每个节点重渲染 SVG，节点多时明显卡顿。
+    """
+    key = (name, color)
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     body = _ICONS.get(name)
     if body is None:
         body = '<circle cx="12" cy="12" r="3"/>'  # 兜底：实心点
@@ -92,7 +103,9 @@ def make_icon(name: str, color: str = "#cbd5e1") -> QIcon:
     renderer.render(painter)
     painter.end()
     pix.setDevicePixelRatio(2.0)
-    return QIcon(pix)
+    icon = QIcon(pix)
+    _ICON_CACHE[key] = icon
+    return icon
 
 
 # ---------------------------------------------------------------------------

@@ -61,10 +61,20 @@ class EnvConfig:
         """解析 ``group.param`` 或简单名引用，返回字符串形式.
 
         Raises:
-            UndefinedReferenceError: 引用未定义。
+            UndefinedReferenceError: 引用未定义（P3 修复：错误消息区分
+                「组缺失」与「参数缺失」并提示可用组，便于定位拼写错误）。
         """
         value = self._lookup(ref)
         if value is _MISSING:
+            parts = ref.split(".")
+            if len(parts) == 2 and parts[0] not in self._groups:
+                avail = "、".join(sorted(self._groups.keys())) or "（无任何组）"
+                raise UndefinedReferenceError(f"{ref}（组 {parts[0]!r} 未定义；可用组：{avail}）")
+            if len(parts) == 2 and parts[0] in self._groups:
+                avail = "、".join(sorted(self._groups[parts[0]].keys())) or "（空组）"
+                raise UndefinedReferenceError(
+                    f"{ref}（组 {parts[0]!r} 中无参数 {parts[1]!r}；该组可用参数：{avail}）"
+                )
             raise UndefinedReferenceError(ref)
         return _to_str(value)
 

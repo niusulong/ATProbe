@@ -93,3 +93,8 @@ class FileSendWorker(QObject):
             self.finished.emit(False, f"已取消（已发 {sent}/{n} 字节）：{exc}")
         except SendError as exc:
             self.finished.emit(False, f"发送中断：{exc}（已发 {sent}/{n} 字节）")
+        except Exception as exc:  # noqa: BLE001 - P1 修复：兜底
+            # 旧实现无 catch-all：write_bytes 抛出其它异常（连接对象被替换、
+            # 替身异常等）时 finished 永不发出 → UI 永久卡在"发送中"态
+            # （按钮/发送框禁用不可恢复）+ worker/线程泄漏。
+            self.finished.emit(False, f"发送失败：{exc!r}（已发 {sent}/{n} 字节）")

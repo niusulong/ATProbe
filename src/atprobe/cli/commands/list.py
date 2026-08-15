@@ -25,7 +25,14 @@ def list_cmd(
         cfg_path = resolve_workspace_path("atprobe.yaml")
     else:
         cfg_path = Path("atprobe.yaml")
-    app_cfg = load_app_config_file(cfg_path)
+    # P2 修复：配置错误收敛 exit 2
+    from atprobe.infra.config.appconfig import AppConfigError
+
+    try:
+        app_cfg = load_app_config_file(cfg_path)
+    except AppConfigError as exc:
+        typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
 
     cases_dir = resolve_workspace_path(app_cfg.cases_dir)
     if target == "ports":

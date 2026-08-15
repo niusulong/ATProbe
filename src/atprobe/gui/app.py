@@ -18,6 +18,20 @@ def run_gui(argv: list[str] | None = None) -> int:
     install_excepthook()
     logger.info("ATProbe GUI 启动，日志: %s", log_path)
 
+    # P2 修复（升级中断恢复）：上次自升级被中断（断电/强杀 updater.bat）时，
+    # _internal 可能处于半新状态（DLL 与 exe 不匹配直接起不来）。启动最前检测
+    # pending 标记残留并回滚到备份，恢复可用后再继续启动。仅打包态需要。
+    from atprobe.infra.runtime import app_root, is_frozen
+
+    if is_frozen():
+        try:
+            from atprobe.infra.update.installer import ensure_recovered
+
+            if ensure_recovered(app_root()):
+                logger.warning("检测到上次升级被中断，已回滚到备份版本")
+        except Exception:  # noqa: BLE001 - 恢复失败不阻断启动（继续尝试现状运行）
+            logger.exception("升级中断恢复检查失败")
+
     from PySide6.QtCore import QSettings
     from PySide6.QtGui import QIcon, QPixmap
     from PySide6.QtWidgets import QApplication

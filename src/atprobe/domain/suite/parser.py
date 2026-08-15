@@ -46,6 +46,9 @@ def parse_suite(data: str | bytes | dict[str, Any], *, source: str | None = None
             line = getattr(getattr(exc, "problem_mark", None), "line", None)
             loc = f"第 {line + 1} 行" if line is not None else "未知行"
             raise SuiteParseError(f"YAML 语法错误（{loc}）：{exc}", source=source) from exc
+        except UnicodeDecodeError as exc:
+            # P3 修复：非法 UTF-8 收敛为 SuiteParseError（与 case parser 同口径）
+            raise SuiteParseError(f"文件不是有效 UTF-8：{exc}", source=source) from exc
 
     if not isinstance(raw, dict):
         raise SuiteParseError(f"套件根节点必须是映射，实际为 {type(raw).__name__}", source=source)

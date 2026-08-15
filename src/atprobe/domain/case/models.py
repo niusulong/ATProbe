@@ -175,6 +175,12 @@ class DataInput(_Frozen):
     def _exactly_one_source(self) -> DataInput:
         if (self.file is None) == (self.inline is None):
             raise ValueError("data 字段需二选一指定 file 或 inline")
+        # P3 修复：分块语义关系校验——chunk_size 大于 chunk_threshold 时
+        # 「阈值内不分块、阈值上按 chunk_size 分块」的关系倒挂，多为笔误
+        if self.chunk_size > self.chunk_threshold:
+            raise ValueError(
+                f"chunk_size（{self.chunk_size}）不能大于 chunk_threshold（{self.chunk_threshold}）"
+            )
         return self
 
 
@@ -244,6 +250,23 @@ class Step(BaseModel):
                 re.compile(self.wait_urc)
             except re.error as exc:
                 raise ValueError(f"wait_urc 正则无效：{exc}") from exc
+        # P1 修复：extract 与 assert.matches 正则同样在解析期预校验（与 wait_urc
+        # 口径一致）。旧实现这两个正则编译失败在执行期抛裸 re.error，逃出引擎
+        # 线程（无 CaseParseError 包装、无文件行号，用户直面 traceback）。
+        if self.extract is not None:
+            for var_name, pattern in self.extract.items():
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError(f"extract 变量 {var_name!r} 正则无效：{exc}") from exc
+        for a in self.assertions:
+            if a.matches is not None:
+                try:
+                    re.compile(a.matches)
+                except re.error as exc:
+                    raise ValueError(
+                        f"断言 {a.name or '(未命名)'} 的 matches 正则无效：{exc}"
+                    ) from exc
         return self
 
     @property
@@ -293,6 +316,8 @@ class Case(_Frozen):
     name: str = Field(min_length=1)
     description: str | None = None
     tags: tuple[str, ...] = Field(default_factory=tuple)
+    # 注：port 当前为「解析但不影响执行端口」的字段（执行端口由 step.port 或
+    # 引擎 default_port 决定）——保留用于用例元数据标注。
     port: str | None = None
 
     # §10 参数化矩阵（P1，schema 已定义）
@@ -315,6 +340,13 @@ class Case(_Frozen):
     # 用于报告 #N 后缀（REQ-M2 §10.2）。
     # 引擎内部字段：YAML 不应填写（填写只会在报告 name 后追加 #N，无其他副作用）。
     param_index: int | None = None
+
+    @model_validator(mode="after")
+    def _name_not_blank(self) -> Case:
+        # P3 修复：纯空白字符串通过 min_length=1（"   "），与 quickcmd 侧口径统一
+        if not self.name.strip():
+            raise ValueError("name 不能为空白字符串")
+        return self
 
     @property
     def is_pressure(self) -> bool:

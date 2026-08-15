@@ -69,6 +69,17 @@ def fetch_latest(
 
 
 def _parse_release(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo:
+    # P3 修复：解析段整体兜底（size=null / body 非 dict 等异常输入旧实现裸抛
+    # TypeError/ValueError，违反「所有异常收敛 UpdateCheckError」的模块承诺）
+    try:
+        return _parse_release_inner(body, cfg)
+    except UpdateCheckError:
+        raise
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        raise UpdateCheckError(f"Release 响应结构异常：{exc!r}") from exc
+
+
+def _parse_release_inner(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo:
     try:
         tag = str(body["tag_name"])
     except KeyError as exc:

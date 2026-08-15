@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from atprobe.engine import Engine, EngineConfig
-from atprobe.engine.config import StopMode
+from atprobe.engine.config import EngineState, StopMode
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import TabBinding, TabTypeRegistry, default_registry
 from atprobe.gui.theme import get_tokens
@@ -84,10 +84,19 @@ class MainWindow(QMainWindow):
         else:
             _cfg_path = Path("atprobe.yaml")
         self._app_config = app_config or load_app_config_file(_cfg_path)
-        # 主题状态（与 app.py 启动时加载的偏好一致）
+        # 主题状态：优先读持久化偏好（QSettings），无记录时回退全局状态。
+        # P2 修复（单一真相源）：旧实现只读全局 _THEME_DARK（app.py 启动时桥接），
+        # 单独构造 MainWindow（测试/嵌入复用）会忽略已持久化的主题偏好。
+        from PySide6.QtCore import QSettings
+
         from atprobe.gui.theme import current_theme_is_dark
 
-        self._dark = current_theme_is_dark()
+        _settings = QSettings("ATProbe", "ATProbe")
+        if _settings.contains("theme/dark"):
+            # type=bool：注册表/INI 存的是 "true"/"false" 字符串，需经 QVariant 归一
+            self._dark = bool(_settings.value("theme/dark", False, type=bool))
+        else:
+            self._dark = current_theme_is_dark()
         self._tokens = get_tokens(dark=self._dark)
         self._registry: TabTypeRegistry = default_registry()
         self._port_manager = PortManager()
@@ -95,6 +104,11 @@ class MainWindow(QMainWindow):
         self._cancel: CancelToken | None = None
         self._monitor_handle: object | None = None
         self._monitor_sink: Any = None
+        # 端口枚举缓存（available_ports 的 2 秒 TTL，见该方法）
+        self._ports_cache: list[str] | None = None
+        self._ports_cache_at: float = 0.0
+        # 引擎工作线程引用（closeEvent join 用，P3）
+        self._engine_thread: threading.Thread | None = None
         # 环境配置页引用：开启时由内存 EnvConfig 供 run_cases 实时生效（所见即所跑）；
         # 关闭后置 None，run_cases 回退到磁盘读取。
         self._env_widget: Any = None
@@ -281,7 +295,11 @@ class MainWindow(QMainWindow):
                     refresher()
                 except Exception:  # noqa: BLE001
                     _log.debug("refresh_theme 抛异常", exc_info=True)
-        QSettings("ATProbe", "ATProbe").setValue("theme/dark", dark)
+        # P1/P2 修复（写入持久化）：显式 sync（旧实现靠临时 QSettings 对象析构
+        # 触发落盘，进程异常退出时 5 秒自动 sync 定时器可能未跑到 → 偏好丢失）。
+        settings = QSettings("ATProbe", "ATProbe")
+        settings.setValue("theme/dark", dark)
+        settings.sync()
 
     def _on_about(self) -> None:
         """关于对话框：显示版本号与项目地址."""
@@ -535,8 +553,27 @@ class MainWindow(QMainWindow):
         # 引用，导致 manual_debug 的 RX 订阅、monitor 的定时器/订阅在 tab 关闭后泄漏。
         widget = self.tabs.widget(idx)
         if widget is not None:
-            # 环境配置页关闭：解除引用，run_cases 回退磁盘读取
+            # 环境配置页关闭：有未保存改动时先提示（P2 修复：旧实现直接置
+            # _env_widget=None，编辑静默丢弃，与"所见即所跑"语义相悖）
             if widget.property("tab_type") == "env_config":
+                is_dirty = getattr(widget, "is_dirty", None)
+                if callable(is_dirty) and is_dirty():
+                    from PySide6.QtWidgets import QMessageBox
+
+                    ret = QMessageBox.question(
+                        self,
+                        "未保存的环境配置",
+                        "环境配置有未保存的改动，关闭前保存吗？",
+                        QMessageBox.StandardButton.Save
+                        | QMessageBox.StandardButton.Discard
+                        | QMessageBox.StandardButton.Cancel,
+                    )
+                    if ret is QMessageBox.StandardButton.Save:
+                        saver = getattr(widget, "_save", None)
+                        if callable(saver):
+                            saver()
+                    elif ret is QMessageBox.StandardButton.Cancel:
+                        return  # 取消关闭
                 self._env_widget = None
             # 统一调用 cleanup（经 getattr 安全访问，未实现则跳过）
             cleaner = getattr(widget, "cleanup", None)
@@ -560,11 +597,23 @@ class MainWindow(QMainWindow):
         return [p for p in self._port_manager._configs if self._port_manager.is_connected(p)]
 
     def available_ports(self) -> list[str]:
-        """枚举系统全部可用串口名（含未连接的，如 COM1）。供下拉框填充."""
+        """枚举系统全部可用串口名（含未连接的，如 COM1）。供下拉框填充.
+
+        P2 修复：2 秒 TTL 缓存——多个 tab 构造/刷新都调用本方法，USB 串口多时
+        枚举可达秒级，反复调用会连续阻塞 GUI 线程。
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._ports_cache is not None and now - self._ports_cache_at < 2.0:
+            return list(self._ports_cache)
         try:
-            return [p.name for p in self._port_manager.enumerate_ports()]
+            names = [p.name for p in self._port_manager.enumerate_ports()]
         except Exception:  # noqa: BLE001
-            return []
+            names = []
+        self._ports_cache = names
+        self._ports_cache_at = now
+        return list(names)
 
     def cases_dir(self) -> Path:
         return resolve_workspace_path(self._app_config.cases_dir)
@@ -584,6 +633,15 @@ class MainWindow(QMainWindow):
         except FileNotFoundError:
             return None
 
+    def engine_state(self) -> str:
+        """当前引擎状态（str Enum，"IDLE"/"RUNNING"/"FINISHED"/"ERROR"）.
+
+        供 tab 侧（手动调试等）在发送前检查引擎是否运行，避免与引擎争抢串口。
+        """
+        if self._engine is None:
+            return "IDLE"
+        return str(self._engine.state().value)
+
     def send_manual(self, port: str, command: str, *, terminator: Terminator | None = None) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
 
@@ -594,6 +652,13 @@ class MainWindow(QMainWindow):
             terminator: 逐命令覆盖的结束符；None 时用连接级 PortConfig.terminator。
                 手动调试页结束符下拉的选择经此透传（修：UI 选择原本被忽略）。
         """
+        # P1 修复：引擎执行期间禁止手动写入同一端口——引擎正在 send_command 等待
+        # 响应时，手动命令的回显/回包会并入引擎响应缓冲，污染断言（跨流串扰）。
+        if self._engine is not None and self._engine.state() is EngineState.RUNNING:
+            QMessageBox.warning(
+                self, "发送被拒绝", "测试引擎正在运行，请先停止后再手动发送（避免污染引擎响应）"
+            )
+            return False
         if not self._port_manager.is_connected(port):
             return False
         try:
@@ -609,6 +674,12 @@ class MainWindow(QMainWindow):
         返回 True 表示写入成功；未连接返回 False。
         小文件（≤4KB）走本同步路径；大文件由 worker 直接持连接发送。
         """
+        # P1 修复：同 send_manual，引擎运行期间拒绝（避免污染引擎响应缓冲）
+        if self._engine is not None and self._engine.state() is EngineState.RUNNING:
+            QMessageBox.warning(
+                self, "发送被拒绝", "测试引擎正在运行，请先停止后再发送文件（避免污染引擎响应）"
+            )
+            return False
         if not self._port_manager.is_connected(port):
             return False
         try:
@@ -681,6 +752,10 @@ class MainWindow(QMainWindow):
         try:
             # 先停引擎（若在跑），避免引擎线程操作已关闭的串口
             self.stop_engine()
+            # P3 修复：等待引擎线程退出（旧实现只置停止标志，窗口销毁后引擎可能
+            # 仍在 send_command 等待中继续跑到超时——信号已断但后台残留活动）
+            if self._engine_thread is not None and self._engine_thread.is_alive():
+                self._engine_thread.join(timeout=5.0)
             # 遍历所有 tab 调 cleanup，释放 RX 订阅/定时器/worker
             for i in range(self.tabs.count()):
                 widget = self.tabs.widget(i)
@@ -730,12 +805,17 @@ class MainWindow(QMainWindow):
 
         # dry-run：只解析 + 端口可用性检查，不执行
         if dry_run:
+            was_open = self._port_manager.is_connected(port)
             try:
                 self._port_manager.open(PortConfig(name=port))
                 open_ok = True
             except Exception:  # noqa: BLE001
                 open_ok = False
-            status = "可用" if open_ok or self._port_manager.is_connected(port) else "不可用"
+            # P2 修复：dry-run 打开的端口用后即关（预演不改变连接状态）；
+            # 外部已连接的端口不动
+            if open_ok and not was_open:
+                self._port_manager.close(port)
+            status = "可用" if open_ok or was_open else "不可用"
             QMessageBox.information(
                 self,
                 "预演 (Dry Run)",
@@ -837,6 +917,7 @@ class MainWindow(QMainWindow):
                 self._set_engine_status("ERROR", self._tokens["danger"])
 
         t = threading.Thread(target=_run, daemon=True)
+        self._engine_thread = t  # P3 修复：保留引用供 closeEvent join
         t.start()
 
     def stop_engine(self) -> None:
@@ -872,7 +953,9 @@ class MainWindow(QMainWindow):
         # 撤销上一次的订阅（切换监控端口集）
         if self._monitor_handle is not None:
             self.unsubscribe_monitor()
-        handles: list[object] = []
+        # P2 修复：句柄按 (tx, rx) 配对存储（旧实现平铺 tuple 用奇偶下标区分，
+        # 与 subscribe 顺序强耦合，端口只订一侧时会静默错退订）
+        pairs: list[tuple[object, object]] = []
 
         for port in ports:
             if not self._port_manager.is_connected(port):
@@ -887,18 +970,17 @@ class MainWindow(QMainWindow):
                 if self._monitor_sink is not None:
                     self._monitor_sink(bp, "RX", chunk)
 
-            handles.append(self._port_manager.subscribe_tx(port, _tx_observer))
-            handles.append(self._port_manager.subscribe_rx(port, _rx_observer))
-        self._monitor_handle = tuple(handles)
+            tx_h = self._port_manager.subscribe_tx(port, _tx_observer)
+            rx_h = self._port_manager.subscribe_rx(port, _rx_observer)
+            pairs.append((tx_h, rx_h))
+        self._monitor_handle = tuple(pairs)
 
     def unsubscribe_monitor(self) -> None:
         if self._monitor_handle is not None:
-            handles: tuple[object, ...] = self._monitor_handle  # type: ignore[assignment]
-            for i, h in enumerate(handles):
-                if i % 2 == 0:
-                    self._port_manager.unsubscribe_tx(h)
-                else:
-                    self._port_manager.unsubscribe_rx(h)
+            pairs: tuple[tuple[object, object], ...] = self._monitor_handle  # type: ignore[assignment]
+            for tx_h, rx_h in pairs:
+                self._port_manager.unsubscribe_tx(tx_h)
+                self._port_manager.unsubscribe_rx(rx_h)
             self._monitor_handle = None
         self._monitor_sink = None
 

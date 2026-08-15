@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QGroupBox,
@@ -579,6 +580,14 @@ class ManualDebugWidget(QWidget):
         if callable(is_conn) and not is_conn(port):
             QMessageBox.warning(self, "提示", f"端口 {port} 未连接，请先「打开端口」")
             return
+        # P1 修复：引擎运行期间禁止文件发送（大文件 worker 直接持连接写，
+        # 会把回显/回包混入引擎正在等待的响应缓冲，污染断言）
+        engine_state = getattr(self._main, "engine_state", None)
+        if callable(engine_state) and engine_state() == "RUNNING":
+            QMessageBox.warning(
+                self, "发送被拒绝", "测试引擎正在运行，请先停止后再发送文件（避免污染引擎响应）"
+            )
+            return
         try:
             data = Path(self._file_path).read_bytes()
         except OSError as exc:
@@ -633,6 +642,8 @@ class ManualDebugWidget(QWidget):
         self._file_worker.finished.connect(self._file_thread.quit)
         # 线程真正退出后再做 UI 清理（此时 .wait() 必然返回，无死锁）
         self._file_thread.finished.connect(self._on_file_thread_done)
+        # P1 修复（规范补齐）：线程退出后释放 worker（C++ 侧），避免跨多次发送累积
+        self._file_thread.finished.connect(self._file_worker.deleteLater)
         self._file_thread.start()
 
         self._enter_file_sending()
@@ -692,12 +703,24 @@ class ManualDebugWidget(QWidget):
             self._file_cancel_token.cancel()
 
     def _cleanup_file_send(self) -> None:
-        """析构前清理：取消进行中的文件发送并等待线程退出。"""
+        """析构前清理：取消进行中的文件发送并等待线程退出。
+
+        P0 修复：worker 单块 write_bytes 可阻塞至 pyserial write_timeout（5s），
+        旧实现 wait(2000) 超时后直接丢弃引用 → 运行中的 QThread 被销毁
+        （"QThread destroyed while running"，release 下 UB/崩溃）。改为
+        循环等待（最长约 write_timeout + 余量），期间处理事件保持 UI 响应；
+        确认退出后才允许 widget 析构。
+        """
         if self._file_cancel_token is not None:
             self._file_cancel_token.cancel()
         if self._file_thread is not None and self._file_thread.isRunning():
             self._file_thread.quit()
-            self._file_thread.wait(2000)
+            # 单块写最长阻塞 ~5s（write_timeout），2s 一步循环等待直至退出
+            waited = 0
+            while self._file_thread.isRunning() and waited < 15000:
+                QApplication.processEvents()
+                self._file_thread.wait(200)
+                waited += 200
 
     # ------------------------------------------------------------------
     # RX 流式接收（读线程 → 信号 → 主线程渲染）

@@ -310,7 +310,12 @@ class _Parser:
             op_tok = self._next()
             right = self._parse_operand()
             right_kind, right_val = right
-            assert isinstance(right_val, str)  # OP 比较的右操作数必为普通操作数
+            # P1 修复：文法允许括号子表达式作操作数，但比较运算的右操作数不能是
+            # 布尔节点（如 `x == (a == 1)`）。旧实现用裸 assert，抛 AssertionError
+            # 逃出引擎（step_runner 只捕 ExpressionError），且 python -O 下行为不同。
+            if right_kind == "__NODE__":
+                raise ExpressionError("比较运算的右操作数不能是括号子表达式")
+            assert isinstance(right_val, str)  # noqa: S101 - 到达此处必为 STR/NUM/NAME
             return _Comparison(left_kind, left_val, op_tok.value, right_kind, right_val)
         raise ExpressionError("比较表达式缺少运算符（应为 ==/!=/>/</>=/<= 或 is null）")
 

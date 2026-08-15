@@ -225,6 +225,16 @@ class FakePortManager:
         for obs in self._tx_observers.get(port, []):
             obs(payload)
 
+    def write_bytes(self, port: str, data: bytes) -> None:
+        """流式写原始字节（不加结束符）——P2 修复：与 PortManager 接口对齐.
+
+        旧实现缺失本方法，Fake 无法完整替换真实 PortManager（文件发送等
+        write_bytes 路径在 Fake 驱动的测试中直接 AttributeError）。
+        """
+        self.sent.append((port, f"<bytes:{len(data)}>"))
+        for obs in self._tx_observers.get(port, []):
+            obs(data)
+
     def emit_rx(self, port: str, data: bytes) -> None:
         """测试辅助：向某端口的 RX 观察者投递字节（模拟模块回包）."""
         for obs in self._rx_observers.get(port, []):

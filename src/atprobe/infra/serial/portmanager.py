@@ -63,6 +63,11 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         self._rx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._tx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._urc_handlers: dict[str, list[URCHandler]] = {}
+        # P1 修复：持久订阅桶的并发保护。GUI 线程 subscribe/unsubscribe 与引擎线程
+        # open()（re-attach 迭代）并发时，裸 dict/list 会 RuntimeError（迭代中修改）
+        # 或静默丢订阅。锁序恒为 _lock → _observers_lock（仅 open 同时持两锁，
+        # subscribe/unsubscribe 只持 _observers_lock，无反向获取，无死锁）。
+        self._observers_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # §4.1 连接管理
@@ -89,12 +94,15 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             self._configs[config.name] = config
             # 把该端口持久订阅重新 attach 到新 connection（新 connection 观察者列表为空，
             # 直接 add 即可）。使 close+open 重建后订阅自动恢复。
-            for obs in self._rx_observers.get(config.name, []):
-                conn.add_rx_observer(obs)
-            for obs in self._tx_observers.get(config.name, []):
-                conn.add_tx_observer(obs)
-            for h in self._urc_handlers.get(config.name, []):
-                conn.add_urc_handler(h)
+            # P1 修复：re-attach 迭代持 _observers_lock，与 subscribe/unsubscribe 互斥，
+            # 消除「GUI 订阅 vs 引擎 open 并发」的迭代中修改风险。
+            with self._observers_lock:
+                for obs in list(self._rx_observers.get(config.name, [])):
+                    conn.add_rx_observer(obs)
+                for obs in list(self._tx_observers.get(config.name, [])):
+                    conn.add_tx_observer(obs)
+                for h in list(self._urc_handlers.get(config.name, [])):
+                    conn.add_urc_handler(h)
 
     def close(self, port: str) -> None:
         with self._lock:
@@ -122,24 +130,23 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         return PortConfig(name=port)
 
     def enumerate_ports(self) -> list[PortInfo]:
-        """枚举系统串口（M5 list ports）."""
+        """枚举系统串口（M5 list ports）.
+
+        P3/P2 修复：旧实现对每个系统串口做**独占打开探测**判占用——Windows 上
+        短暂触碰他人进程占用的端口（可能引发对方驱动异常），且 USB 串口多时
+        秒级阻塞（GUI 构造路径直接调用）。改为非侵入式：in_use 仅反映本进程
+        已打开的端口（系统级占用不再探测；显示语义从「被谁占用」变为「被本
+        程序占用」，枚举本身用 comports() 不需要打开设备）。
+        """
         if not _HAS_LISTPORTS:  # pragma: no cover
             return []
-        result: list[PortInfo] = []
-        for info in list_ports.comports():  # type: ignore[union-attr]
-            in_use = False
-            try:
-                # 尝试独占打开判断占用
-                import serial as _serial  # type: ignore[import-not-found]
-
-                s = _serial.Serial(info.device, timeout=0)
-                s.close()
-            except Exception:  # noqa: BLE001
-                in_use = True
-            result.append(
-                PortInfo(name=info.device, description=str(info.description), in_use=in_use)
+        ours = set(self._connections.keys())
+        return [
+            PortInfo(
+                name=info.device, description=str(info.description), in_use=info.device in ours
             )
-        return result
+            for info in list_ports.comports()  # type: ignore[union-attr]
+        ]
 
     def set_case_log(self, port: str, log_file: Path | None) -> None:
         """引擎在每用例开始时绑定该端口的用例日志文件."""
@@ -220,9 +227,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if conn is None:
             raise KeyError(f"端口 {port} 未打开")
         # 持久层登记（去重，与 connection 的 add 同样基于身份/相等判定）
-        bucket = self._rx_observers.setdefault(port, [])
-        if observer not in bucket:
-            bucket.append(observer)
+        with self._observers_lock:
+            bucket = self._rx_observers.setdefault(port, [])
+            if observer not in bucket:
+                bucket.append(observer)
         conn.add_rx_observer(observer)
         return (port, observer)
 
@@ -231,9 +239,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             return
         port, observer = handle  # type: ignore[misc]
         # 从持久层移除（确保 close+open 后不再 re-attach）
-        bucket = self._rx_observers.get(port)  # type: ignore[arg-type]
-        if bucket and observer in bucket:
-            bucket.remove(observer)
+        with self._observers_lock:
+            bucket = self._rx_observers.get(port)  # type: ignore[arg-type]
+            if bucket and observer in bucket:
+                bucket.remove(observer)
         conn = self._connections.get(port)  # type: ignore[arg-type]
         if conn is not None:
             conn.remove_rx_observer(observer)  # type: ignore[arg-type]
@@ -246,9 +255,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         conn = self._connections.get(port)
         if conn is None:
             raise KeyError(f"端口 {port} 未打开")
-        bucket = self._tx_observers.setdefault(port, [])
-        if observer not in bucket:
-            bucket.append(observer)
+        with self._observers_lock:
+            bucket = self._tx_observers.setdefault(port, [])
+            if observer not in bucket:
+                bucket.append(observer)
         conn.add_tx_observer(observer)
         return (port, observer)
 
@@ -256,9 +266,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if not isinstance(handle, tuple) or len(handle) != 2:
             return
         port, observer = handle  # type: ignore[misc]
-        bucket = self._tx_observers.get(port)  # type: ignore[arg-type]
-        if bucket and observer in bucket:
-            bucket.remove(observer)
+        with self._observers_lock:
+            bucket = self._tx_observers.get(port)  # type: ignore[arg-type]
+            if bucket and observer in bucket:
+                bucket.remove(observer)
         conn = self._connections.get(port)  # type: ignore[arg-type]
         if conn is not None:
             conn.remove_tx_observer(observer)  # type: ignore[arg-type]
@@ -294,9 +305,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         conn = self._connections.get(port)
         if conn is None:
             raise KeyError(f"端口 {port} 未打开")
-        bucket = self._urc_handlers.setdefault(port, [])
-        if handler not in bucket:
-            bucket.append(handler)
+        with self._observers_lock:
+            bucket = self._urc_handlers.setdefault(port, [])
+            if handler not in bucket:
+                bucket.append(handler)
         conn.add_urc_handler(handler)
         return (port, handler)
 
@@ -304,9 +316,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if not isinstance(handle, tuple) or len(handle) != 2:
             return
         port, handler = handle  # type: ignore[misc]
-        bucket = self._urc_handlers.get(port)  # type: ignore[arg-type]
-        if bucket and handler in bucket:
-            bucket.remove(handler)
+        with self._observers_lock:
+            bucket = self._urc_handlers.get(port)  # type: ignore[arg-type]
+            if bucket and handler in bucket:
+                bucket.remove(handler)
         conn = self._connections.get(port)  # type: ignore[arg-type]
         if conn is not None:
             conn.remove_urc_handler(handler)  # type: ignore[arg-type]

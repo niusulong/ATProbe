@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from jinja2 import Environment, PackageLoader, select_autoescape
+from jinja2 import Environment, PackageLoader
 
 from atprobe.domain.report.models import ExecutionResult
 from atprobe.reporting.interfaces import IReporter, ReportOutput
@@ -20,9 +20,13 @@ class HtmlReporter(IReporter):
     format_name = "html"
 
     def __init__(self) -> None:
+        # P2 修复（XSS/HTML 注入）：旧实现 select_autoescape(["html","xml"]) 按文件
+        # 名后缀判断，而模板名 report.html.j2 以 .j2 结尾 → autoescape 实际关闭，
+        # 用例名/设备响应/错误信息（可含 <script> 等任意文本）原样进 HTML。
+        # 报告经浏览器打开（file://），注入脚本可执行。强制开启转义。
         self._env = Environment(
             loader=PackageLoader("atprobe.reporting", "templates"),
-            autoescape=select_autoescape(["html", "xml"]),
+            autoescape=True,
             trim_blocks=True,
             lstrip_blocks=True,
         )

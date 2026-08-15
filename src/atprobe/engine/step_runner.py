@@ -47,6 +47,7 @@ from atprobe.infra.serial.interfaces import (
     CancelToken,
     ICommandSender,
     Response,
+    ResponseStatus,
 )
 
 
@@ -125,7 +126,11 @@ def execute_step(
         try:
             cond = evaluate(step.when, ctx.variables)
         except (ExpressionError, UndefinedReferenceError) as exc:
-            return _build_skipped(index, phase, port, step, f"when 表达式错误：{exc}", is_fail=True)
+            # P1 修复：when 表达式错误与普通失败一样走 on_failure 决策
+            # （旧实现硬编码 abort_case=True，绕过 on_failure: continue/skip）
+            return _author_error_result(
+                index, phase, port, step, f"when 表达式错误：{exc}", case_on_failure, is_teardown
+            )
         if not cond:
             return _build_skipped(index, phase, port, step, "when 条件不满足")
 
@@ -135,18 +140,10 @@ def execute_step(
     try:
         request = _render_input(step, ctx)
     except (UndefinedReferenceError, TemplateRenderError) as exc:
-        sr = StepResult(
-            step_index=index,
-            phase=phase,
-            input_type=input_type,
-            command=_truncate(_cmd_display(step)),
-            port=port,
-            status=StepStatus.FAIL,
-            request="",
-            response="",
-            error_msg=f"模板渲染失败：{exc}",
+        # P1 修复：同上，模板渲染失败走 on_failure 决策而非硬编码中止
+        return _author_error_result(
+            index, phase, port, step, f"模板渲染失败：{exc}", case_on_failure, is_teardown
         )
-        return StepExecResult(status=StepStatus.FAIL, step_result=sr, abort_case=True)
 
     command_display = _truncate(request if step.command is not None else _cmd_display(step))
 
@@ -256,7 +253,10 @@ def _run_retry(
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("步骤被取消")
         if attempt_no > 0 and retry is not None:
+            # P2 修复（耗时口径）：重试间隔计入步骤总耗时（旧实现低估实际耗时）
+            t_wait = clock()
             sleep(retry.interval / 1000.0)
+            total_duration += (clock() - t_wait) * 1000.0
         attempt = _single_attempt(
             step, request, port, timeout, wait_urc, ctx, sender, clock, cancel
         )
@@ -303,20 +303,44 @@ def _run_poll(
         # 注：首轮立即查询（sleep 在循环末尾）。这是有意设计——poll 典型场景是
         # 「发指令后等设备产生结果」，首轮立即查询可在结果已就绪时省掉一个 interval
         # 的等待；上一条命令的残留响应已由 send_command 入口的 _drain_response_q 清排。
+        # P2 修复（超时预算）：单次 attempt 等待上限取「步骤超时」与「poll 剩余
+        # 预算」较小值——旧实现末次 attempt 可阻塞整个步骤超时，poll 实际耗时
+        # 大幅超出 poll.timeout。
+        remaining_budget = max(deadline - clock(), 0.05)
         attempt = _single_attempt(
-            step, request, port, timeout, wait_urc, ctx, sender, clock, cancel
+            step,
+            request,
+            port,
+            min(timeout, remaining_budget),
+            wait_urc,
+            ctx,
+            sender,
+            clock,
+            cancel,
         )
         total_duration += attempt.duration_ms
         attempt.duration_ms = total_duration
 
         # poll 判定：until 条件是否满足（基于本次 extract 的临时作用域）
+        # P0 修复：until 满足**且**本次断言通过才算成功——旧实现无条件覆盖
+        # step_passed=True，把断言失败静默翻转为 PASS（报告出现「PASS 步骤带失败
+        # 断言」的自相矛盾）。poll 的成功语义 = 条件满足 + 断言通过，二者缺一不可。
         if attempt.response.ok:
             tmp_scope = dict(ctx.variables)
-            tmp_scope.update(attempt.extracted)
+            # P1 修复：只合并「实际匹配到」的 extract 变量（与常规步骤提交口径一致，
+            # step_runner 提交池时按 matched 过滤）。旧实现把未匹配变量置 "" 合并，
+            # 导致 `x is not null` 在 extract 失败的轮次假成功、`x is null` 永远轮询
+            # 到超时——与 when/后续步骤的「未匹配=未定义→null」语义矛盾。
+            tmp_scope.update(
+                {k: v for k, v in attempt.extracted.items() if attempt.matched.get(k, True)}
+            )
             try:
                 if evaluate(poll.until, tmp_scope):
-                    attempt.step_passed = True
-                    attempt.step_error = ""
+                    if attempt.step_passed:
+                        return attempt, iterations
+                    # until 已满足但断言失败：保留断言失败原因，不再继续轮询
+                    # （条件已达成，重试同样的断言不会变好），也不覆盖为「超时」。
+                    attempt.step_error = attempt.step_error or "poll 条件已满足但断言失败"
                     return attempt, iterations
             except UndefinedReferenceError:
                 # 变量尚未定义（extract 还没拿到值）→ 继续轮询，属正常 poll 节奏
@@ -333,7 +357,12 @@ def _run_poll(
                 f"poll until 表达式错误：{expr_error}" if expr_error else "poll 超时未满足条件"
             )
             return attempt, iterations
+        # P2 修复（耗时口径）：间隔等待计入步骤总耗时——旧实现只累计发送/等待
+        # 时长，报告与压测 avg 系统性低估（retry.count=3、interval=1s 时差 ~3s）
+        t_wait = clock()
         sleep(interval)
+        total_duration += (clock() - t_wait) * 1000.0
+        attempt.duration_ms = total_duration
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +397,21 @@ def _single_attempt(
             step_error=resp.error or "响应异常",
             duration_ms=dt,
             error_kind=resp.error_kind,
+        )
+
+    # P1 修复：TIMEOUT 交付的是「未终结的部分缓冲」而非完整响应，在其上做
+    # extract/assert 可能用半截数据通过 contains 断言 → 假 PASS。超时一律判失败，
+    # 保留部分文本供报告诊断（不再进入断言求值）。
+    if resp.status is ResponseStatus.TIMEOUT:
+        return _SingleAttempt(
+            response=resp,
+            extracted=extracted,
+            matched=matched,
+            assertion_outcomes=outcomes,
+            step_passed=False,
+            step_error=resp.error or "响应超时（部分数据不参与断言）",
+            duration_ms=dt,
+            error_kind="TIMEOUT",
         )
 
     if step.extract:
@@ -425,6 +469,38 @@ def _cmd_display(step: Step) -> str:
 
 def _truncate(s: str, n: int = 60) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _author_error_result(
+    index: int,
+    phase: str,
+    port: str,
+    step: Step,
+    msg: str,
+    case_on_failure: FailureStrategy | None,
+    is_teardown: bool,
+) -> StepExecResult:
+    """用例作者错误（模板渲染失败/when 表达式错误）的统一出口.
+
+    P1 修复：这类错误此前硬编码 abort_case=True，绕过 on_failure 决策——
+    用户显式配置 on_failure: continue/skip 对作者错误不生效。现与普通失败
+    一致：按 step.on_failure → case.on_failure → 默认 ABORT 决策。
+    """
+    strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
+    status = StepStatus.SKIPPED if strategy is FailureStrategy.SKIP else StepStatus.FAIL
+    sr = StepResult(
+        step_index=index,
+        phase=phase,
+        input_type=InputType.DATA if step.data is not None else InputType.COMMAND,
+        command=_truncate(_cmd_display(step)),
+        port=port,
+        status=status,
+        request="",
+        response="",
+        error_msg=msg,
+    )
+    abort_case = not is_teardown and status is StepStatus.FAIL and strategy is FailureStrategy.ABORT
+    return StepExecResult(status=status, step_result=sr, abort_case=abort_case)
 
 
 def _build_skipped(

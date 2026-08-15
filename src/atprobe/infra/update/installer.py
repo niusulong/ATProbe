@@ -28,6 +28,38 @@ _EXE_NAME = "ATProbe.exe"
 _INTERNAL_NAME = "_internal"
 
 
+def ensure_recovered(app_root: Path) -> bool:
+    """启动侧中断恢复（P2 修复）：检测上次升级被中断的残留并回滚.
+
+    updater.bat 在动 ``_internal`` 前写 ``_internal.update.pending`` 标记，成功与
+    回滚两条退出路径都会删除它。若标记残留且 ``_internal.bak`` 存在，说明上次
+    升级中途被杀（断电/强杀 bat）——当前 ``_internal`` 可能是半新状态（DLL 与
+    旧 exe 版本不匹配，直接起不来）。回滚：删半新目录、把 .bak 恢复原名。
+
+    Returns:
+        True 表示执行了回滚（调用方可提示用户重新升级）。
+    """
+    pending = app_root / (_INTERNAL_NAME + ".update.pending")
+    backup = app_root / (_INTERNAL_NAME + ".bak")
+    current = app_root / _INTERNAL_NAME
+    if not (pending.exists() and backup.exists()):
+        return False
+    try:
+        if current.exists():
+            shutil.rmtree(current, ignore_errors=True)
+        backup.rename(current)
+        pending.unlink(missing_ok=True)
+        # exe 也可能已被换成新版（与回滚的旧 _internal 不匹配）→ 恢复 exe.bak
+        exe_bak = app_root / (_EXE_NAME + ".bak")
+        exe = app_root / _EXE_NAME
+        if exe_bak.exists() and exe.exists():
+            exe.unlink(missing_ok=True)
+            exe_bak.rename(exe)
+    except OSError:
+        return False
+    return True
+
+
 def apply_update(
     zip_path: Path,
     app_root: Path,
@@ -116,12 +148,24 @@ def _validate_zip(zip_path: Path) -> None:
 def _clean_dir(d: Path) -> None:
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+        # P3 修复：清理失败（被锁文件残留）不再静默吞——否则新旧版本文件混入
+        # 下次 staging（rmtree ignore_errors 掩盖了部分删除）
+        if d.exists():
+            raise UpdateError(f"无法清空目录（可能被占用）：{d}")
     d.mkdir(parents=True, exist_ok=True)
 
 
 def _extract_staging(zip_path: Path, staging_root: Path) -> Path:
     """解压 zip 到 staging_root，返回含主 exe 的应用目录."""
     with zipfile.ZipFile(zip_path) as z:
+        # P3 修复（zip-slip 消毒）：成员名含 ../ 等相对路径时可写出 staging 外。
+        # 当前 zip 来自可信 GitHub Releases + SHA256 校验，属纵深防御。
+        from pathlib import PurePosixPath
+
+        for member in z.namelist():
+            p = PurePosixPath(member)
+            if p.is_absolute() or ".." in p.parts:
+                raise UpdateError(f"安装包含非法路径成员：{member!r}")
         z.extractall(staging_root)
     # zip 顶层目录名形如 ATProbe-<ver>/，找到含主 exe（ATProbe.exe）的目录。
     # 大小写不敏感探测（Windows 文件系统本身大小写不敏感，且 spec 名可能调整）。
@@ -176,9 +220,15 @@ def build_updater_script(
     if staging_cli_exe_name is not None:
         staging_cli = _win(str(staging_dir / staging_cli_exe_name))
         cli_dest = _win(str(exe_path.parent / staging_cli_exe_name))
+        # P3 修复：CLI copy 加错误检查（旧实现失败静默 → GUI 已升级、CLI 仍旧版）
         cli_replace_block = (
-            f'if exist "{staging_cli}" (\n    copy /y "{staging_cli}" "{cli_dest}" >nul\n)\n'
+            f'if exist "{staging_cli}" (\n'
+            f'    copy /y "{staging_cli}" "{cli_dest}" >nul\n'
+            f"    if errorlevel 1 goto rollback\n)\n"
         )
+    # P3 修复：重启命令不放进括号块（exe 路径含 ")" 时 cmd 解析错乱）；
+    # bat 自删除放行首（已是最后一行，删除后无后续行可读，安全）
+    tail_cmd = f'del "%~f0" 2>nul\n{restart_cmd}\n'
     return f"""@echo off
 chcp 65001 >nul
 setlocal
@@ -189,19 +239,31 @@ set "STAGING={staging}"
 set "BACKUP={backup}"
 set "EXE_BAK={exe_bak}"
 set "PID={pid}"
+set "PENDING={internal}.update.pending"
 
 REM 1. 等待主程序退出（轮询，最长约 30 秒）
 REM 注意：inc/compare 不能放在 ( ) 块内（无 enabledelayedexpansion 时 %tries%
 REM 在解析期展开，永远是 0），故用 goto 循环把判断放在块外。
+REM P1 修复：旧实现 findstr /b 锚定行首匹配 PID，而 tasklist 输出行首是映像名
+REM （PID 在第 2 列）→ 永不命中 → 立即 goto waited，等待循环形同虚设，升级与
+REM 退出中的主进程抢文件锁（间歇性升级失败回滚）。改为按空格定界 token 匹配
+REM （" %PID% " 两侧空格避免 123 误命中 1234）。
+REM 另：timeout /t 在无控制台（双击 GUI 启动）下报错直接跳过等待，改用 ping 计时。
 set /a tries=0
 :wait
-tasklist /fi "pid eq %PID%" /nh 2>nul | findstr /b /c:"%PID% " >nul
+tasklist /fi "pid eq %PID%" /nh 2>nul | findstr /c:" %PID% " >nul
 if errorlevel 1 goto waited
 set /a tries+=1
 if %tries% GEQ 30 goto rollback
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul
 goto wait
 :waited
+
+REM P2 修复（中断恢复标记）：写 pending 标记后再动 _internal；成功与回滚两条
+REM 退出路径都会删除它。若升级中途被杀（断电/强杀 bat），标记残留 → 主程序
+REM 下次启动检测到 [_internal.bak + pending] 自动回滚（ensure_recovered）。
+del "%PENDING%" 2>nul
+echo pending> "%PENDING%"
 
 REM 2. 备份旧版
 if exist "%BACKUP%" rmdir /s /q "%BACKUP%"
@@ -217,13 +279,15 @@ copy /y "{staging_exe}" "%EXE%" >nul
 if errorlevel 1 goto rollback
 {cli_replace_block}
 REM 4. 成功：清理 + 重启
+del "%PENDING%" >nul 2>&1
 rmdir /s /q "%BACKUP%"
 del "%EXE_BAK%" 2>nul
 rmdir /s /q "%STAGING%"
-(del "%~f0" & {restart_cmd})
+{tail_cmd}
 exit /b 0
 
 :rollback
+del "%PENDING%" >nul 2>&1
 if exist "%BACKUP%" (
     if exist "%INTERNAL%" rmdir /s /q "%INTERNAL%"
     ren "%BACKUP%" "_internal"

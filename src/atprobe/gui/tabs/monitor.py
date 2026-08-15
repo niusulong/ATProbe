@@ -10,9 +10,10 @@
 
 from __future__ import annotations
 
+import codecs
 from collections import deque
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -60,6 +61,10 @@ class _PortSubView(QWidget):
         self.buffer: deque[tuple[str, str, str]] = deque(maxlen=_MAX_LINES)
         # 跨 chunk 的不完整行缓冲（仅文本模式用；HEX 模式每 chunk 独立渲染不累积）
         self._line_buffer = ""
+        # P1 修复：incremental decoder——跨 chunk 的多字节字符（中文/emoji）在分块
+        # 边界由 decoder 缓冲重组，而非被 errors="replace 永久替换丢失
+        # （manual_debug 的 B7 修复同步到 monitor）。
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.view = QTextEdit()
@@ -75,23 +80,31 @@ class _PortSubView(QWidget):
         """喂入一个原始字节 chunk，按行切分后入 buffer.
 
         - HEX 模式：整个 chunk 转十六进制一行显示（不跨 chunk 累积，与 manual_debug 一致）。
-        - 文本模式：累积到 _line_buffer，按 \\n 切分；完整行入 buffer（保留空行，
-          忠实反映换行符数量），末尾未换行的片段留在缓冲等下次 chunk。
+        - 文本模式：incremental decoder 解码后累积到 _line_buffer；\\r\\n 归一为单个
+          换行，**孤立 \\r**（N58 等设备的进度刷行）也视为换行（P1 修复：旧实现只按
+          \\n 切分，纯 \\r 行永不 flush——tail 无界增长且内容不可见）；末尾悬置的
+          孤立 \\r 保留待下一 chunk（可能是 \\r\\n 的前半）。
         """
         if hex_mode:
             hex_line = " ".join(f"{b:02X}" for b in data)
             if hex_line:
                 self.buffer.append((direction, ts, hex_line))
             return
-        text = data.decode("utf-8", errors="replace")
+        text = self._decoder.decode(data)
         self._line_buffer += text
-        parts = self._line_buffer.split("\n")
+        # 行尾悬置的 \r 暂扣（下一 chunk 若以 \n 开头则拼回 \r\n，不产生空行伪影）
+        hold = ""
+        if self._line_buffer.endswith("\r"):
+            hold = "\r"
+            self._line_buffer = self._line_buffer[:-1]
+        normalized = self._line_buffer.replace("\r\n", "\n").replace("\r", "\n")
+        parts = normalized.split("\n")
         # 前面所有是完整行（以 \n 结尾），最后一段可能未到换行 → 留缓冲
         if len(parts) > 1:
             complete = "\n".join(parts[:-1]) + "\n"
             for line in split_lines_preserving_blanks(complete):
                 self.buffer.append((direction, ts, line))
-        self._line_buffer = parts[-1]
+        self._line_buffer = parts[-1] + hold
 
     def append(self, direction: str, ts: str, text: str) -> None:
         self.buffer.append((direction, ts, text))
@@ -128,6 +141,8 @@ class _PortSubView(QWidget):
 
     def clear(self) -> None:
         self.buffer.clear()
+        self._line_buffer = ""
+        self._decoder.reset()  # 半截多字节字符一并丢弃，避免污染后续解码
         self.view.clear()
 
     def to_plain_text(self) -> str:
@@ -139,6 +154,13 @@ class _PortSubView(QWidget):
 class MonitorWidget(QWidget):
     """多端口数据流监控视图（§6.2，每端口独立子标签页）."""
 
+    # P0 修复：Qt 信号桥。串口读线程的观察者回调只 emit 本信号（emit 是线程
+    # 安全的，跨线程经 queued connection 投递回 GUI 线程），_on_data 槽在 GUI
+    # 线程执行——旧实现回调直接调 _on_data，在读线程上下文创建 QTabWidget 子页、
+    # 读控件状态、append deque（与 QTimer flush 迭代并发），属 Qt 禁止的跨线程
+    # QWidget 操作（UB/崩溃）+ deque 迭代中修改竞态。
+    data_received = Signal(str, str, bytes)
+
     def __init__(self, binding: TabBinding, main_window: object) -> None:
         super().__init__()
         self._main = main_window
@@ -146,6 +168,8 @@ class MonitorWidget(QWidget):
         self._port_checks: list[QCheckBox] = []
         self._sub_views: dict[str, _PortSubView] = {}  # port -> 子页
         self._init_ui()
+        # 信号桥接线：任何线程 emit → GUI 线程执行 _on_data
+        self.data_received.connect(self._on_data)
         # 定时刷新显示（节流，避免每字节刷新卡顿）；单 timer 遍历所有子页 flush。
         # 生命周期对齐"监控中"：随订阅起停，不监控时停止空转（P0 资源正确释放）。
         self._timer = QTimer(self)
@@ -290,7 +314,8 @@ class MonitorWidget(QWidget):
                 self._ensure_sub_view(p)
             self.subscribe_btn.setText("停止监控")
             if hasattr(self._main, "subscribe_monitor"):
-                self._main.subscribe_monitor(self._selected_ports(), self._on_data)
+                # P0 修复：sink 用信号 emit（线程安全），观察者回调→GUI 线程槽
+                self._main.subscribe_monitor(self._selected_ports(), self.data_received.emit)
             # 订阅成功后启动刷新定时器（与订阅生命周期绑定）
             self._timer.start(200)
         else:
@@ -318,8 +343,14 @@ class MonitorWidget(QWidget):
                 pass
 
     def refresh_theme(self) -> None:
-        """主题切换时刷新内联富文本配色（M11）."""
+        """主题切换时刷新内联富文本配色（M11）.
+
+        P1 修复：同步更新已存在子页的 tokens 引用——旧实现只换 MonitorWidget
+        自己的 dict 引用，已创建的子页仍指旧主题色（仅新建子页生效）。
+        """
         self._tokens = get_tokens()
+        for sv in self._sub_views.values():
+            sv._tokens = self._tokens
 
     def _on_data(self, port: str, direction: str, data: bytes) -> None:
         from datetime import datetime

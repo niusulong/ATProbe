@@ -46,6 +46,9 @@ class RawLogger:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._started = False
+        # P3 修复：join 超时后的「永久停止」标志——旧实现 stop 超时后 _started=False，
+        # 再次 start() 会起第二个写入线程，双线程消费同一队列/句柄交错写坏日志
+        self._permanently_stopped = False
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -53,7 +56,7 @@ class RawLogger:
     def start(self) -> None:
         """启动后台写入线程."""
         with self._lock:
-            if self._started:
+            if self._started or self._permanently_stopped:
                 return
             self._started = True
             self._stop_event.clear()
@@ -68,6 +71,9 @@ class RawLogger:
             self._queue.put(None)  # 哨兵
             assert self._thread is not None
             self._thread.join(timeout=10.0)
+            if self._thread.is_alive():
+                # 写入线程卡死（如日志盘被拔）：禁止重启（防双线程交错写），丢弃句柄
+                self._permanently_stopped = True
             self._started = False
             self._thread = None
 

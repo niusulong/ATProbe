@@ -35,7 +35,18 @@ def extract_one(pattern: str, response: str) -> ExtractionResult:
     if m is None:
         return ExtractionResult(name="", value="", matched=False)
     if m.groups():
-        value = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
+        # P1 修复：取「第一个实际参与匹配」的捕获组。旧实现固定取 group(1)，
+        # 当首组是未参与匹配的可选组（如 r"(\+?)(\d+)" 匹配 "123"）时 group(1)
+        # 为 None，以 matched=True 写入变量池，破坏 dict[str, str] 契约，后续
+        # {{var}} 渲染报「模板渲染失败」。跳过 None 组，取首个实际匹配的组；
+        # 全部组都未参与时按未匹配处理（matched=False）。
+        value: str | None = None
+        for gi in range(1, m.lastindex + 1 if m.lastindex else 1):
+            if m.group(gi) is not None:
+                value = m.group(gi)
+                break
+        if value is None:
+            return ExtractionResult(name="", value="", matched=False)
     else:
         value = m.group(0)
     return ExtractionResult(name="", value=value, matched=True)

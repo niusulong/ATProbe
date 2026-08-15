@@ -34,6 +34,9 @@ class PressureRunResult:
 
     stats: PressureStats
     aborted: bool = False
+    # P2 修复：中止原因（"cancelled"=用户取消 / "abort_on_failure"=失败即中止），
+    # 供上层生成准确 error_msg（旧实现一律报"成功率低于阈值"，误导排障）
+    abort_reason: str = ""
 
 
 def run_pressure(
@@ -63,14 +66,17 @@ def run_pressure(
     step_rt: dict[int, list[float]] = {}
     step_suc: dict[int, int] = {}
     step_fail: dict[int, int] = {}
+    step_skip: dict[int, int] = {}
     for i, _step in enumerate(case.steps, start=1):
         step_rt[i] = []
         step_suc[i] = 0
         step_fail[i] = 0
+        step_skip[i] = 0
 
     success_rounds = 0
     failed_rounds = 0
     aborted = False
+    abort_reason = ""
     counted = 0
 
     # warmup + 正式轮统一循环，靠轮号区分是否计入
@@ -79,6 +85,7 @@ def run_pressure(
         ctx.variables["loop_index"] = rnd
         if cancel is not None and cancel.cancelled:
             aborted = True
+            abort_reason = "cancelled"
             break
 
         round_ok = True
@@ -104,12 +111,18 @@ def run_pressure(
                 if rnd > warmup:
                     step_suc[idx] += 1
                     step_rt[idx].append(sr.duration_ms)
+            elif sr.status is StepStatus.SKIPPED:
+                # P3 修复：when 条件不满足的 SKIPPED 不计该步失败、不判废该轮
+                # （旧实现把 SKIPPED 当 step_fail → round_ok=False，口径失真）
+                if rnd > warmup:
+                    step_skip[idx] += 1
             else:
                 if rnd > warmup:
                     step_fail[idx] += 1
                 round_ok = False
                 if abort_on_fail:
                     aborted = True
+                    abort_reason = "abort_on_failure"
                     break
 
         if rnd > warmup:
@@ -151,7 +164,7 @@ def run_pressure(
         passed=passed,
         step_stats=step_stats,
     )
-    return PressureRunResult(stats=stats, aborted=aborted)
+    return PressureRunResult(stats=stats, aborted=aborted, abort_reason=abort_reason)
 
 
 def _step_command(step: Step) -> str:
