@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from atprobe.infra.config.appconfig import load_app_config
+import pytest
+
+from atprobe.infra.config.appconfig import (
+    AppConfigError,
+    load_app_config,
+)
 
 
 def test_mcp_defaults():
@@ -20,9 +25,17 @@ def test_mcp_keys_loaded():
 
 
 def test_mcp_bad_port_rejected():
-    import pytest
-
-    from atprobe.infra.config.appconfig import AppConfigError
-
-    with pytest.raises(AppConfigError):
+    with pytest.raises(AppConfigError, match=r"mcp\.port"):
         load_app_config("mcp:\n  port: not-a-number\n")
+
+
+def test_mcp_bool_port_rejected():
+    # bool 是 int 子类：YAML 的 true 不能溜进 _to_int
+    with pytest.raises(AppConfigError, match=r"mcp\.port"):
+        load_app_config("mcp:\n  port: true\n")
+
+
+def test_mcp_null_token_file_stays_none():
+    # 显式置空（~）保持 None，不变成字符串 'None'
+    cfg = load_app_config("mcp:\n  token_file: ~\n")
+    assert cfg.mcp_token_file is None
