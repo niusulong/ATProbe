@@ -3,4 +3,5 @@
 子模块：
     errors    — McpError 结构化错误（kind 枚举判定，全模块共用）
     urcbuffer — URC 订阅注册表（游标式环形缓冲）
+    jobs      — JobManager 异步作业状态机（单并发 BUSY/进度快照/报告渲染）
 """
