@@ -402,20 +402,35 @@ def _single_attempt(
             error_kind=resp.error_kind,
         )
 
-    # P1 修复：TIMEOUT 交付的是「未终结的部分缓冲」而非完整响应，在其上做
-    # extract/assert 可能用半截数据通过 contains 断言 → 假 PASS。超时一律判失败，
-    # 保留部分文本供报告诊断（不再进入断言求值）。
+    # TIMEOUT 三态语义（真机测试修正的业务码机制）：
+    #   1) 文本非空且以 \r\n 结尾 → **业务码响应**：设备已送完整行但不以 OK/ERROR
+    #      终结（如 +UPDATETIME: No PPP Link），框架按设计经超时交付（见
+    #      interfaces.ResponseStatus.TIMEOUT「完整但超时」与 SKILL「业务码超时
+    #      陷阱」）——必须参与 extract/assert（43 个存量 N58 用例依赖此模式，
+    #      严格 ^...$ 锚定断言自身防伪）。
+    #   2) 文本为空/纯空白 → 完全无响应，直接失败。
+    #   3) 文本非空但不以 \r\n 结尾 → 行中被截断（半截数据），不参与断言，
+    #      失败并保留文本供诊断（防 contains 在残缺文本上假命中）。
     if resp.status is ResponseStatus.TIMEOUT:
-        return _SingleAttempt(
-            response=resp,
-            extracted=extracted,
-            matched=matched,
-            assertion_outcomes=outcomes,
-            step_passed=False,
-            step_error=resp.error or "响应超时（部分数据不参与断言）",
-            duration_ms=dt,
-            error_kind=ERROR_KIND_TIMEOUT,
-        )
+        text = resp.text
+        if text.strip() and text.endswith("\r\n"):
+            pass  # 业务码：落入下方正常 extract/断言路径
+        else:
+            reason = (
+                "响应超时（无任何数据）"
+                if not text.strip()
+                else "响应超时（数据不完整，不参与断言）"
+            )
+            return _SingleAttempt(
+                response=resp,
+                extracted=extracted,
+                matched=matched,
+                assertion_outcomes=outcomes,
+                step_passed=False,
+                step_error=reason,
+                duration_ms=dt,
+                error_kind=ERROR_KIND_TIMEOUT,
+            )
 
     if step.extract:
         values, matched = extract_all(step.extract, resp.text)

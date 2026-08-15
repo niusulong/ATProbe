@@ -127,12 +127,12 @@ class TestPollAssertionIntegrity:
 
 
 class TestTimeoutNoAssertion:
-    """P1：TIMEOUT 部分数据不参与断言."""
+    """TIMEOUT 响应三态语义（真机测试修正）."""
 
     def test_timeout_partial_text_fails_even_if_contains_matches(self) -> None:
-        """超时半截文本含 "OK" 也不能通过 contains 断言（旧实现假 PASS）."""
+        """超时半截文本（不以 \\r\\n 结尾，如 "\\r\\nOK"）不能通过 contains（假 PASS）."""
         step = Step(command="AT+SLOW", assert_={"contains": "OK"})
-        sender = FakeSender([_timeout("\r\nOK")])  # 半截 OK（无终结）
+        sender = FakeSender([_timeout("\r\nOK")])  # 半截 OK（无终结行）
         r = execute_step(
             step,
             index=1,
@@ -146,6 +146,68 @@ class TestTimeoutNoAssertion:
         )
         assert r.status.value == "FAIL"
         assert r.step_result.error_kind == "TIMEOUT"
+
+    def test_timeout_empty_fails(self) -> None:
+        """超时且完全无数据 → 失败."""
+        step = Step(command="AT+SLOW", assert_={"contains": "OK"})
+        sender = FakeSender([_timeout("")])
+        r = execute_step(
+            step,
+            index=1,
+            phase="steps",
+            ctx=CaseContext(),
+            sender=sender,
+            default_port="COM9",
+            step_timeout_default=5.0,
+            clock=time.monotonic,
+            sleep=lambda s: None,
+        )
+        assert r.status.value == "FAIL"
+        assert "无任何数据" in (r.step_result.error_msg or "")
+
+    def test_timeout_business_code_assertable(self) -> None:
+        """业务码模式：超时交付的完整行（以 \\r\\n 结尾）参与严格断言 → PASS.
+
+        真机回归：N58 用例 +UPDATETIME: No PPP Link 不以 OK 终结，框架按设计
+        经超时交付完整响应，用例在其上做 ^...$ 严格断言（存量 43 用例依赖）。
+        """
+        step = Step(
+            command="AT+UPDATETIME=1,1.2.3.4,10",
+            assert_={"matches": r"^\r\n\+UPDATETIME: No PPP Link\r\n$"},
+        )
+        sender = FakeSender([_timeout("\r\n+UPDATETIME: No PPP Link\r\n")])
+        r = execute_step(
+            step,
+            index=1,
+            phase="steps",
+            ctx=CaseContext(),
+            sender=sender,
+            default_port="COM9",
+            step_timeout_default=5.0,
+            clock=time.monotonic,
+            sleep=lambda s: None,
+        )
+        assert r.status.value == "PASS"
+
+    def test_timeout_business_code_strict_mismatch_fails(self) -> None:
+        """业务码模式但严格断言不匹配 → 失败（防伪机制仍有效）."""
+        step = Step(
+            command="AT+UPDATETIME=1,1.2.3.4,10",
+            assert_={"matches": r"^\r\n\+UPDATETIME: Other Code\r\n$"},
+        )
+        sender = FakeSender([_timeout("\r\n+UPDATETIME: No PPP Link\r\n")])
+        r = execute_step(
+            step,
+            index=1,
+            phase="steps",
+            ctx=CaseContext(),
+            sender=sender,
+            default_port="COM9",
+            step_timeout_default=5.0,
+            clock=time.monotonic,
+            sleep=lambda s: None,
+        )
+        assert r.status.value == "FAIL"
 
 
 class TestRenderFailureOnFailure:
