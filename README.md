@@ -44,10 +44,7 @@ uv run atprobe gui           # 桌面端 GUI（PySide6）
 
 ## 文档
 
-完整文档位于 [`docs/`](docs/README.md)：
-
-- 需求：`docs/requirements/PRD-总体需求.md` 与 `REQ-M1` ~ `REQ-M7`
-- 技术选型：`docs/design/TSD-技术选型.md`
+用例编写规范随仓库维护（`.agents/skills/atprobe-case-author/`）；指令参考（`docs/at-ref/`）与需求、技术设计文档（PRD/REQ/TSD）仅在本地维护，不随仓库分发。
 
 ## 技术栈
 
@@ -78,8 +75,6 @@ uv run python packaging/build.py
 1. 改 `pyproject.toml` 的 `version` → commit
 2. `git tag v<version> && git push origin v<version>`
 3. GitHub Actions 自动构建并发布到 Releases（约 3–5 分钟）
-
-详见 [`docs/superpowers/specs/2026-06-29-packaging-and-distribution-design.md`](docs/superpowers/specs/2026-06-29-packaging-and-distribution-design.md)。
 
 ## 许可
 
