@@ -376,6 +376,22 @@ unsubscribe_urc(subscription_id)                # 不再需要时退订
 {"error":"unauthorized"}`（客户端表现为连接/初始化失败）；serve 启动失败（缺 Token、
 配置非法、依赖缺失）是进程 exit 2 + 红字 stderr，见 §8。
 
+### 6.6 原始串口日志（自动落盘）
+
+MCP 服务进程内常驻原始日志记录器，两类通道的字节级收发**自动落盘**（HEX+TEXT
+双文件，与 CLI/GUI 同款格式）：
+
+| 通道 | 日志位置 | 内容 |
+|---|---|---|
+| `start_run` 作业 | `<log.dir>/<job_id>/<端口>/<用例名>.text.log` / `.hex.log` | 每用例的收发字节（引擎按用例绑定，与 CLI `atprobe run` 完全一致） |
+| 手动调试（`open_port` 之后） | `<log.dir>/manual_<时间戳>/<端口>/manual.text.log` / `.hex.log` | 端口打开期间的全部原始字节流——含回显、GPS 循环上报等噪声，**未经 urc_filter 剥离**（按字节原样记录，字节级定位以此为准） |
+
+- manual 会话随 MCP 服务进程生成（一个进程一个），`close_port` 后停止记录，
+  重开同端口继续追加同一文件。
+- `log.dir` 配置控制日志根目录（默认 `./logs`，锚定服务进程工作区）。
+- 定位断言问题时：作业失败看作业日志（干净文本 + 原始字节两份），手动调试看
+  manual 日志（含噪声的完整字节流）。
+
 > 可把下面这段直接粘进 Claude/Cursor 的自定义指令（project instructions）：
 >
 > 「你可以调用 atprobe 的 13 个 MCP 工具操作串口 AT 设备。推荐流程：list_ports 发现

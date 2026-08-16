@@ -40,6 +40,7 @@ from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig, Te
 from atprobe.infra.serial.exceptions import PortOpenError
 from atprobe.infra.serial.interfaces import CancelToken
 from atprobe.infra.serial.portmanager import PortManager
+from atprobe.infra.serial.rawlog import RawLogger
 from atprobe.reporting.html import HtmlReporter
 from atprobe.reporting.interfaces import ReportOutput
 
@@ -99,7 +100,12 @@ class MainWindow(QMainWindow):
             self._dark = current_theme_is_dark()
         self._tokens = get_tokens(dark=self._dark)
         self._registry: TabTypeRegistry = default_registry()
-        self._port_manager = PortManager()
+        # M8 修复：常驻 RawLogger 注入共享 PortManager 与 Engine——GUI 引擎执行
+        # 此前不落原始日志（sender_factory 注入裸 PM，connection._raw_logger 为
+        # None，_bind_case_logs 只建目录不写文件）。写入随引擎每用例绑定。
+        self._raw_logger = RawLogger()
+        self._raw_logger.start()
+        self._port_manager = PortManager(raw_logger=self._raw_logger)
         self._engine: Engine | None = None
         self._cancel: CancelToken | None = None
         self._monitor_handle: object | None = None
@@ -779,6 +785,8 @@ class MainWindow(QMainWindow):
                         _log.debug("closeEvent tab cleanup 抛异常", exc_info=True)
             # 最后关闭所有串口
             self._port_manager.close_all()
+            # 停原始日志写线程（drain 队列确保尾部记录落盘；M8 修复引入）
+            self._raw_logger.stop()
         finally:
             super().closeEvent(event)  # type: ignore[arg-type]
 
@@ -888,7 +896,9 @@ class MainWindow(QMainWindow):
         _log.info("开始执行: %d 个用例, 端口 %s, 阈值 %d%%", len(cases), port, threshold)
 
         self._set_engine_status("RUNNING", self._tokens["accent"])
-        self._engine = Engine(sender_factory=lambda: self._port_manager)
+        self._engine = Engine(
+            sender_factory=lambda: self._port_manager, raw_logger=self._raw_logger
+        )
 
         def _run() -> None:
             assert self._engine is not None

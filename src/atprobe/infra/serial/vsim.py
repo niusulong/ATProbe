@@ -33,6 +33,7 @@ from atprobe.infra.serial.interfaces import (
     ResponseStatus,
     URCHandler,
 )
+from atprobe.infra.serial.rawlog import RawLogger
 
 # 演示用的虚拟端口名（对用户可见，但不会真正打开硬件）
 VSIM_PORT = "VSIM0"
@@ -49,8 +50,9 @@ class VsimPortManager(FakePortManager):
         echo: bool = False,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        raw_logger: RawLogger | None = None,
     ) -> None:
-        super().__init__(clock=clock, sleep=sleep)
+        super().__init__(clock=clock, sleep=sleep, raw_logger=raw_logger)
         self._responder = AtResponder(rssi=rssi, cereg=cereg)
         self._echo = echo  # 是否在控制台打印每条收发（演示用）
 
@@ -85,10 +87,12 @@ class VsimPortManager(FakePortManager):
         self.sent.append((port, command))
         # wait_urc 由 AtResponder 生成的响应文本体现，此处仅接受以保持接口一致
         _ = wait_urc
+        self._emit_tx(port, command)  # observer 派发 + 用例日志（对齐真实发送路径）
         frame = self._responder.respond(command)
         if not frame:
             return Response(text="", status=ResponseStatus.ERROR, error="空指令")
         text = frame.decode("utf-8", errors="replace")
+        self._emit_rx(port, text)  # 有响应才派发 RX（对齐真实超时语义）
         # 注：ERROR 也是完整响应（由断言判定失败），无需单独状态——旧实现此处
         # 有一行无意义的死赋值（status = COMPLETE），已清理
         status = ResponseStatus.COMPLETE

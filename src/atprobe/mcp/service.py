@@ -7,12 +7,19 @@
 端口所有权（契约冻结）：start_run 不手动开关端口——引擎 scheduler 自己
 open 差集、结束后 close 差集；open_port/close_port 是手动调试通道。
 send_at 与作业互斥：引擎持有端口期间手动发送一律 BUSY。
+
+原始日志（M8 修复）：常驻 RawLogger 注入 PortManager 与 JobManager——
+作业日志由引擎按用例绑定（logs/<job_id>/<端口>/<用例名>.*，与 CLI 同款）；
+手动通道经 rx/tx observer 落 manual 会话（logs/manual_*/<端口>/manual.*，
+原始字节流，未经 urc_filter 剥离）。
 """
 
 from __future__ import annotations
 
+import secrets
 import threading
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +40,7 @@ from atprobe.infra.serial.config import PortConfig
 from atprobe.infra.serial.exceptions import SerialError
 from atprobe.infra.serial.interfaces import ERROR_KIND_NONE
 from atprobe.infra.serial.portmanager import PortManager
+from atprobe.infra.serial.rawlog import RawLogger
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 from atprobe.mcp.errors import busy, device_error, invalid_input
 from atprobe.mcp.jobs import JobManager
@@ -65,14 +73,32 @@ class McpService:
     ) -> None:
         self._app_cfg = app_cfg
         self._vsim = vsim
+        # 常驻原始日志记录器（M8 修复：共享 PM 模式下引擎/手动通道此前不落盘——
+        # connection 的 _raw_logger 来自 PM 构造参数，裸 PortManager() 为 None，
+        # _bind_case_logs 只建目录不写文件）。进程生命周期内 start 一次，跨 job 复用；
+        # 写线程 daemon，进程退出即止（每条记录写后即 flush，尾部丢失窗口毫秒级）。
+        self._raw_logger = RawLogger()
+        self._raw_logger.start()
         self.port_manager: PortManager | VsimPortManager = (
-            VsimPortManager() if vsim else PortManager()
+            VsimPortManager(raw_logger=self._raw_logger)
+            if vsim
+            else PortManager(raw_logger=self._raw_logger)
         )
-        self.jobs = JobManager(report_root or resolve_workspace_path(app_cfg.report_dir))
+        self.jobs = JobManager(
+            report_root or resolve_workspace_path(app_cfg.report_dir),
+            raw_logger=self._raw_logger,
+        )
         self.urc_registry = UrcRegistry()
         # port → pm 层 URC 转发句柄（每端口只挂一次 urc_registry.feed）；
         # 挂接/摘除必须持 _urc_handles_lock（check-then-act 互斥，见类 docstring）
         self._port_urc_handles: dict[str, object] = {}
+        # 手动调试通道原始日志（M8）：进程生命周期一个 manual 会话，
+        # 每端口经 rx/tx observer 记原始字节流（真原始数据，未经 urc_filter 剥离）。
+        # port → (tx_handle, rx_handle)；与 URC 转发共用 _urc_handles_lock。
+        self._manual_log_handles: dict[str, tuple[object, object]] = {}
+        self._manual_session = (
+            f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
+        )
         self._urc_handles_lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -152,19 +178,55 @@ class McpService:
                 f"端口打开失败：{cfg.name}（{exc}；可能被 GUI 或其他程序占用）",
                 port=cfg.name,
             ) from exc
+        self._attach_manual_log(cfg.name)
         return {"name": cfg.name, "baud": cfg.baudrate, "frame": str(cfg.frame)}
 
-    def close_port(self, port: str) -> dict[str, Any]:
-        """关闭端口（幂等）；同时拆除该端口的 URC 转发（生命周期见 subscribe_urc）.
+    def _attach_manual_log(self, port: str) -> None:
+        """挂接手动通道原始日志（幂等）：rx/tx observer → manual 会话日志.
 
-        摘除段持 ``_urc_handles_lock``：与 subscribe_urc 的挂接段互斥，
-        避免并发下漏拆/重复摘除同一转发；pm.unsubscribe_urc 是快操作
+        observer 记录的是串口原始字节流（含回显/GPS 噪声等，未经 urc_filter
+        剥离），与 GUI 监控同机制（M6 §6.2）；不经 set_case_log，与作业的
+        用例级日志互不干扰（作业运行时引擎自行绑定/覆盖用例日志路径）。
+        真实 send_command 派发 TX/RX observer（connection L348/L546），故
+        send_at 的收发全部被记录。
+        """
+        with self._urc_handles_lock:
+            if port in self._manual_log_handles:
+                return
+            log_dir = resolve_workspace_path(self._app_cfg.log_dir)
+            stem = self._raw_logger.begin_case(log_dir, self._manual_session, port, "manual")
+            pm = self.port_manager
+
+            def _tx_sink(data: bytes, s: Path = stem) -> None:
+                self._raw_logger.log(s, "TX", data)
+
+            def _rx_sink(data: bytes, s: Path = stem) -> None:
+                self._raw_logger.log(s, "RX", data)
+
+            tx_h = pm.subscribe_tx(port, _tx_sink)
+            rx_h = pm.subscribe_rx(port, _rx_sink)
+            self._manual_log_handles[port] = (tx_h, rx_h)
+
+    def _detach_manual_log(self, port: str) -> None:
+        """拆除手动通道日志 observer（close_port 时；幂等）."""
+        with self._urc_handles_lock:
+            handles = self._manual_log_handles.pop(port, None)
+        if handles is not None:
+            self.port_manager.unsubscribe_tx(handles[0])
+            self.port_manager.unsubscribe_rx(handles[1])
+
+    def close_port(self, port: str) -> dict[str, Any]:
+        """关闭端口（幂等）；同时拆除该端口的 URC 转发与手动日志 observer.
+
+        摘除段持 ``_urc_handles_lock``：与 subscribe_urc/open_port 的挂接段互斥，
+        避免并发下漏拆/重复摘除同一转发；pm.unsubscribe_* 是快操作
         （仅改内部 dict/列表）放锁内可接受，close 本身是重活在锁外。
         """
         with self._urc_handles_lock:
             handle = self._port_urc_handles.pop(port, None)
             if handle is not None:
                 self.port_manager.unsubscribe_urc(handle)
+        self._detach_manual_log(port)
         self.port_manager.close(port)
         return {"closed": True, "port": port}
 

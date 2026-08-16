@@ -347,3 +347,81 @@ def test_get_job_unknown(tmp_path):
     with pytest.raises(McpError) as ei:
         svc.get_job("nope")
     assert ei.value.kind == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# 原始日志（M8 修复：共享 PM 模式下作业/手动通道此前不落盘）
+# ---------------------------------------------------------------------------
+def _drain(svc: McpService) -> None:
+    """测试收尾：stop RawLogger 确保异步队列落盘（实例生命周期结束）."""
+    svc._raw_logger.stop()  # noqa: SLF001
+
+
+def test_start_run_writes_raw_log(tmp_path):
+    """作业日志：start_run 的用例收发落 logs/<job_id>/<端口>/<用例名>.text.log（与 CLI 同款）."""
+    case = _write_case(tmp_path / "cases", "joblog", MINIMAL_CASE)
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    job_id = svc.start_run(paths=[str(case)])["job_id"]
+    snap = _wait_finished(svc, job_id)
+    assert snap["status"] == "finished"
+    assert snap["summary"]["passed"] == 1
+    _drain(svc)
+
+    # 日志文件名按用例名（MINIMAL_CASE 的 name: mini），非用例文件名
+    text_log = tmp_path / "logs" / job_id / VSIM_PORT / "mini.text.log"
+    assert text_log.exists(), f"作业原始日志未生成: {text_log}"
+    content = text_log.read_text(encoding="utf-8")
+    assert "[TX] AT" in content
+    assert "[RX]" in content and "OK" in content
+    hex_log = tmp_path / "logs" / job_id / VSIM_PORT / "mini.hex.log"
+    assert "41 54 0D 0A" in hex_log.read_text(encoding="utf-8")
+
+
+def test_manual_channel_raw_log(tmp_path):
+    """手动通道日志：open_port 后 send_at 的原始字节流落 manual 会话日志."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    resp = svc.send_at(VSIM_PORT, "AT")
+    assert "OK" in resp["text"]
+    _drain(svc)
+
+    sessions = list((tmp_path / "logs").glob("manual_*"))
+    assert len(sessions) == 1, "应恰好一个 manual 会话目录"
+    text_log = sessions[0] / VSIM_PORT / "manual.text.log"
+    assert text_log.exists()
+    content = text_log.read_text(encoding="utf-8")
+    assert "[TX] AT" in content
+    assert "[RX]" in content and "OK" in content
+
+
+def test_manual_log_detached_on_close(tmp_path):
+    """close_port 拆除手动日志 observer：之后的底层写不再进入 manual 日志."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    svc.send_at(VSIM_PORT, "AT")
+    svc.close_port(VSIM_PORT)
+    # 直接驱动底层 TX 路径（observer 应已拆除，不产生新日志行）
+    svc.port_manager.write_command(VSIM_PORT, "AT+CSQ")
+    _drain(svc)
+
+    sessions = list((tmp_path / "logs").glob("manual_*"))
+    content = (sessions[0] / VSIM_PORT / "manual.text.log").read_text(encoding="utf-8")
+    assert "AT+CSQ" not in content
+    assert "[TX] AT" in content  # close 前的记录仍在
+
+
+def test_manual_log_reopen_appends_same_session(tmp_path):
+    """close 后重开同端口：追加同一 manual 会话（进程生命周期一个手动会话）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    svc.send_at(VSIM_PORT, "AT")
+    svc.close_port(VSIM_PORT)
+    svc.open_port(VSIM_EXPR)
+    svc.send_at(VSIM_PORT, "AT+CSQ")
+    _drain(svc)
+
+    sessions = list((tmp_path / "logs").glob("manual_*"))
+    assert len(sessions) == 1
+    content = (sessions[0] / VSIM_PORT / "manual.text.log").read_text(encoding="utf-8")
+    assert "[TX] AT" in content
+    assert "[TX] AT+CSQ" in content

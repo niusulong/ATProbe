@@ -53,6 +53,22 @@ class TestMainWindow:
         # 默认打开了一个选项卡
         assert win.tabs.count() >= 1
 
+    def test_raw_logger_wired_to_shared_pm(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """M8 修复回归：共享 PortManager 挂 RawLogger（GUI 引擎执行恢复原始日志落盘）.
+
+        根因：GUI 与 MCP 同为 sender_factory 注入外部裸 PortManager——connection
+        的 _raw_logger 为 None，_bind_case_logs 只建目录不写文件。修复：MainWindow
+        创建常驻 RawLogger 并传入 PortManager 与 Engine。
+        """
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            assert win._raw_logger is not None
+            assert win._port_manager._raw_logger is win._raw_logger
+        finally:
+            win._raw_logger.stop()  # 测试收尾：drain 写线程，避免跨测试泄漏
+
     def test_new_tab_creates_widget(self, qapp) -> None:  # type: ignore[no-untyped-def]
         from atprobe.gui.mainwindow import MainWindow
 

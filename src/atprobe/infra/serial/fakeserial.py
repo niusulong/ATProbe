@@ -24,6 +24,7 @@ from atprobe.infra.serial.interfaces import (
     URCEvent,
     URCHandler,
 )
+from atprobe.infra.serial.rawlog import RawLogger
 
 
 @dataclass
@@ -51,9 +52,11 @@ class FakePortManager:
         self,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        raw_logger: RawLogger | None = None,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
+        self._raw_logger = raw_logger
         self._configs: dict[str, PortConfig] = {}
         self._connected: set[str] = set()
         # port -> 脚本响应队列
@@ -133,6 +136,34 @@ class FakePortManager:
         self._log_files.pop(port, None)
 
     # ------------------------------------------------------------------
+    # 收发双路径派发（与真实 SerialConnection 行为对齐，M8 日志修复支撑）：
+    # 1) TX/RX observer 派发（监控语义，M6 §6.2）——真实 send_command 的
+    #    _notify_tx_observers / 读线程 RX 派发同构；
+    # 2) 用例原始日志（raw_logger + set_case_log 绑定路径，M1 §7）——真实
+    #    connection._log_tx/_log_rx 同构。此前 Fake 两者皆缺，共享 PM 模式
+    #    （GUI/MCP）的日志链路无法在测试中覆盖。
+    # ------------------------------------------------------------------
+    def _emit_tx(self, port: str, command: str, *, terminator: Terminator | None = None) -> None:
+        """模拟发送帧：派发 TX observer 并按需写用例日志（命令 + 结束符）."""
+        cfg = self._configs.get(port, PortConfig(name=port))
+        term = terminator if terminator is not None else cfg.terminator
+        payload = command.encode("utf-8") + term.value.encode("ascii")
+        for obs in list(self._tx_observers.get(port, [])):
+            obs(payload)
+        lf = self._log_files.get(port)
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "TX", payload)
+
+    def _emit_rx(self, port: str, text: str) -> None:
+        """模拟接收帧：派发 RX observer 并按需写用例日志（响应文本 → 字节）."""
+        data = text.encode("utf-8")
+        for obs in list(self._rx_observers.get(port, [])):
+            obs(data)
+        lf = self._log_files.get(port)
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "RX", data)
+
+    # ------------------------------------------------------------------
     # ICommandSender
     # ------------------------------------------------------------------
     def send_command(
@@ -151,6 +182,7 @@ class FakePortManager:
         # 这里仅记录，便于测试断言调用方确实启用了 URC 等待模式。
         if wait_urc is not None:
             self.wait_urc_calls.append((port, wait_urc))
+        self._emit_tx(port, command)  # observer 派发 + 用例日志（对齐真实发送路径）
         scripts = self._scripts.get(port, [])
         # 找匹配的脚本（先 match 精确，再通配）
         idx = None
@@ -165,6 +197,7 @@ class FakePortManager:
             scripts.pop(idx)
         # 模拟发送耗时（让 duration_ms 有意义）
         self._sleep(0.0)
+        self._emit_rx(port, sr.response.text)  # 有响应才派发 RX（对齐真实超时语义）
         return sr.response
 
     # ------------------------------------------------------------------
@@ -211,19 +244,12 @@ class FakePortManager:
     ) -> None:
         """流式写：记录命令（与 send_command 同口径），供测试断言.
 
-        同时向 TX 观察者派发实际写入的字节（含结束符），模拟真实写线程行为。
+        同时向 TX 观察者派发实际写入的字节（含结束符），模拟真实写线程行为
+        （经 _emit_tx 统一收发双路径：observer 派发 + 用例日志）。
         不会自动触发 RX 观察者；测试需用 emit_rx() 主动喂入回包。
         """
         self.sent.append((port, command))
-        # 逐命令覆盖优先；否则用配置里的结束符（默认 \r\n）
-        if terminator is not None:
-            term_bytes = terminator.value.encode("ascii")
-        else:
-            cfg = self._configs.get(port, PortConfig(name=port))
-            term_bytes = cfg.terminator.value.encode("ascii")
-        payload = command.encode("utf-8") + term_bytes
-        for obs in self._tx_observers.get(port, []):
-            obs(payload)
+        self._emit_tx(port, command, terminator=terminator)
 
     def write_bytes(self, port: str, data: bytes) -> None:
         """流式写原始字节（不加结束符）——P2 修复：与 PortManager 接口对齐.

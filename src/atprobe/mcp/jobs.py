@@ -25,6 +25,7 @@ from atprobe.engine.interfaces import (
     StepResultEvent,
 )
 from atprobe.infra.serial.interfaces import ICommandSender
+from atprobe.infra.serial.rawlog import RawLogger
 from atprobe.mcp.errors import busy, not_found
 from atprobe.reporting.html import HtmlReporter
 from atprobe.reporting.interfaces import ReportOutput
@@ -68,9 +69,14 @@ class JobManager:
         self,
         report_root: Path | str = "reports",
         max_history: int = DEFAULT_MAX_HISTORY,
+        raw_logger: RawLogger | None = None,
     ) -> None:
         self._report_root = Path(report_root)
         self._max_history = max_history
+        # 注入的 RawLogger 生命周期归调用方（service 常驻实例）；None 时引擎
+        # 每次自建（stop 随 engine.start 结束）。注入后作业原始日志经共享
+        # PortManager 的 connection 写入（M8 修复：共享 PM 模式此前不落盘）。
+        self._raw_logger = raw_logger
         self._jobs: dict[str, _Job] = {}
         self._order: list[str] = []  # 创建顺序（历史淘汰弹最旧）
         self._engines: dict[str, Engine] = {}  # running 作业的引擎（cancel 用）
@@ -107,7 +113,8 @@ class JobManager:
             self._evict_locked()
             # 引擎在此创建并注册（而非 _run 内）：start 返回即可 cancel，
             # 消除「引擎线程尚未跑到注册语句」窗口内 cancel 找不到引擎的竞态。
-            engine = Engine(sender_factory=sender_factory)
+            # raw_logger 注入（M8）：_owns_raw_logger=False，start/stop 不管它。
+            engine = Engine(sender_factory=sender_factory, raw_logger=self._raw_logger)
             self._engines[job_id] = engine
             threading.Thread(
                 target=self._run, args=(job, cfg, engine), name=f"mcp-job-{job_id}", daemon=True
