@@ -8,6 +8,7 @@ None 模拟）。不覆盖真实传输——stdio 会阻塞、serve 会真起 uv
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -21,21 +22,32 @@ from atprobe.cli.main import app  # noqa: E402
 
 runner = CliRunner()
 
+# rich 彩色输出会把选项名的连字符单独着色（如 "-" + ESC + "-vsim"），
+# 原始串中不存在连续的 "--vsim" 子串。CI（GITHUB_ACTIONS=true）强制彩色、
+# 本地管道通常无色——断言前剥离 ANSI 转义保证两种环境一致。
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 
 def test_mcp_help_registered() -> None:
     """mcp 子命令组已注册：--help 列出 stdio 与 serve。"""
     res = runner.invoke(app, ["mcp", "--help"])
     assert res.exit_code == 0
-    assert "serve" in res.output
-    assert "stdio" in res.output
+    plain = _plain(res.output)
+    assert "serve" in plain
+    assert "stdio" in plain
 
 
 def test_stdio_help() -> None:
     """stdio 子命令存在且暴露 --config/--vsim。"""
     res = runner.invoke(app, ["mcp", "stdio", "--help"])
     assert res.exit_code == 0
-    assert "--vsim" in res.output
-    assert "--config" in res.output
+    plain = _plain(res.output)
+    assert "--vsim" in plain
+    assert "--config" in plain
 
 
 def test_serve_requires_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
