@@ -53,6 +53,10 @@ class _Job:
         self.summary: dict[str, Any] | None = None
         self.report_path = ""
         self.error = ""
+        # 本次作业的日志目录（start 时由 EngineConfig 定：log_dir/<session_id>，
+        # 引擎按 <日志目录>/<端口>/<用例>.* 落原始日志）。running 起即可见，
+        # 供编码机直接取回日志——不必从 server_info 的根目录自行拼接。
+        self.log_dir = ""
         # 进度事件环形缓冲（最近 EVENT_BUFFER 条）
         self.events: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER)
 
@@ -114,6 +118,9 @@ class JobManager:
             job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
             cfg = build_engine_cfg(job_id)
             job = _Job(job_id)
+            # 与引擎落盘布局同源：scheduler 取 Path(config.log_dir)/<session_id>
+            # （session_id 由工厂注入 = job_id，契约见 start docstring）。
+            job.log_dir = str(Path(cfg.log_dir) / (cfg.session_id or job_id))
             self._jobs[job_id] = job
             self._order.append(job_id)
             self._evict_locked()
@@ -153,7 +160,10 @@ class JobManager:
     # 快照 / 查询
     # ------------------------------------------------------------------
     def snapshot(self, job_id: str) -> dict[str, Any]:
-        """作业快照：状态、进度（running 时）、summary/report_path/error 与最近事件.
+        """作业快照：状态、进度（running 时）、summary/report_path/log_dir/error 与最近事件.
+
+        ``log_dir`` 是本次作业的日志目录（非根目录）：首个用例绑定日志后
+        才实际创建，此前目录可能尚不存在（路径即最终位置）。
 
         Raises:
             McpError: NOT_FOUND——作业不存在或已被历史淘汰。
@@ -178,6 +188,8 @@ class JobManager:
                 snap["summary"] = dict(job.summary)
             if job.report_path:
                 snap["report_path"] = job.report_path
+            if job.log_dir:
+                snap["log_dir"] = job.log_dir
             if job.error:
                 snap["error"] = job.error
             return snap

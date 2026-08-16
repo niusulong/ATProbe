@@ -70,6 +70,9 @@ def test_start_and_finish(tmp_path, vsim_pm):
     assert jobs.running_job_id() is None
     # job_id 即 session_id：报告目录名与 job_id 一致
     assert Path(snap["report_path"]).parent.name == job_id
+    # 快照携带本次作业的日志目录（不只是根目录）：cfg.log_dir/<job_id>，
+    # 与引擎实际落盘布局（logs/<session>/<端口>/<用例>.*）一致
+    assert snap["log_dir"] == str(tmp_path / "logs" / job_id)
 
 
 def test_busy_rejects_second_start(tmp_path, vsim_pm):

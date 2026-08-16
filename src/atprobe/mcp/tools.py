@@ -119,7 +119,7 @@ def register(server: MCPServer[Any], service: McpService) -> None:
         return service.start_run(paths, ports, tags)
 
     def get_job(job_id: str) -> dict[str, Any]:
-        """查询作业快照：status（running/finished/failed）、进度、summary 与最近事件。"""
+        """查询作业快照：status（running/finished/failed）、进度、summary、report_path 与本次作业 log_dir、最近事件。"""
         return service.get_job(job_id)
 
     def cancel_job(job_id: str) -> dict[str, Any]:

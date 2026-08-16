@@ -449,7 +449,10 @@ class McpService:
             raise invalid_input(f"环境配置加载失败：{exc}") from exc
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        """作业快照（状态/进度/summary/报告路径/最近事件），直接外抛 JobManager snapshot.
+        """作业快照（状态/进度/summary/报告与本次作业日志路径/最近事件）.
+
+        ``log_dir`` 为本次作业的日志目录（``<log根>/<job_id>``，running 起即可见），
+        与 ``report_path`` 一样是服务端绝对路径——编码机直接按它取回原始串口日志。
 
         Raises:
             McpError: NOT_FOUND——作业不存在或已被历史淘汰。

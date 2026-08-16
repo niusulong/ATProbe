@@ -297,7 +297,7 @@ server {
 | `list_suites` | 列测试套件 | `path?` | `[{name, description, case_count, tags, file}]` |
 | `validate_run` | dry-run 校验一次执行 | `paths?`、`ports?`、`tags?` | `{case_count, cases, ports, ports_available}`；不实际执行 |
 | `start_run` | 启动异步批量测试 | 同 `validate_run` | `{job_id}`；立即返回，用 get_job 轮询 |
-| `get_job` | 查作业状态/进度/结果 | `job_id` | `{status, progress?, summary?, report_path?, events, error?}` |
+| `get_job` | 查作业状态/进度/结果 | `job_id` | `{status, progress?, summary?, report_path?, log_dir?, events, error?}`；`log_dir` 为**本次作业**的日志目录（非根目录） |
 | `cancel_job` | 取消运行中的作业 | `job_id` | `{cancelled: bool}`；幂等（已结束返回 false） |
 | `open_port` | 打开串口（手动调试） | `port_expr`（如 `COM5:115200:8N1`，波特率/帧可省略） | `{name, baud, frame}` |
 | `close_port` | 关闭串口（幂等） | `port` | `{closed: true, port}`；同时拆掉该端口 URC 转发 |
@@ -321,8 +321,8 @@ close_port("COM5")                    # 用完关闭（同时拆 URC 转发）
 
 > **编码机协作流**（用例/日志文件由外部工具传输，MCP 只按路径引用）：
 > `server_info` 拿到 cases_dir 绝对路径 → 用文件工具把用例 YAML 放进去 →
-> `list_cases` 确认可见 → `start_run` → `get_job` 拿 report_path →
-> 按 `log_dir/<job_id>/` 取回原始串口日志。
+> `list_cases` 确认可见 → `start_run` → `get_job` 拿 report_path 与 log_dir →
+> 按 log_dir（本次作业的日志目录，`<log根>/<job_id>/`）取回原始串口日志。
 
 ### 6.2 批量测试（异步作业）
 
@@ -332,13 +332,16 @@ validate_run(paths=["D:\\cases\\smoke"], ports=["COM5:115200"])   # 先演练：
 start_run(paths=[...], ports=[...], tags=[...])          # → {job_id}（job_id 即报告目录名）
 get_job(job_id)                                          # 轮询（建议 1~5 秒一次）：
                                                          #   running 看 progress/events
-                                                         #   finished 看 summary + report_path
+                                                         #   finished 看 summary + report_path + log_dir
 cancel_job(job_id)                                       # 跑偏/耗时过长时取消（幂等）
 ```
 
 - 同一时刻只允许一个作业：再 `start_run` 会得到 BUSY（`detail.job_id` 告诉你谁占着）。
 - `report_path` 是**测试电脑上**的 HTML 报告路径（`<report_dir>/<job_id>/report.html`）——
   远程形态下客户端拿不到文件内容，应把路径告知用户在测试电脑上查看。
+- `log_dir` 是**本次作业**的日志目录（`<log根>/<job_id>/`，running 起即可见；目录在
+  首个用例开始写日志时才创建）——排查失败时按 `log_dir/<端口>/<用例名>.text.log`
+  取原始串口字节流，无须从 `server_info` 的根目录自行拼接。
 - summary 字段：`total / passed / failed / skipped / interrupted / pass_rate`。
 
 ### 6.3 URC 监控
@@ -390,7 +393,7 @@ MCP 服务进程内常驻原始日志记录器，两类通道的字节级收发*
 
 | 通道 | 日志位置 | 内容 |
 |---|---|---|
-| `start_run` 作业 | `<log.dir>/<job_id>/<端口>/<用例名>.text.log` / `.hex.log` | 每用例的收发字节（引擎按用例绑定，与 CLI `atprobe run` 完全一致） |
+| `start_run` 作业 | `get_job` 的 `log_dir`（= `<log.dir>/<job_id>/`）下 `<端口>/<用例名>.text.log` / `.hex.log` | 每用例的收发字节（引擎按用例绑定，与 CLI `atprobe run` 完全一致） |
 | 手动调试（`open_port` 之后） | `<log.dir>/manual_<时间戳>/<端口>/manual.text.log` / `.hex.log` | 端口打开期间的全部原始字节流——含回显、GPS 循环上报等噪声，**未经 urc_filter 剥离**（按字节原样记录，字节级定位以此为准） |
 
 - manual 会话随 MCP 服务进程生成（一个进程一个），`close_port` 后停止记录，

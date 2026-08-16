@@ -265,6 +265,11 @@ def test_start_run_full_flow(tmp_path):
     assert snap["summary"]["passed"] == 1
     assert snap["summary"]["failed"] == 0
     assert snap["report_path"] and Path(snap["report_path"]).exists()
+    # 本次作业的日志目录（get_job 直接给路径，不必从 server_info 根目录拼）：
+    # 共享 PM 注入 RawLogger → 用例原始日志真实落盘于 log_dir/<job_id>/<端口>/
+    log_dir = Path(snap["log_dir"])
+    assert log_dir == tmp_path / "logs" / job_id
+    assert (log_dir / VSIM_PORT / "mini.text.log").is_file()
 
     # 互斥解除：作业结束（引擎关闭了自己打开的端口）→ 重开后手动通道恢复
     svc.open_port(VSIM_EXPR)
