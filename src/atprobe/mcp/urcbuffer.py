@@ -1,9 +1,9 @@
-"""M8 URC 订阅注册表：游标式环形缓冲（最近 N 条，M8 §4.4）.
+"""M8 URC 订阅注册表：游标式环形缓冲（最近 N 条，M8 §6）.
 
 每订阅独立缓冲与单调 seq；poll(sub_id, cursor) 返回 seq > cursor 的最早 limit 条。
 cursor 早于缓冲最早事件 → 返回现存全部并置 truncated=true（调用方感知丢帧）。
 
-线程模型（M8 §4.4）：
+线程模型（M8 §6）：
     feed() 由串口读线程回调进入；subscribe/unsubscribe/poll 由 MCP SDK 工具
     线程池线程进入。锁策略取简单方案：
     - 注册表 ``_subs`` 仅做单步 dict 操作（get / pop / 赋值），CPython 下由 GIL

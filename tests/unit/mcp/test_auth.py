@@ -30,7 +30,7 @@ def test_load_token_priority(tmp_path, monkeypatch):
 
 
 def test_load_token_config_priority(tmp_path, monkeypatch):
-    """四级契约（设计 §7.1）：--token-file > --token > env > 配置 mcp.token_file."""
+    """四级契约（M8 §7）：--token-file > --token > env > 配置 mcp.token_file."""
     cf = tmp_path / "cfg-secret.txt"
     cf.write_text("cfg-token\n", encoding="utf-8")
     monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)

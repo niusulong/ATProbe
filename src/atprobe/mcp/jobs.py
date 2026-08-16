@@ -59,7 +59,7 @@ class _Job:
 class JobManager:
     """进程内异步作业管理器（单并发：running 期间再 start 抛 BUSY）.
 
-    线程模型（M8 §5）：start/cancel/snapshot 由 MCP 工具线程调用，
+    线程模型（M8 §4）：start/cancel/snapshot 由 MCP 工具线程调用，
     _run 与进度回调在 ``mcp-job-{job_id}`` 引擎线程执行——共享状态全部
     经 ``_lock`` 互斥；engine.start 不持锁（长阻塞）。
     """

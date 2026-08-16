@@ -1,6 +1,6 @@
 """M8 服务装配：构建 MCPServer 与两种传输（stdio / HTTP serve）.
 
-传输细节全部收敛在本文件（SDK 升级只改这里，设计 §13）。
+传输细节全部收敛在本文件（SDK 升级只改这里，TSD §11）。
 mcp/uvicorn 均为可选依赖（--extra mcp），全部延迟 import——本模块自身
 可在未装 MCP 依赖的环境下被 import（CLI 层只在其内部延迟引用）。
 """

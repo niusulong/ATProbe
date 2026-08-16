@@ -1,8 +1,8 @@
 """M8 Bearer Token 认证：加载（四级优先级）+ 纯 ASGI 中间件（常量时间比较）.
 
-Token 来源优先级（设计 §7.1）：--token-file > --token > 环境变量 ATPROBE_MCP_TOKEN
+Token 来源优先级（M8 §7）：--token-file > --token > 环境变量 ATPROBE_MCP_TOKEN
 > 配置 mcp.token_file（经 config_token_file 参数传入，由 CLI 层接线）。
-Token 永不写日志（设计 §7.3）。
+Token 永不写日志（M8 §7）。
 中间件挂在 MCPServer.streamable_http_app() 外层；非 http scope（如 lifespan）直通。
 """
 

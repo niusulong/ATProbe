@@ -1,4 +1,4 @@
-"""JobManager 状态机测试（M8 §5）：BUSY/进度/快照/取消/历史淘汰."""
+"""JobManager 状态机测试（M8 §4）：BUSY/进度/快照/取消/历史淘汰."""
 
 from __future__ import annotations
 

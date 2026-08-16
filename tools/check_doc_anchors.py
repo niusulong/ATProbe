@@ -26,10 +26,15 @@ DOC_OF = {
     "M5": DOCS / "requirements" / "REQ-M5-CLI界面.md",
     "M6": DOCS / "requirements" / "REQ-M6-GUI管理界面.md",
     "M7": DOCS / "requirements" / "REQ-M7-测试环境配置.md",
+    "M8": DOCS / "requirements" / "REQ-M8-MCP服务.md",
     "TSD": DOCS / "design" / "TSD-技术选型.md",
 }
 
 # 源码路径前缀 → 归属模块（裸 § 引用的上下文归并）
+# 已知问题：M1~M7 条目缺 "atprobe/" 包前缀（rel 形如 atprobe/gui/...），
+# 从未匹配成功——裸 § 归并分支对这些模块实际不生效；且路径前缀无法消歧
+# 跨模块引用（如 domain/report 的裸 §8.x 实指 REQ-M3 §8），修复需先逐条
+# 核对 20+ 预存引用，留待后续。M8 条目用完整前缀，对新文件生效。
 PATH_MOD = [
     ("infra/serial", "M1"),
     ("domain/case", "M2"),
@@ -41,6 +46,7 @@ PATH_MOD = [
     ("infra/config/appconfig", "M5"),
     ("gui", "M6"),
     ("infra/config/envconfig", "M7"),
+    ("atprobe/mcp", "M8"),
 ]
 
 
@@ -57,18 +63,18 @@ def collect_citations() -> dict[str, set[str]]:
         rel = f.relative_to(SRC).as_posix()
         default_mod = cite_mod(rel)
         text = f.read_text(encoding="utf-8", errors="replace")
-        for m in re.finditer(r"(?:REQ-)?(M[1-7]|TSD)\s*§\s*([\d.]+)", text):
+        for m in re.finditer(r"(?:REQ-)?(M[1-8]|TSD)\s*§\s*([\d.]+)", text):
             cites.setdefault(m.group(1), set()).add(m.group(2))
         if default_mod:
             # 裸 § 引用（模块已在文件头 docstring 声明，如 M1 §x.x）
             header = text[:2000]
-            hm = re.search(r"\b(M[1-7])\b", header)
+            hm = re.search(r"\b(M[1-8])\b", header)
             ctx = hm.group(1) if hm else default_mod
             for m in re.finditer(r"(?<![\w.\-])§\s*([\d.]+)", text):
                 # 排除已被显式前缀匹配覆盖的（简易法：位置回看不属于 REQ-Mx/TSD 模式）
                 start = m.start()
                 prefix_span = text[max(0, start - 12) : start]
-                if re.search(r"(?:REQ-)?(?:M[1-7]|TSD)\s*$", prefix_span):
+                if re.search(r"(?:REQ-)?(?:M[1-8]|TSD)\s*$", prefix_span):
                     continue
                 cites.setdefault(ctx, set()).add(m.group(1))
     return cites

@@ -1,4 +1,4 @@
-"""UrcRegistry 游标语义测试（M8 §4.4）."""
+"""UrcRegistry 游标语义测试（M8 §6）."""
 
 from __future__ import annotations
 
