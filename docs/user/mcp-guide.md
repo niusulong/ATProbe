@@ -162,6 +162,62 @@ serve 子命令参数：
 serve **必须有 Token** 才肯启动（四级来源全空或文件全空白 → 红字提示 + exit 2），
 杜绝「以为有认证实际裸奔」。
 
+### 3.4 DeepSeek Harness（dsh）接入
+
+DeepSeek Harness（dsh）Web 界面自带 MCP 客户端（`@deepseek-ai/dsh-mcp-client`
+插件）：把 atprobe 挂进它的 profile 补丁配置，模型工具表就会出现
+`mcp__atprobe__*` 命名的 13 个工具（`serverName` 即命名空间前缀）。
+
+编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（Windows 默认
+`C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml`），在文件的顶层
+`[]` 处替换/追加：
+
+```yaml
+- insert:
+    - id: mcp-atprobe
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: atprobe
+        transport: stdio
+        command: D:\niusulong\AI\ATProbe\.venv\Scripts\atprobe.exe
+        args:
+          - mcp
+          - stdio
+          - --config
+          - D:\niusulong\AI\ATProbe\examples\atprobe-com5.yaml
+        cwd: D:\niusulong\AI\ATProbe
+        toolCallTimeoutMs: 120000
+```
+
+配置要点：
+
+- **路径全部用绝对路径**：dsh 拉起的子进程 cwd 不可控，`command` / `--config` /
+  `cwd` 都必须绝对化（目录分隔符用 `\` 转义或 `/` 均可）。
+- `toolCallTimeoutMs`：AT 指令可能较慢（异步指令要等 URC 终结），建议从 SDK 默认
+  60s 调到 120s 以上。
+- 生效方式：**实测（2026-08-16）保存 patch 后 loader 会热加载**——dsh web 无需
+  重启即自动拉起 `atprobe.exe mcp stdio` 子进程并建立连接（可从任务管理器看到
+  atprobe.exe 子进程确认）。若你的版本未生效，重启 dsh web 进程即可。
+- **工具对已开会话不可见**：模型工具快照在会话启动时定型，新增/修改 MCP 工具后
+  必须**新开一个会话**才能看到 `mcp__atprobe__*`（旧会话继续用旧快照）。
+- **单实例共享语义**：一个 dsh 实例只 spawn 一个 atprobe stdio 子进程，所有会话
+  共享这条连接与端口状态——互斥规则（§6.4）照常生效（一个会话开着的 COM5，其他
+  会话能看到 connected=true；作业运行中任何会话 send_at 都得 BUSY）。
+- 回滚：删除这个 `- insert:` 块（或把 `mcp-atprobe` 条目移出），热加载/重启后
+  工具即消失。
+
+验证接入是否成功：
+
+```powershell
+# ① 子进程被拉起（任务管理器/Get-Process 看到 atprobe.exe）
+Get-Process atprobe -ErrorAction SilentlyContinue | Select-Object Id, StartTime
+# ② 新开会话后让模型执行：mcp__atprobe__list_ports
+#    应返回 COM5 等真实串口；send_at("COM5", "AT") 响应含 OK
+```
+
+> 与 §3.1/§3.2 的关系：dsh 只是**又一个 stdio MCP 客户端**，协议与 Claude
+> Desktop/Cursor 完全相同；`atprobe mcp stdio` 这一侧无任何 dsh 专属行为。
+
 ## 4. Token 指南（serve 形态）
 
 ### 4.1 生成
@@ -358,6 +414,7 @@ mcp:
 | `poll_urc` 返回 `truncated: true` | 消费慢于上报，500 条环形缓冲被挤掉——加大轮询频率或收窄 pattern |
 | 终端手动运行 `atprobe mcp stdio` 没有任何输出 | 正常：stdout 被协议独占，进程在等 stdin 的 JSON-RPC；日志走 stderr。由 MCP 客户端拉起即可 |
 | `list_cases` 返回空 | path 参数 / 配置 `cases_dir` 指向的目录没有用例 YAML（或全部解析失败被跳过） |
+| dsh 新会话仍看不到 `mcp__atprobe__*` | ① 工具快照在会话启动时定型，确认是**新开**的会话；② 检查 patch 语法与路径（§3.4）：`Get-Process atprobe` 应看到子进程；③ atprobe 侧缺依赖 → 先 `uv sync --extra mcp`；④ 改过 `serverName`？工具名跟着变 |
 
 ## 9. 安全注意事项
 
