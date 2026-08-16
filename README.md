@@ -15,11 +15,13 @@
 - 测试报告（M4）：实时控制台 + 纯静态 HTML 报告
 - CLI（M5）与桌面 GUI（M6，PySide6）共享同一引擎
 - 测试环境配置（M7）：跨用例共享的全局只读配置（`{{group.param}}` 点号引用）
+- MCP 服务（M8）：向大模型 / Agent 开放测试能力——stdio 与 HTTP serve 两种形态、
+  14 个工具（设备发现、手动调试、URC 监控、异步批量作业、服务端信息）、Bearer Token 认证
 
 ## 安装（开发）
 
 ```bash
-uv sync --extra dev --extra gui
+uv sync --extra dev --extra gui --extra mcp    # mcp extra 仅 MCP 服务需要，可省略
 ```
 
 ## 下载使用（最终用户）
@@ -42,15 +44,26 @@ uv run atprobe --version     # 版本号是 --version / -V 标志，不是子命
 uv run atprobe gui           # 桌面端 GUI（PySide6）
 ```
 
+### MCP 服务（向大模型开放）
+
+```bash
+uv run atprobe mcp stdio --config examples/atprobe.yaml   # stdio 形态：接入本地 LLM 客户端（Claude Desktop / Cursor / DeepSeek Harness 等）
+uv run atprobe mcp serve --config examples/atprobe.yaml --token <TOKEN>   # HTTP 形态：远程 / 局域网访问，Bearer Token 认证
+```
+
+启动后大模型即可调用 `list_ports` / `open_port` / `send_at` / `start_run` / `get_job`
+等 14 个工具直接操作串口设备：发现端口、手动调试、监控 URC、跑批量用例并轮询结果。
+完整配置、客户端接入与工作流见 [MCP 用户手册](docs/user/mcp-guide.md)。
+
 ## 文档
 
-用户手册随仓库维护（[`docs/user/`](docs/user/README.md)）：用例设计、CLI、GUI、
+用户手册随仓库维护（[`docs/user/`](docs/user/README.md)）：用例设计、CLI、GUI、MCP 服务、
 配置参考与快速上手。用例编写规范另见 `.agents/skills/atprobe-case-author/`；
 指令参考（`docs/at-ref/`）与需求、技术设计文档（PRD/REQ/TSD）仅在本地维护，不随仓库分发。
 
 ## 技术栈
 
-Python 3.11+ · pyserial · PySide6 (Qt6) · Typer · Pydantic · ruamel.yaml · Jinja2
+Python 3.11+ · pyserial · PySide6 (Qt6) · Typer · Pydantic · ruamel.yaml · Jinja2 · MCP SDK（可选 extra）
 
 ## 开发
 
