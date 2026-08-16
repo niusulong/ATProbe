@@ -121,6 +121,21 @@ async def test_server_info_relative_anchored(tmp_path: Path):  # type: ignore[no
 
 
 @pytest.mark.anyio
+async def test_server_info_report_dir_follows_report_root(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """report_dir 上报 JobManager 实际根目录（构造 report_root 优先于 app_cfg.report_dir）.
+
+    M3 修复：旧实现报 app_cfg.report_dir 的解析值——report_root 注入到别处
+    （自定义部署/独立锚点）时，编码机按 server_info 指引去取报告会扑空。
+    """
+    from atprobe.mcp.service import McpService
+
+    svc = McpService(_app_cfg(tmp_path), vsim=True, report_root=tmp_path / "custom_reports")
+    info = svc.server_info()
+
+    assert Path(info["paths"]["report_dir"]) == tmp_path / "custom_reports"
+
+
+@pytest.mark.anyio
 async def test_call_tool_error_structured_json(server):  # type: ignore[no-untyped-def]
     with pytest.raises(ToolError) as ei:
         await server.call_tool("send_at", {"port": "NOPE", "command": "AT"})

@@ -108,3 +108,43 @@ def test_vsim_constructor_accepts_raw_logger():
     vsim = VsimPortManager(raw_logger=None)
     vsim.open(PortConfig(name=VSIM_PORT))
     assert vsim.is_connected(VSIM_PORT)
+
+
+def test_fake_close_clears_log_binding(tmp_path):
+    """close 清除用例日志绑定（对齐真实 PortManager.close 的 _log_files.pop）.
+
+    审查 I1：Fake.close 旧实现只 discard 连接态不弹 _log_files——残留绑定让
+    close 后再 open 的端口沿用旧用例日志路径（真实 PM 无此问题）。
+    """
+    fake = FakePortManager()
+    fake.open(PortConfig(name="V0"))
+    fake.set_case_log("V0", tmp_path / "case1")
+    assert "V0" in fake._log_files  # noqa: SLF001
+
+    fake.close("V0")
+
+    assert "V0" not in fake._log_files  # noqa: SLF001
+
+
+def test_write_bytes_writes_case_log(tmp_path):
+    """write_bytes 写用例日志（对齐真实 connection._log_tx 的 write 路径）.
+
+    审查 M1：write_bytes 旧实现只派发 observer 不写用例日志——绑定端口的
+    原始字节流写（文件发送等）在 Fake 驱动的测试里丢失日志。
+    """
+    logger = RawLogger()
+    logger.start()
+    try:
+        fake = FakePortManager(raw_logger=logger)
+        fake.open(PortConfig(name="V0"))
+        fake.set_case_log("V0", tmp_path / "wb")
+
+        fake.write_bytes("V0", b"\x01\x02")
+    finally:
+        logger.stop()  # drain 确保落盘
+
+    hex_log = tmp_path / "wb.hex.log"
+    assert hex_log.exists(), "write_bytes 未写用例日志"
+    assert "[TX] 01 02" in hex_log.read_text(encoding="utf-8")
+    # text.log 同帧记录（\x01\x02 为控制字符，仅断言 TX 行存在）
+    assert "[TX]" in (tmp_path / "wb.text.log").read_text(encoding="utf-8")

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def build_server(service: McpService) -> MCPServer[Any]:
-    """构建 MCPServer 并注册 13 个工具."""
+    """构建 MCPServer 并注册 14 个工具."""
     from mcp.server.mcpserver import MCPServer
 
     server: MCPServer[Any] = MCPServer("atprobe", instructions=INSTRUCTIONS)

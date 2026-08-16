@@ -32,10 +32,10 @@
  └─────────────────────┘                            └─────────────────────┘
 ```
 
-开放的能力 = 13 个工具（4 组）：资源发现（list_ports / list_cases / list_suites）、
-批量测试（validate_run / start_run / get_job / cancel_job）、手动调试（open_port /
-close_port / send_at）、URC 监控（subscribe_urc / poll_urc / unsubscribe_urc）。
-速查表见 §5。
+开放的能力 = 14 个工具（4 组）：资源发现（server_info / list_ports / list_cases /
+list_suites）、批量测试（validate_run / start_run / get_job / cancel_job）、手动调试
+（open_port / close_port / send_at）、URC 监控（subscribe_urc / poll_urc /
+unsubscribe_urc）。速查表见 §5。
 
 ## 2. 安装
 
@@ -100,7 +100,7 @@ uv run python -c "import mcp"  # 无报错即 mcp SDK 就绪
 "args": ["mcp", "stdio", "--vsim"]
 ```
 
-保存后重启 Claude Desktop，工具列表里出现 13 个 atprobe 工具即成功。
+保存后重启 Claude Desktop，工具列表里出现 14 个 atprobe 工具即成功。
 
 > `stdio` 形态下该进程的 **stdout 被协议独占**——在终端手动运行 `atprobe mcp stdio`
 > 「没有任何输出」是正常现象：它在等 stdin 上的 JSON-RPC。日志走 stderr。
@@ -166,7 +166,7 @@ serve **必须有 Token** 才肯启动（四级来源全空或文件全空白 �
 
 DeepSeek Harness（dsh）Web 界面自带 MCP 客户端（`@deepseek-ai/dsh-mcp-client`
 插件）：把 atprobe 挂进它的 profile 补丁配置，模型工具表就会出现
-`mcp__atprobe__*` 命名的 13 个工具（`serverName` 即命名空间前缀）。
+`mcp__atprobe__*` 命名的 14 个工具（`serverName` 即命名空间前缀）。
 
 编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（Windows 默认
 `C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml`），在文件的顶层
@@ -401,7 +401,7 @@ MCP 服务进程内常驻原始日志记录器，两类通道的字节级收发*
 
 > 可把下面这段直接粘进 Claude/Cursor 的自定义指令（project instructions）：
 >
-> 「你可以调用 atprobe 的 13 个 MCP 工具操作串口 AT 设备。推荐流程：list_ports 发现
+> 「你可以调用 atprobe 的 14 个 MCP 工具操作串口 AT 设备。推荐流程：list_ports 发现
 > 设备 → open_port 连接 → send_at 手动调试 / subscribe_urc 监控 → start_run 批量执行
 > → get_job 轮询结果（report_path 是服务端路径，转告用户即可）。同一时刻只有一个测试
 > 作业（再启动得 BUSY）；作业运行期间禁止 send_at（BUSY）。工具报错时 is_error=true，

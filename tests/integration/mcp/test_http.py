@@ -4,7 +4,7 @@
 → uvicorn 线程）+ mcp SDK 客户端（streamable_http_client + ClientSession），
 端口管理为进程内 vsim 虚拟模组，不依赖真实串口。覆盖（M8 Task 8）：
 
-1. 认证：正确 Token 走通手动调试主路径（list_tools 13 个 → open_port →
+1. 认证：正确 Token 走通手动调试主路径（list_tools 14 个 → open_port →
    send_at → URC 订阅/轮询/退订 → close_port）；错误 Token 中间件 401
    （裸 HTTP 直测契约）+ SDK 客户端初始化即失败（异常类型不钉死）。
 2. 批量作业全链路：start_run → 运行中 send_at 被 BUSY 拒 → 轮询 get_job

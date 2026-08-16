@@ -6,6 +6,6 @@
     jobs      — JobManager 异步作业状态机（单并发 BUSY/进度快照/报告渲染）
     auth      — Bearer Token 认证（四级优先级加载 + 纯 ASGI 中间件）
     service   — McpService 设备门面（资源发现/手动调试/URC/批量测试编排）
-    tools     — 13 个 MCP 工具注册（官方 SDK @server.tool，JSON 文本出参）
+    tools     — 14 个 MCP 工具注册（官方 SDK @server.tool，JSON 文本出参）
     server    — 服务装配：构建 MCPServer 与两种传输（stdio / HTTP serve）
 """

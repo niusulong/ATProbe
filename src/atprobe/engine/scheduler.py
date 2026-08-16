@@ -161,6 +161,12 @@ class Engine:
         log_dir = Path(config.log_dir)
         engine_error: str = ""  # P1 修复：主循环兜底异常记录（见下方 except）
         interrupted = False  # KeyboardInterrupt：状态 FINISHED 而非 ERROR
+        # C1 修复：本次执行实际绑定过用例日志的端口（default_port + 步骤显式端口，
+        # 由 _bind_case_logs 累积）。用例循环内不清绑定（用例间 trailing 字节仍落
+        # 上一用例日志），全作业结束在 finally 统一 clear——否则共享 PM 上残留的
+        # _log_files 会让作业后的手动流量（MCP send_at / 持续 RX 噪声）追加进
+        # 最后一个用例的日志文件。
+        bound_log_ports: set[str] = set()
 
         try:
             # 套件级前置（REQ-M2 §12.2）：cases 循环前执行一次。用独立 CaseContext
@@ -248,6 +254,7 @@ class Engine:
                         log_dir,
                         session,
                         handler,
+                        bound_log_ports,
                     )
                     case_results.append(cr)
                     if handler is not None:
@@ -307,6 +314,13 @@ class Engine:
                     port_manager.close(p)  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001
                 pass
+            # C1 修复：清除用例日志绑定（关端口之后做——外部保持连接的端口
+            # 不会被 close 顺带清掉，必须显式 clear；沿用 _unbind_case_logs 的
+            # hasattr 防御风格，不带 set_case_log 能力的 sender 不受影响）。
+            # teardown/suite_teardown 已在前面执行完毕，此清理不影响其日志归属。
+            if port_manager is not None and hasattr(port_manager, "clear_case_log"):
+                for p in bound_log_ports:
+                    port_manager.clear_case_log(p)  # type: ignore[union-attr]
             # 停止原始日志记录器，确保缓冲落盘（仅 Engine 自建的才停，外部注入的由外部管理）
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
@@ -374,6 +388,7 @@ class Engine:
         log_dir: Path,
         session: str,
         handler: Callable[[object], None] | None,
+        bound_log_ports: set[str],
     ) -> CaseResult:
         t0 = self._clock()
         ctx = CaseContext(
@@ -392,8 +407,9 @@ class Engine:
         status = CaseStatus.PASS
         pressure_stats: Any = None  # 压测分支填充，统一在 finally 之后 build
 
-        # 绑定用例日志文件
-        self._bind_case_logs(case, port_manager, log_dir, session, default_port)
+        # 绑定用例日志文件（bound_log_ports 累积实际绑定端口，供 start 的
+        # finally 在全作业结束时统一 clear）
+        self._bind_case_logs(case, port_manager, log_dir, session, default_port, bound_log_ports)
 
         try:
             # §3.2 流程A setup
@@ -580,7 +596,13 @@ class Engine:
         return pm, pm
 
     def _bind_case_logs(
-        self, case: Case, port_manager: Any, log_dir: Path, session: str, default_port: str
+        self,
+        case: Case,
+        port_manager: Any,
+        log_dir: Path,
+        session: str,
+        default_port: str,
+        bound_log_ports: set[str],
     ) -> None:
         if self._raw_logger is None or port_manager is None:
             return
@@ -594,11 +616,17 @@ class Engine:
         for pc in self._case_ports(case, default_port):
             lf = self._raw_logger.begin_case(log_dir, session, pc, log_name)
             port_manager.set_case_log(pc, lf)
+            # 累积实际绑定的端口（default_port + 步骤显式端口，不用 config.ports
+            # ——会漏掉步骤里显式指定的其他端口），start 的 finally 据此统一清理
+            bound_log_ports.add(pc)
 
     def _unbind_case_logs(self, port_manager: Any) -> None:
         if port_manager is None or not hasattr(port_manager, "clear_case_log"):
             return
-        # 清理由 _run_case 在下次 _bind 时覆盖；此处不强制清
+        # C1 修复说明：用例级清理不再在此处做，也**有意不在用例间做**——用例循环
+        # 内保持绑定可让用例间的 trailing 字节（晚到响应等）仍落上一用例日志；
+        # 统一移到 start 的 finally（对 bound_log_ports 一次性 clear），消除作业
+        # 结束后共享 PM 残留 _log_files 的污染（手动流量追加进最后用例日志）。
 
     def _case_ports(self, case: Case, default_port: str = "") -> list[str]:
         """收集本用例实际执行会用到的端口（用于绑定用例级原始日志）.

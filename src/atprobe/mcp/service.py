@@ -110,8 +110,10 @@ class McpService:
 
         供远程编码机配合文件传输工具定位测试机上的用例/日志/报告——用例
         本就是测试机本地文件（MCP 按路径引用不传输），编码机把写好的用例
-        放到 cases_dir、从 log_dir/report_dir 取回产物即可。路径解析与
-        CLI/GUI 同一规则（resolve_workspace_path：相对 → 工作区锚定）。
+        放到 cases_dir、从 log_dir/report_dir 取回产物即可。cases/log 路径
+        解析与 CLI/GUI 同一规则（resolve_workspace_path：相对 → 工作区锚定）；
+        report_dir 取 JobManager 实际使用的根目录（构造参数 report_root 优先
+        于 app_cfg.report_dir，M3 修复——报告真实落盘处以本值为准）。
         """
         return {
             "version": current_version(),
@@ -120,7 +122,7 @@ class McpService:
             "paths": {
                 "cases_dir": str(resolve_workspace_path(self._app_cfg.cases_dir)),
                 "log_dir": str(resolve_workspace_path(self._app_cfg.log_dir)),
-                "report_dir": str(resolve_workspace_path(self._app_cfg.report_dir)),
+                "report_dir": str(self.jobs.report_root),
             },
         }
 

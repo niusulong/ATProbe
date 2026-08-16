@@ -82,6 +82,12 @@ class JobManager:
         self._engines: dict[str, Engine] = {}  # running 作业的引擎（cancel 用）
         self._lock = threading.Lock()
 
+    @property
+    def report_root(self) -> Path:
+        """报告根目录（只读；service.server_info 等外部展示用——构造参数 report_root
+        可能与 app_cfg.report_dir 不同（如测试/自定义部署锚定别处），展示以本值为准）."""
+        return self._report_root
+
     # ------------------------------------------------------------------
     # 启动
     # ------------------------------------------------------------------

@@ -425,3 +425,55 @@ def test_manual_log_reopen_appends_same_session(tmp_path):
     content = (sessions[0] / VSIM_PORT / "manual.text.log").read_text(encoding="utf-8")
     assert "[TX] AT" in content
     assert "[TX] AT+CSQ" in content
+
+
+def test_job_end_clears_case_log_binding(tmp_path):
+    """C1 回归：作业结束后用例日志绑定被清除——手动 send_at 不再污染最后用例日志.
+
+    场景：手动 open_port（外部连接，scheduler 复用不关闭）→ start_run 复用该
+    端口 → 作业结束。旧实现引擎不清 _log_files，共享 PM 常驻 RawLogger 下
+    手动 send_at 的流量会追加进最后一个用例的日志文件。
+    """
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    svc.open_port(VSIM_EXPR)  # 外部手动开的端口：作业结束后仍连着
+    job_id = svc.start_run(paths=[str(case)])["job_id"]
+    snap = _wait_finished(svc, job_id)
+    assert snap["status"] == "finished"
+
+    # 作业结束后手动发送；send_at 同步返回，stop logger 时排空队列落盘
+    svc.send_at(VSIM_PORT, "AT+CSQ")
+    _drain(svc)
+
+    # 用例日志：作业流量在，作业后的手动流量不在（绑定已被 start finally 清除）
+    case_log = tmp_path / "logs" / job_id / VSIM_PORT / "mini.text.log"
+    content = case_log.read_text(encoding="utf-8")
+    assert "[TX] AT" in content  # 作业期间的用例流量仍完整
+    assert "AT+CSQ" not in content  # 手动流量未泄漏进用例日志
+
+    # 手动通道日志正常记录（同一发送双视角，manual 会话不受影响）
+    sessions = list((tmp_path / "logs").glob("manual_*"))
+    manual = (sessions[0] / VSIM_PORT / "manual.text.log").read_text(encoding="utf-8")
+    assert "[TX] AT+CSQ" in manual
+
+
+def test_job_traffic_also_in_manual_log(tmp_path):
+    """双视角设计钉进测试：作业流量也进 manual 日志（手动开的端口 observer 全程生效）.
+
+    手动 open_port 挂的 rx/tx observer 在作业期间持续派发——manual 会话记录
+    引擎执行流量（含噪声的完整字节流），与用例级日志（按用例分文件）互补。
+    """
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    svc.open_port(VSIM_EXPR)
+    job_id = svc.start_run(paths=[str(case)])["job_id"]
+    snap = _wait_finished(svc, job_id)
+    assert snap["status"] == "finished"
+    _drain(svc)
+
+    sessions = list((tmp_path / "logs").glob("manual_*"))
+    assert len(sessions) == 1
+    manual = (sessions[0] / VSIM_PORT / "manual.text.log").read_text(encoding="utf-8")
+    assert "[TX] AT" in manual  # 作业期间的引擎流量也进 manual 会话
+    # 用例级日志同样完整（两条通道各自成篇，互不替代）
+    assert (tmp_path / "logs" / job_id / VSIM_PORT / "mini.text.log").exists()

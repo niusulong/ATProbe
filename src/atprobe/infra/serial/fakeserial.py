@@ -116,6 +116,9 @@ class FakePortManager:
 
     def close(self, port: str) -> None:
         self._connected.discard(port)
+        # 对齐真实 PortManager.close（L111）：关闭端口即解除用例日志绑定，
+        # 避免 close 后再 open 沿用旧用例日志路径（审查 I1）
+        self._log_files.pop(port, None)
 
     def close_all(self) -> None:
         self._connected.clear()
@@ -260,6 +263,11 @@ class FakePortManager:
         self.sent.append((port, f"<bytes:{len(data)}>"))
         for obs in self._tx_observers.get(port, []):
             obs(data)
+        # 用例日志与 _emit_tx 同构（对齐真实 connection 的 write 路径走 _log_tx，
+        # 审查 M1）：绑定中的端口原始字节写同样落用例日志
+        lf = self._log_files.get(port)
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "TX", data)
 
     def emit_rx(self, port: str, data: bytes) -> None:
         """测试辅助：向某端口的 RX 观察者投递字节（模拟模块回包）."""
