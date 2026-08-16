@@ -287,10 +287,11 @@ server {
 
 客户端连接 `https://atprobe.example.internal/mcp`（Token 头照常携带）。
 
-## 5. 工具速查表（13 个）
+## 5. 工具速查表（14 个）
 
 | 工具 | 用途 | 关键参数 | 返回要点 |
 |---|---|---|---|
+| `server_info` | 服务端信息（编码机协作入口） | — | `{version, vsim, workspace, paths: {cases_dir, log_dir, report_dir}}`，全部为**绝对路径** |
 | `list_ports` | 设备发现入口 | — | `[{name, description, connected}]`（connected 为服务进程内的连接态） |
 | `list_cases` | 列可执行用例 | `path?`（缺省配置 `cases_dir`）、`tags?`（并集过滤） | `[{name, tags, file}]`；参数化用例显示 `name#N` |
 | `list_suites` | 列测试套件 | `path?` | `[{name, description, case_count, tags, file}]` |
@@ -310,12 +311,18 @@ server {
 ### 6.1 探测 / 手动调试
 
 ```
+server_info()                          # 服务端信息：workspace/cases_dir/log_dir/report_dir 绝对路径
 list_ports()                          # 找到目标端口（如 COM5）
 open_port("COM5:115200:8N1")          # 连接
 send_at("COM5", "AT")                 # 响应 text 含 OK 即通
 send_at("COM5", "AT+CGMI")            # 逐条探索；异步指令可用 wait_urc 等 URC 终结
 close_port("COM5")                    # 用完关闭（同时拆 URC 转发）
 ```
+
+> **编码机协作流**（用例/日志文件由外部工具传输，MCP 只按路径引用）：
+> `server_info` 拿到 cases_dir 绝对路径 → 用文件工具把用例 YAML 放进去 →
+> `list_cases` 确认可见 → `start_run` → `get_job` 拿 report_path →
+> 按 `log_dir/<job_id>/` 取回原始串口日志。
 
 ### 6.2 批量测试（异步作业）
 

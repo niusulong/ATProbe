@@ -1,4 +1,4 @@
-"""tools.register 进程内验证：13 工具注册、inputSchema、JSON 出参与结构化错误.
+"""tools.register 进程内验证：14 工具注册、inputSchema、JSON 出参与结构化错误.
 
 SDK 行为实测（mcp 2.0.0）：进程内 ``server.call_tool`` 对工具错误直接抛
 ToolError；``is_error=True`` 的转换发生在 lowlevel ``_handle_call_tool``（仅
@@ -20,6 +20,7 @@ from atprobe.mcp.service import McpService
 from atprobe.mcp.tools import INSTRUCTIONS, _wrap, register
 
 EXPECTED_TOOLS = {
+    "server_info",
     "list_ports",
     "list_cases",
     "list_suites",
@@ -79,6 +80,44 @@ async def test_call_tool_ok_returns_json_text(server):  # type: ignore[no-untype
 
     resp = await server.call_tool("send_at", {"port": VSIM_PORT, "command": "AT", "timeout": 2.0})
     assert "OK" in json.loads(resp.content[0].text)["text"]
+
+
+@pytest.mark.anyio
+async def test_server_info_paths(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """server_info：工作区/用例/日志/报告的绝对路径（编码机配合文件传输工具用）.
+
+    相对配置 → 锚定 user_workspace() 后的绝对路径；vsim 标志如实上报。
+    """
+    from atprobe.mcp.service import McpService
+
+    svc = McpService(_app_cfg(tmp_path), vsim=True, report_root=tmp_path / "reports")
+    info = svc.server_info()
+
+    assert info["vsim"] is True
+    assert Path(info["workspace"]).is_absolute()
+    # _app_cfg 的三个目录都是 tmp 绝对路径（resolve_workspace_path 原样返回）
+    assert Path(info["paths"]["cases_dir"]) == tmp_path / "cases"
+    assert Path(info["paths"]["log_dir"]) == tmp_path / "logs"
+    assert Path(info["paths"]["report_dir"]) == tmp_path / "reports"
+    assert isinstance(info["version"], str) and info["version"]
+
+
+@pytest.mark.anyio
+async def test_server_info_relative_anchored(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """相对路径配置 → 锚定到工作区根的绝对路径（与 CLI/GUI 同一解析规则）."""
+    from dataclasses import replace
+
+    from atprobe.mcp.service import McpService
+
+    cfg = replace(_app_cfg(tmp_path), cases_dir="cases", log_dir="logs")
+    svc = McpService(cfg, vsim=False, report_root=tmp_path / "reports")
+    info = svc.server_info()
+
+    assert info["vsim"] is False
+    from atprobe.infra.resources import user_workspace
+
+    assert Path(info["paths"]["cases_dir"]) == user_workspace() / "cases"
+    assert Path(info["paths"]["log_dir"]) == user_workspace() / "logs"
 
 
 @pytest.mark.anyio

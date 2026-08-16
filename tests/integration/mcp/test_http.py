@@ -45,6 +45,7 @@ BASE_URL = f"http://127.0.0.1:{HTTP_PORT}/mcp"
 VSIM_EXPR = f"{VSIM_PORT}:115200:8N1"
 
 EXPECTED_TOOLS = {
+    "server_info",
     "list_ports",
     "list_cases",
     "list_suites",

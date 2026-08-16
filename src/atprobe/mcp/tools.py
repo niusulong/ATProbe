@@ -80,7 +80,15 @@ def _wrap(fn: Callable[..., Any]) -> Callable[..., str]:
 
 
 def register(server: MCPServer[Any], service: McpService) -> None:
-    """在 MCPServer 上注册全部 13 个工具（幂等：SDK 对重名仅告警并保留首个）."""
+    """在 MCPServer 上注册全部 14 个工具（幂等：SDK 对重名仅告警并保留首个）."""
+
+    def server_info() -> dict[str, Any]:
+        """获取服务端信息：工作区根、用例/日志/报告目录的绝对路径、版本、vsim 标志。
+
+        编码机配合文件传输工具使用：把用例文件放到 cases_dir、从 log_dir/report_dir
+        取回测试产物（用例与日志的传输由外部工具负责，本服务只按路径引用）。
+        """
+        return service.server_info()
 
     def list_ports() -> list[dict[str, Any]]:
         """列出系统可用串口（name、描述、是否已连接），作为设备发现入口。"""
@@ -148,6 +156,7 @@ def register(server: MCPServer[Any], service: McpService) -> None:
         return service.unsubscribe_urc(subscription_id)
 
     for fn in (
+        server_info,
         list_ports,
         list_cases,
         list_suites,

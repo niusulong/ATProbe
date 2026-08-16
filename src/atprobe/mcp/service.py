@@ -35,13 +35,14 @@ from atprobe.domain.suite.collect import (
 from atprobe.engine.config import EngineConfig
 from atprobe.infra.config.appconfig import AppConfig, AppConfigError, parse_port_expr
 from atprobe.infra.config.envconfig import EnvConfig, EnvConfigError, load_env_config_file
-from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.resources import resolve_workspace_path, user_workspace
 from atprobe.infra.serial.config import PortConfig
 from atprobe.infra.serial.exceptions import SerialError
 from atprobe.infra.serial.interfaces import ERROR_KIND_NONE
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.rawlog import RawLogger
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
+from atprobe.infra.version import current_version
 from atprobe.mcp.errors import busy, device_error, invalid_input
 from atprobe.mcp.jobs import JobManager
 from atprobe.mcp.urcbuffer import UrcRegistry
@@ -104,6 +105,25 @@ class McpService:
     # ------------------------------------------------------------------
     # 资源发现
     # ------------------------------------------------------------------
+    def server_info(self) -> dict[str, Any]:
+        """服务端信息：工作区与产物目录的**绝对路径** + 版本 + 运行形态.
+
+        供远程编码机配合文件传输工具定位测试机上的用例/日志/报告——用例
+        本就是测试机本地文件（MCP 按路径引用不传输），编码机把写好的用例
+        放到 cases_dir、从 log_dir/report_dir 取回产物即可。路径解析与
+        CLI/GUI 同一规则（resolve_workspace_path：相对 → 工作区锚定）。
+        """
+        return {
+            "version": current_version(),
+            "vsim": self._vsim,
+            "workspace": str(user_workspace()),
+            "paths": {
+                "cases_dir": str(resolve_workspace_path(self._app_cfg.cases_dir)),
+                "log_dir": str(resolve_workspace_path(self._app_cfg.log_dir)),
+                "report_dir": str(resolve_workspace_path(self._app_cfg.report_dir)),
+            },
+        }
+
     def list_ports(self) -> list[dict[str, Any]]:
         """枚举可用串口：{name, description, connected}（connected 为本进程连接态）."""
         return [
