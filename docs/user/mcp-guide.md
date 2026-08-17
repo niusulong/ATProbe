@@ -437,6 +437,7 @@ mcp:
 | `open_port` 报 DEVICE_ERROR「可能被 GUI 或其他程序占用」 | 串口被 GUI / 串口助手 / 另一个 ATProbe 占用（pyserial 独占）。用 MCP 前先关掉它们 |
 | job 一直 running | 看快照的 `progress` 与 `events` 判断是否正常推进；确要停就 `cancel_job`（幂等）。引擎有终态兜底，作业不会无限悬挂 |
 | 远程机器访问不到 8470 | 三查：serve 是否 `--host 0.0.0.0`；Windows 防火墙是否放行（§4.4）；客户端 URL 是否带 `/mcp` 路径 |
+| 客户端报 `HTTP 421 Misdirected Request`（如 Claude Code「Failed to reconnect … HTTP 421」） | serve 的 host 未透传给 MCP SDK → SDK 按回环 host 启用了 DNS rebinding 防护，只放行 localhost 系 Host 头，局域网 IP 访问一律 421。修复：serve 以非回环 host 启动（`--host 0.0.0.0`，§7）后重启；仍复现则确认 serve 是含修复的新版本 |
 | `poll_urc` 返回 `truncated: true` | 消费慢于上报，500 条环形缓冲被挤掉——加大轮询频率或收窄 pattern |
 | 终端手动运行 `atprobe mcp stdio` 没有任何输出 | 正常：stdout 被协议独占，进程在等 stdin 的 JSON-RPC；日志走 stderr。由 MCP 客户端拉起即可 |
 | `list_cases` 返回空 | path 参数 / 配置 `cases_dir` 指向的目录没有用例 YAML（或全部解析失败被跳过） |

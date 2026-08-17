@@ -32,8 +32,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from atprobe.infra.config.appconfig import AppConfig
 from atprobe.infra.serial.vsim import VSIM_PORT
-from atprobe.mcp.auth import bearer_middleware
-from atprobe.mcp.server import build_server
+from atprobe.mcp.server import build_http_app
 from atprobe.mcp.service import McpService
 from conftest import make_case_yaml, payload, wait_finished
 
@@ -41,6 +40,7 @@ pytestmark = pytest.mark.anyio
 
 TOKEN = "it-bearer-token"
 HTTP_PORT = 18942  # 固定高位端口：被占即环境问题，不递增
+HTTP_PORT_REMOTE = 18943
 BASE_URL = f"http://127.0.0.1:{HTTP_PORT}/mcp"
 VSIM_EXPR = f"{VSIM_PORT}:115200:8N1"
 
@@ -95,7 +95,7 @@ def base_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         env_config=str(tmp / "noenv.yaml"),
     )
     service = McpService(app_cfg, vsim=True, report_root=tmp / "reports")
-    app = bearer_middleware(build_server(service).streamable_http_app(), TOKEN)
+    app = build_http_app(service, TOKEN)  # 生产装配路径（host 默认回环）
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=HTTP_PORT, log_level="error")
     )
@@ -194,3 +194,84 @@ async def test_http_error_channel(base_url: str) -> None:
         res = await session.call_tool("send_at", {"port": "VSIM_NEVER_OPENED", "command": "AT"})
         assert res.is_error is True
         assert payload(res)["kind"] == "INVALID_INPUT"
+
+
+# ---------------------------------------------------------------------------
+# 远程部署回归：DNS rebinding 防护与 Host 头（421 Misdirected Request 修复）
+# ---------------------------------------------------------------------------
+# SDK 对 streamable_http_app(host=...) 的语义：host 为回环地址时自动启用 DNS
+# rebinding 防护（仅放行 localhost 系 Host 头）；非回环（0.0.0.0）时不启用。
+# 此前 run_serve 未透传 host → SDK 按默认 127.0.0.1 启防护 → 远程经局域网 IP
+# 访问（Host 头如 192.168.60.117:8470）一律 421。以下用伪造的 Host 头模拟
+# 远程客户端（中间件只校验头，无需真实网卡地址）。
+LAN_HOST = "192.168.60.117"  # 模拟远程部署的局域网地址（非真实可达地址）
+
+
+def _start_uvicorn(app: object, port: int) -> tuple[uvicorn.Server, threading.Thread]:
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, name=f"atprobe-it-uvicorn-{port}", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 15.0
+    while not server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            server.should_exit = True
+            raise RuntimeError(f"uvicorn 未在超时内启动（端口 {port} 被占用？）")
+        time.sleep(0.05)
+    return server, thread
+
+
+async def test_remote_lan_host_header(tmp_path: Path) -> None:
+    """远程部署：host=0.0.0.0 装配的 serve 必须放行局域网 IP 的 Host 头（曾 421）.
+
+    run_serve 透传 host 给 streamable_http_app；本地回环装配的 serve 保持 SDK
+    防护（局域网 Host 头仍被拒）——两端行为一起钉住，防回归。
+    """
+    tmp = tmp_path / "remote"
+    app_cfg = AppConfig(
+        cases_dir=str(tmp / "cases"),
+        report_dir=str(tmp / "reports"),
+        log_dir=str(tmp / "logs"),
+        env_config=str(tmp / "noenv.yaml"),
+    )
+    service = McpService(app_cfg, vsim=True, report_root=tmp / "reports")
+
+    # 1) 远程形态（host=0.0.0.0，即 run_serve 生产路径）：LAN Host 头全链路放行
+    remote_server, remote_thread = _start_uvicorn(
+        build_http_app(service, TOKEN, host="0.0.0.0"), HTTP_PORT_REMOTE
+    )
+    try:
+        url = f"http://127.0.0.1:{HTTP_PORT_REMOTE}/mcp"
+        async with httpx2.AsyncClient(
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Host": f"{LAN_HOST}:{HTTP_PORT_REMOTE}",
+            }
+        ) as http:
+            async with streamable_http_client(url, http_client=http) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listing = await session.list_tools()
+                    assert {t.name for t in listing.tools} == EXPECTED_TOOLS
+    finally:
+        remote_server.should_exit = True
+        remote_thread.join(timeout=15.0)
+        assert not remote_thread.is_alive()
+
+    # 2) 本地形态（host 默认回环）：LAN Host 头必须被拒（SDK 防护仍在，421）
+    local_app = build_http_app(service, TOKEN)  # host 缺省 127.0.0.1
+    local_server, local_thread = _start_uvicorn(local_app, HTTP_PORT_REMOTE)
+    try:
+        async with httpx2.AsyncClient() as raw:
+            resp = await raw.get(
+                f"http://127.0.0.1:{HTTP_PORT_REMOTE}/mcp",
+                # 须先过 Bearer 中间件（401）才到 SDK 的 host 检查（421）
+                headers={
+                    "Authorization": f"Bearer {TOKEN}",
+                    "Host": f"{LAN_HOST}:{HTTP_PORT_REMOTE}",
+                },
+            )
+            assert resp.status_code == 421
+    finally:
+        local_server.should_exit = True
+        local_thread.join(timeout=15.0)
+        assert not local_thread.is_alive()
