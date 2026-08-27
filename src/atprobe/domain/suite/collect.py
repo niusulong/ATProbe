@@ -43,7 +43,9 @@ def read_suite_meta(path: Path) -> SuiteMeta:
 
     try:
         raw = YAML(typ="safe").load(StringIO(path.read_text(encoding="utf-8")))
-    except (YAMLError, OSError):
+    # F-16 修复：GBK 等非 UTF-8 文件抛 UnicodeDecodeError（ValueError 子类，
+    # 非 OSError）——case/suite parser 均已收敛，此处漏网使 list 命令裸崩
+    except (YAMLError, OSError, UnicodeDecodeError):
         return SuiteMeta(None, None, None, ())
     if not isinstance(raw, dict):
         return SuiteMeta(None, None, None, ())
