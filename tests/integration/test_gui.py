@@ -1972,14 +1972,19 @@ class TestDownloadWorkerPassesSha256:
 
         recorded: dict[str, object] = {}
 
-        def _fake_download(url, dest, *, filename, expected_size, progress_cb, cancel_token, **kwargs):  # type: ignore[no-untyped-def]
+        def _fake_download(
+            url, dest, *, filename, expected_size, progress_cb, cancel_token, **kwargs
+        ):  # type: ignore[no-untyped-def]
             recorded["expected_sha256"] = kwargs.get("expected_sha256")
             recorded["expected_size"] = expected_size
             return SimpleNamespace(path=pathlib.Path(dest) / filename)
 
         monkeypatch.setattr(dl_mod, "download", _fake_download)
         info = SimpleNamespace(
-            zip_url="https://example.invalid/x.zip", version="0.10.0", zip_size=123, sha256="deadbeef"
+            zip_url="https://example.invalid/x.zip",
+            version="0.10.0",
+            zip_size=123,
+            sha256="deadbeef",
         )
         win = MainWindow()
         # 主线程同步调用 _download_worker 时，emit 为直接连接，会同步执行
