@@ -100,6 +100,8 @@ def run_pressure(
             # skip/abort 时漏过：skip 使失败轮计为成功轮（成功率虚高）、abort 被
             # 无视。现统一覆盖为 CONTINUE 并 debug 提示被忽略的配置。
             if step.on_failure is not None:
+                # 批 3 注意：引入用例级 on_failure 透传后，用例级 skip 会绕过此规范化
+                # （execute_step 走 case 级策略产生 SKIPPED→成功率虚高）——收敛时须一并覆盖。
                 _log.debug(
                     "压测忽略步骤 %d 的 on_failure=%s（固定 continue）", idx, step.on_failure
                 )
@@ -129,7 +131,10 @@ def run_pressure(
                 if rnd > warmup:
                     step_skip[idx] += 1
             elif sr.status is StepStatus.INTERRUPTED:
-                # P1-6 修复：取消中断轮不计入统计——非设备失败，旧口径统计虚高
+                # P1-6 修复：取消中断轮不计入 rounds 统计（counted/success/failed）——
+                # 非设备失败。注意：该轮此前已 PASS 的步骤仍计入 step_suc/step_rt
+                # （分层统计留有 ≤1 的受控偏差，不影响 success_rate）；step_stats 与
+                # rounds 的完全对齐随批 3 _failure_strategy 收敛时统一处理。
                 round_interrupted = True
                 aborted = True
                 abort_reason = "cancelled"
