@@ -1939,3 +1939,22 @@ class TestThemeRefresh:
         widget.refresh_theme()
         light_tokens = get_tokens(dark=False)
         assert widget._tokens["data.tx"] == light_tokens["data.tx"]  # noqa: SLF001
+
+
+class TestEngineThreadNoDirectUi:
+    """P0-2：引擎线程闭包 _run 不得直接调用 UI（QTimer/控件仅主线程可操作）.
+
+    跨线程 UI 调用无法稳定复现崩溃，改用源码守护：run_cases 内不得出现
+    ERROR 态的直接状态设置（"RUNNING" 设置在 :898 属主线程调用，合法保留）。
+    """
+
+    def test_run_closure_has_no_error_status_call(self) -> None:
+        import inspect
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        src = inspect.getsource(MainWindow.run_cases)
+        assert 'self._set_engine_status("ERROR"' not in src, (
+            "run_cases 的 _run 闭包在引擎线程执行，不得直接调用 _set_engine_status"
+            "——异常状态应由 progress 信号在主线程槽 _on_progress 设置"
+        )

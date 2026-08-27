@@ -907,9 +907,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 # 引擎线程异常兜底：写完整 traceback 日志 + 推 UI 即时提示。
                 # 此前异常静默死亡 → UI 表现为"卡住"；现在用户能看到"出错了"并查日志。
+                # P0-2 修复：删除本线程内的 _set_engine_status 调用——QTimer/QLabel 仅
+                # 主线程可操作；主线程槽 _on_progress 处理 ("engine_error", ...) 时已设置。
                 _log.exception("引擎执行异常")
                 self.progress.emit(("engine_error", f"执行异常：{exc}"))
-                self._set_engine_status("ERROR", self._tokens["danger"])
                 return
             finally:
                 # B8 补充：执行结束（含异常）后清理引擎引用。
@@ -937,8 +938,8 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 _log.exception("报告生成异常")
+                # P0-2 修复：同上——状态设置交由主线程槽，此处仅投递事件
                 self.progress.emit(("engine_error", f"报告生成异常：{exc}"))
-                self._set_engine_status("ERROR", self._tokens["danger"])
 
         t = threading.Thread(target=_run, daemon=True)
         self._engine_thread = t  # P3 修复：保留引用供 closeEvent join
