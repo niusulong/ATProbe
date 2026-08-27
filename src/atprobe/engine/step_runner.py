@@ -125,7 +125,7 @@ def execute_step(
     # ------------------------------------------------------------------
     if not is_teardown and step.when is not None:
         try:
-            cond = evaluate(step.when, ctx.variables)
+            cond = evaluate(step.when, ctx.variables, env=ctx.env)
         except (ExpressionError, UndefinedReferenceError) as exc:
             # P1 修复：when 表达式错误与普通失败一样走 on_failure 决策
             # （旧实现硬编码 abort_case=True，绕过 on_failure: continue/skip）
@@ -336,7 +336,7 @@ def _run_poll(
                 {k: v for k, v in attempt.extracted.items() if attempt.matched.get(k, True)}
             )
             try:
-                if evaluate(poll.until, tmp_scope):
+                if evaluate(poll.until, tmp_scope, env=ctx.env):
                     if attempt.step_passed:
                         return attempt, iterations
                     # until 已满足但断言失败：保留断言失败原因，不再继续轮询

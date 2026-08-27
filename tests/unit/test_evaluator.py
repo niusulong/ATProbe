@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
+from atprobe.domain.case.templater import UndefinedReferenceError
+from atprobe.infra.config.envconfig import EnvConfig
 
 
 class TestComparisons:
@@ -124,6 +126,12 @@ class TestLegacySyntax:
         # 注意右侧是 {{val}} 而非裸名，避免裸名被当变量解析为 null
         assert evaluate('"{{val}}" == "OK"', {"val": "OK"}) is True
 
+    def test_mustache_compat_string_bare_placeholder(self) -> None:
+        # 裸占位符（不在引号内）替换后以带引号字面量嵌入，裸值不再被误当
+        # 变量名解析为 null——模块 docstring 宣告的旧写法 {{var}} == "OK"（P1-4）
+        assert evaluate('{{val}} == "OK"', {"val": "OK"}) is True
+        assert evaluate('{{val}} == "NO"', {"val": "OK"}) is False
+
 
 class TestErrors:
     def test_empty_expr(self) -> None:
@@ -137,3 +145,25 @@ class TestErrors:
     def test_unexpected_token(self) -> None:
         with pytest.raises(ExpressionError):
             evaluate("x @ 1", {"x": 1})
+
+
+class TestEvaluateWithEnv:
+    """P1-4：条件表达式可引用环境配置变量（与命令模板口径一致）."""
+
+    @staticmethod
+    def _env() -> EnvConfig:
+        return EnvConfig(_groups={"apn": {"name": "cmnet"}})
+
+    def test_dotted_ref_with_env(self) -> None:
+        assert evaluate('{{apn.name}} == "cmnet"', {}, env=self._env()) is True
+
+    def test_dotted_ref_mismatch(self) -> None:
+        assert evaluate('{{apn.name}} == "ctnet"', {}, env=self._env()) is False
+
+    def test_dotted_ref_without_env_still_raises(self) -> None:
+        with pytest.raises(UndefinedReferenceError):
+            evaluate('{{apn.name}} == "cmnet"', {})
+
+    def test_dotted_ref_quoted_form_still_works(self) -> None:
+        # 字符串字面量内的占位符嵌入原始值（替换规则对两种写法都成立）
+        assert evaluate('"{{apn.name}}" == "cmnet"', {}, env=self._env()) is True

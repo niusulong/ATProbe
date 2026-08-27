@@ -29,8 +29,12 @@ from __future__ import annotations
 
 import re as _re
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from atprobe.domain.case.templater import render
+
+if TYPE_CHECKING:
+    from atprobe.infra.config.envconfig import EnvConfig
 
 
 class ExpressionError(ValueError):
@@ -341,29 +345,70 @@ class _Parser:
 # ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
-def _preprocess(expr: str, scope: Mapping[str, object]) -> str:
-    """兼容旧写法（§6.5）：表达式含 {{}} 时先文本替换再求值.
+def _embed_str_value(value: str) -> str:
+    """把替换值以字符串字面量形式嵌入表达式（转义引号与反斜杠）."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -> str:
+    """兼容旧写法（§6.5）：表达式含 {{}} 时先替换占位符再求值.
+
+    替换规则（P1-4）：
+    - 字符串字面量外的 ``{{var}}`` / ``{{group.param}}``：以带引号的字面量嵌入，
+      避免替换出的裸值被词法层误当变量名（未定义 → null → 比较恒 false）；
+      数值比较不受影响（§6.3 规则 3：比较前两侧均转数值）。
+    - 字符串字面量内的 ``"{{var}}"``：嵌入原始值（保持旧写法 ``'"{{v}}" == "x"'`` 兼容）。
+    - 引用解析复用 templater.render 的口径（点号名仅查环境配置，简单名先查变量池
+      再查环境配置默认组），故 env 透传后 {{group.param}} 与命令模板行为一致。
 
     注意：旧写法用「文本替换」，故变量未定义会抛 UndefinedReferenceError；
     新写法用「裸变量名」，未定义为 null（§6.3 规则 1）。两者语义有别，新用例应用裸名。
     """
     if "{{" not in expr:
         return expr
-    # 旧写法：渲染（未定义报错），allow_partial=False 保持兼容严格性
-    return render(expr, scope, env=None, allow_partial=False)
+    out: list[str] = []
+    i = 0
+    n = len(expr)
+    in_str = False
+    while i < n:
+        # 占位符检测（字符串字面量内外都可能出现）
+        if expr.startswith("{{", i):
+            end = expr.find("}}", i + 2)
+            name = expr[i + 2 : end].strip() if end != -1 else ""
+            if name and "{" not in name and "}" not in name:
+                # 严格渲染（未定义即抛 UndefinedReferenceError）
+                value = render("{{" + name + "}}", scope, env=env, allow_partial=False)
+                out.append(value if in_str else _embed_str_value(value))
+                i = end + 2
+                continue
+        ch = expr[i]
+        out.append(ch)
+        if in_str:
+            if ch == "\\" and i + 1 < n:  # 转义字符整体照搬
+                out.append(expr[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        i += 1
+    return "".join(out)
 
 
-def evaluate(expr: str, scope: Mapping[str, object]) -> bool:
+def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvConfig | None = None) -> bool:
     """求值条件表达式，返回布尔结果.
 
     Args:
         expr: 条件表达式（如 ``'stat == "1" or stat == "5"'``）。
         scope: 变量作用域（变量名 → 值）。未定义的变量解析为 None。
+        env: 环境配置（{{group.param}} 点号引用来源），None 时点号名未定义即报错。
     Raises:
         ExpressionError: 表达式语法错误。
         UndefinedReferenceError: 旧写法 {{var}} 中 var 未定义。
     """
-    processed = _preprocess(expr, scope)
+    processed = _preprocess(expr, scope, env)
     tokens = _tokenize(processed)
     if not tokens:
         raise ExpressionError("空表达式")
