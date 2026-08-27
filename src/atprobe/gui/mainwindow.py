@@ -468,6 +468,9 @@ class MainWindow(QMainWindow):
                 Path(tempfile.gettempdir()),
                 filename=name,
                 expected_size=getattr(info, "zip_size", None),
+                # P1-9 修复：CLI 链路已传而 GUI 漏传——等大小恶意/损坏 zip 可绕过
+                # 长度校验直达安装。sha256 资产由 release.yml 生成，正常必有。
+                expected_sha256=getattr(info, "sha256", None),
                 progress_cb=lambda d, t: self.update_download_progress.emit(d, t),
                 cancel_token=lambda: getattr(self, "_cancelled", False),
             )

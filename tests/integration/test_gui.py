@@ -1958,3 +1958,39 @@ class TestEngineThreadNoDirectUi:
             "run_cases 的 _run 闭包在引擎线程执行，不得直接调用 _set_engine_status"
             "——异常状态应由 progress 信号在主线程槽 _on_progress 设置"
         )
+
+
+class TestDownloadWorkerPassesSha256:
+    """P1-9：GUI 下载链路必须传入 expected_sha256（仅长度校验防不了等大小替换）."""
+
+    def test_download_receives_expected_sha256(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import pathlib
+        from types import SimpleNamespace
+
+        import atprobe.infra.update.downloader as dl_mod
+        from atprobe.gui.mainwindow import MainWindow
+
+        recorded: dict[str, object] = {}
+
+        def _fake_download(url, dest, *, filename, expected_size, progress_cb, cancel_token, **kwargs):  # type: ignore[no-untyped-def]
+            recorded["expected_sha256"] = kwargs.get("expected_sha256")
+            recorded["expected_size"] = expected_size
+            return SimpleNamespace(path=pathlib.Path(dest) / filename)
+
+        monkeypatch.setattr(dl_mod, "download", _fake_download)
+        info = SimpleNamespace(
+            zip_url="https://example.invalid/x.zip", version="0.10.0", zip_size=123, sha256="deadbeef"
+        )
+        win = MainWindow()
+        # 主线程同步调用 _download_worker 时，emit 为直接连接，会同步执行
+        # _on_download_done → QMessageBox.question 模态框——offscreen 模式无人可点，
+        # 测试将永久挂起。本测试只验证 download 收到的参数，故先断开该信号。
+        win.update_download_done.disconnect()
+        try:
+            win._download_worker(info)  # noqa: SLF001 - 同步执行，直接调用验证参数
+        finally:
+            win.close()
+        assert recorded["expected_sha256"] == "deadbeef", (
+            "_download_worker 未把 ReleaseInfo.sha256 传给 download——GUI 更新链路缺内容校验"
+        )
+        assert recorded["expected_size"] == 123
