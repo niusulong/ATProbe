@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from atprobe.infra.serial.config import FrameFormat, Parity
+from atprobe.infra.serial.config import DataStreamSpec, FrameFormat, Parity
 
 
 class TestFrameFormat15Stopbits:
@@ -30,3 +30,25 @@ class TestFrameFormat15Stopbits:
             FrameFormat.parse("8N3")
         with pytest.raises(ValueError, match="帧格式"):
             FrameFormat.parse("9N1")
+
+
+class TestDataStreamSpecValidation:
+    """F-5：chunk 参数校验（chunk_size<=0 会致 send_data_stream 死循环）."""
+
+    def test_chunk_size_zero_rejected(self) -> None:
+        with pytest.raises(ValueError, match="chunk_size"):
+            DataStreamSpec(data=b"x", chunk_size=0)
+
+    def test_negative_interval_rejected(self) -> None:
+        with pytest.raises(ValueError, match="chunk_interval_ms"):
+            DataStreamSpec(data=b"x", chunk_interval_ms=-1)
+
+    def test_threshold_lt_one_rejected(self) -> None:
+        with pytest.raises(ValueError, match="chunk_threshold"):
+            DataStreamSpec(data=b"x", chunk_threshold=0)
+
+    def test_defaults_valid(self) -> None:
+        spec = DataStreamSpec(data=b"hello")
+        assert spec.chunk_size == 1024
+        assert spec.chunk_threshold == 4096
+        assert spec.chunk_interval_ms == 50
