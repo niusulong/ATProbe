@@ -167,3 +167,49 @@ class TestEvaluateWithEnv:
     def test_dotted_ref_quoted_form_still_works(self) -> None:
         # 字符串字面量内的占位符嵌入原始值（替换规则对两种写法都成立）
         assert evaluate('"{{apn.name}}" == "cmnet"', {}, env=self._env()) is True
+
+
+class TestAdversarialValues:
+    """P1-4 复核：替换值含特殊字符时的嵌入安全性（in-string 同样转义）."""
+
+    def test_out_of_string_value_with_quotes(self) -> None:
+        # 值内含引号：out-of-string 嵌入经转义仍是完整字面量，不会逃逸注入语法
+        v = 'A" is not null or "B'
+        assert evaluate('{{v}} == "OK"', {"v": v}) is False
+        assert evaluate('{{v}} == "A\\" is not null or \\"B"', {"v": v}) is True
+
+    def test_in_string_value_with_quotes_no_injection(self) -> None:
+        # 修复前红：裸嵌值逃逸字面量 → "A" is not null or "B" == "OK" → True（注入）
+        v = 'A" is not null or "B'
+        assert evaluate('"{{v}}" == "OK"', {"v": v}) is False
+        assert evaluate('"{{v}}" == "A\\" is not null or \\"B"', {"v": v}) is True
+
+    def test_value_with_backslash_not_mangled(self) -> None:
+        # 修复前红（in-string 形态）：\U、\a 被 _unquote_str 当转义吃掉 → 判错
+        v = "C:\\Users\\at"  # 值为 C:\Users\at
+        assert evaluate('{{v}} == "C:\\\\Users\\\\at"', {"v": v}) is True
+        assert evaluate('"{{v}}" == "C:\\\\Users\\\\at"', {"v": v}) is True
+        assert evaluate('{{v}} != "C:Usersat"', {"v": v}) is True
+
+    def test_value_with_newline_and_escape_sequence(self) -> None:
+        # 真实换行：STR 字面量可跨行（[^"\] 含 \n），两种形态都等值
+        v = "line1\nline2"
+        assert evaluate('{{v}} == "line1\nline2"', {"v": v}) is True
+        assert evaluate('"{{v}}" == "line1\nline2"', {"v": v}) is True
+        # 修复前红（in-string 形态）：值含两字符 \n 序列，裸嵌后被转义成真实换行 → 判错
+        v2 = "a\\nb"  # 值为 a\nb（反斜杠 + 字母 n 两个字符）
+        assert evaluate('"{{v}}" == "a\\\\nb"', {"v": v2}) is True
+        assert evaluate('{{v}} == "a\\\\nb"', {"v": v2}) is True
+
+    def test_numeric_coercion_unaffected(self) -> None:
+        # 数值强转：{{v}} > 4（v="23"）→ "23" > 4 → True；非数值 → False
+        assert evaluate("{{v}} > 4", {"v": "23"}) is True
+        assert evaluate("{{v}} > 4", {"v": "3"}) is False
+        assert evaluate("{{v}} > 4", {"v": "abc"}) is False
+
+    def test_adjacent_placeholders(self) -> None:
+        # 相邻占位符：in-string 内拼接为一个值；out-of-string 相邻产生两个相邻
+        # 字面量 → 语法错误（响亮报错，不静默当变量名 → null）
+        assert evaluate('"{{a}}{{b}}" == "XY"', {"a": "X", "b": "Y"}) is True
+        with pytest.raises(ExpressionError):
+            evaluate('{{a}}{{b}} == "XY"', {"a": "X", "b": "Y"})

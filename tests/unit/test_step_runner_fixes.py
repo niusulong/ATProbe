@@ -25,7 +25,8 @@ from atprobe.domain.case.models import (
     Step,
 )
 from atprobe.domain.report.models import StepStatus
-from atprobe.engine.step_runner import CaseContext, execute_step
+from atprobe.engine.step_runner import CaseContext, StepExecResult, execute_step
+from atprobe.infra.config.envconfig import EnvConfig
 from atprobe.infra.serial.interfaces import CancelToken, ICommandSender, Response, ResponseStatus
 
 
@@ -317,3 +318,39 @@ class TestUnmatchedExtractNotInAssertionScope:
         )
         assert result.status is StepStatus.FAIL
         assert "未定义" in (result.step_result.error_msg or "")
+
+
+class TestWhenWithEnv:
+    """P1-4：when/poll.until 与命令模板同口径透传环境配置（管道级锁定）."""
+
+    @staticmethod
+    def _ctx() -> CaseContext:
+        return CaseContext(env=EnvConfig(_groups={"g": {"p": "x"}}))
+
+    @staticmethod
+    def _run(step: Step, ctx: CaseContext) -> tuple[StepExecResult, FakeSender]:
+        sender = FakeSender([_ok()])
+        result = execute_step(
+            step,
+            index=1,
+            phase="steps",
+            ctx=ctx,
+            sender=sender,
+            default_port="COM9",
+            step_timeout_default=5.0,
+            clock=time.monotonic,
+            sleep=lambda s: None,
+        )
+        return result, sender
+
+    def test_when_dotted_ref_true_executes_step(self) -> None:
+        """when '{{g.p}} == "x"' 命中环境配置 → 步骤执行（回退 env 透传则红）."""
+        result, sender = self._run(Step(command="AT", when='{{g.p}} == "x"'), self._ctx())
+        assert result.status is StepStatus.PASS
+        assert sender.calls == 1  # 未被 when 跳过，命令实际下发
+
+    def test_when_dotted_ref_false_skips_step(self) -> None:
+        """when 不命中 → SKIPPED 且命令未下发."""
+        result, sender = self._run(Step(command="AT", when='{{g.p}} == "y"'), self._ctx())
+        assert result.status is StepStatus.SKIPPED
+        assert sender.calls == 0

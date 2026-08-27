@@ -53,7 +53,7 @@ _TOKEN_RE = _re.compile(
       | (?P<NOT>not\b)
       | (?P<NULL>null\b)
       | (?P<OP>>=|<=|==|!=|>|<)
-      | (?P<STR>"(?:[^"\\]|\\.)*")
+      | (?P<STR>"(?:[^"\\]|\\.)*")  # 转义契约与 _preprocess 的字符串 DFA 语法等价（收敛方案见批 2+）
       | (?P<NUM>-?\d+(?:\.\d+)?)
       | (?P<LP>\()
       | (?P<RP>\))
@@ -345,10 +345,14 @@ class _Parser:
 # ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
-def _embed_str_value(value: str) -> str:
-    """把替换值以字符串字面量形式嵌入表达式（转义引号与反斜杠）."""
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+def _escape_str_value(value: str) -> str:
+    """转义替换值中的反斜杠与引号（与 tokenizer 的 STR 字面量转义契约一致）.
+
+    不加外层引号：字符串字面量内的占位符嵌值同样必须转义——否则值内的 ``"`` 会
+    逃逸字面量（注入 is not null / or 等语法）、``\\`` 会被 _unquote_str 当转义
+    序列吃掉而静默判错（设备提取值正是经变量池进入 when/poll.until 的）。
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -> str:
@@ -358,7 +362,8 @@ def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -
     - 字符串字面量外的 ``{{var}}`` / ``{{group.param}}``：以带引号的字面量嵌入，
       避免替换出的裸值被词法层误当变量名（未定义 → null → 比较恒 false）；
       数值比较不受影响（§6.3 规则 3：比较前两侧均转数值）。
-    - 字符串字面量内的 ``"{{var}}"``：嵌入原始值（保持旧写法 ``'"{{v}}" == "x"'`` 兼容）。
+    - 字符串字面量内的 ``"{{var}}"``：嵌入转义后的值（保持旧写法兼容，且防值内
+      引号/反斜杠逃逸或破坏字面量）。
     - 引用解析复用 templater.render 的口径（点号名仅查环境配置，简单名先查变量池
       再查环境配置默认组），故 env 透传后 {{group.param}} 与命令模板行为一致。
 
@@ -371,6 +376,9 @@ def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -
     i = 0
     n = len(expr)
     in_str = False
+    # 字符串 DFA：与 tokenizer 的 STR 正则（见 _TOKEN_RE 的 STR 行）保持语法等价性
+    # 契约——转义序列（\" 与 \\）整体跳过；两处口径若漂移会导致嵌值边界误判
+    # （收敛方案见批 2+）。
     while i < n:
         # 占位符检测（字符串字面量内外都可能出现）
         if expr.startswith("{{", i):
@@ -379,7 +387,9 @@ def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -
             if name and "{" not in name and "}" not in name:
                 # 严格渲染（未定义即抛 UndefinedReferenceError）
                 value = render("{{" + name + "}}", scope, env=env, allow_partial=False)
-                out.append(value if in_str else _embed_str_value(value))
+                escaped = _escape_str_value(value)
+                # in-string：嵌在既有字面量内，只转义不加引号；out-of-string：整体加引号
+                out.append(escaped if in_str else f'"{escaped}"')
                 i = end + 2
                 continue
         ch = expr[i]
