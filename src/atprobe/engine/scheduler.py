@@ -113,6 +113,14 @@ class Engine:
             self._state = EngineState.FINISHED
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
+            # P1-7 修复：与端口失败路径对齐——sender 解析失败也补发结束事件，
+            # 否则 GUI 进度面板收不到 EngineFinishedEvent，永久显示"运行中"
+            if handler is not None:
+                handler(
+                    EngineFinishedEvent(
+                        summary=Summary(start_time="", end_time="", duration_ms=0.0)
+                    )
+                )
             return ExecutionResult(
                 summary=Summary(start_time="", end_time="", duration_ms=0.0),
                 case_results=(),
@@ -122,6 +130,14 @@ class Engine:
             self._state = EngineState.ERROR
             if self._owns_raw_logger and self._raw_logger is not None:
                 self._raw_logger.stop()
+            # P1-7 修复：与端口失败路径对齐——sender 解析失败也补发结束事件，
+            # 否则 GUI 进度面板收不到 EngineFinishedEvent，永久显示"运行中"
+            if handler is not None:
+                handler(
+                    EngineFinishedEvent(
+                        summary=Summary(start_time="", end_time="", duration_ms=0.0)
+                    )
+                )
             return self._error_result(config, f"sender 解析失败：{exc!r}")
         cancel = CancelToken()
         self._cancel_token = cancel

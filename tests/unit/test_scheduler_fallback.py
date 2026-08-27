@@ -114,3 +114,20 @@ class TestExplodingFakeSanity:
             pass
         else:
             raise AssertionError("应在第 2 次抛出") from None
+
+
+class TestSenderParseFailureEmitsFinished:
+    """P1-7：sender 解析失败路径也发 EngineFinishedEvent（GUI 面板以该事件收尾）."""
+
+    def test_factory_exception_emits_finished_event(self) -> None:
+        def _boom() -> object:
+            raise ValueError("factory broken")
+
+        events: list[object] = []
+        eng = Engine(sender_factory=_boom)
+        result = eng.start(_cfg([]), handler=events.append)
+        assert result.error is not None
+        assert result.error.startswith("sender 解析失败")
+        assert any(isinstance(e, EngineFinishedEvent) for e in events), (
+            "sender 解析失败必须补发 EngineFinishedEvent——否则 GUI 进度面板永久悬挂"
+        )
