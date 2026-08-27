@@ -84,7 +84,7 @@ class _SingleAttempt:
 
     response: Response
     extracted: dict[str, str]
-    matched: dict[str, bool]  # 每个 extract 是否匹配（用于过滤不写入池）
+    matched: dict[str, bool]  # 每个 extract 是否匹配（用于过滤不写入池、不并入断言作用域）
     assertion_outcomes: list[AssertionOutcome]
     step_passed: bool  # 本次是否成功（发送 ok 且断言全通过）
     step_error: str  # 失败原因（成功时为空）

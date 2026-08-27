@@ -18,8 +18,8 @@ import time
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.extractor import extract_one
 from atprobe.domain.case.models import (
-    AssertionOp,
     AssertElement,
+    AssertionOp,
     FailureStrategy,
     PollConfig,
     Step,
