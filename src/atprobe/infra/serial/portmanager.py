@@ -140,7 +140,11 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         """
         if not _HAS_LISTPORTS:  # pragma: no cover
             return []
-        ours = set(self._connections.keys())
+        # F-3 修复：与 open/close 并发时 dict 结构可变，须持锁收集
+        # （close_all 已在锁内收集，此处此前遗漏 → GUI 刷新偶发
+        #   RuntimeError: dictionary changed size during iteration）
+        with self._lock:
+            ours = set(self._connections.keys())
         return [
             PortInfo(
                 name=info.device, description=str(info.description), in_use=info.device in ours
