@@ -438,7 +438,10 @@ def _single_attempt(
 
     # 断言求值用「本次 extract + 已有变量池」临时作用域（不污染 ctx，由外层提交）
     tmp_scope = dict(ctx.variables)
-    tmp_scope.update(extracted)
+    # P1-5 修复：只合并「实际匹配到」的 extract 变量——与 _run_poll 的 until 判定
+    # 口径一致（「未匹配=未定义→null」）。旧实现把未匹配变量置 "" 并入断言作用域，
+    # `{var: x, op: ne, value: "ERROR"}` 在提取失败时 "" != "ERROR" 假成功。
+    tmp_scope.update({k: v for k, v in extracted.items() if matched.get(k, True)})
     if step.assertions:
         outcomes = assess_all(step.assertions, resp.text, tmp_scope)
 

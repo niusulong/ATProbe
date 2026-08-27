@@ -17,7 +17,14 @@ import time
 
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.extractor import extract_one
-from atprobe.domain.case.models import FailureStrategy, PollConfig, Step
+from atprobe.domain.case.models import (
+    AssertionOp,
+    AssertElement,
+    FailureStrategy,
+    PollConfig,
+    Step,
+)
+from atprobe.domain.report.models import StepStatus
 from atprobe.engine.step_runner import CaseContext, execute_step
 from atprobe.infra.serial.interfaces import CancelToken, ICommandSender, Response, ResponseStatus
 
@@ -285,3 +292,28 @@ class TestEvaluatorParenOperand:
             raise AssertionError("旧 bug：裸 AssertionError 逃逸（应抛 ExpressionError）") from None
         else:
             raise AssertionError("应抛 ExpressionError") from None
+
+
+class TestUnmatchedExtractNotInAssertionScope:
+    """P1-5：常规步骤断言作用域只合并 matched 变量（与 poll 口径统一）."""
+
+    def test_ne_assert_fails_when_extract_unmatched(self) -> None:
+        """extract 未匹配 → 变量未定义 → ne 断言 FAIL（旧实现 "" != "ERROR" 假 PASS）."""
+        step = Step(
+            command="AT+CSQ",
+            extract={"csq": r"NEVERMATCH-(\d+)"},
+            assert_=[AssertElement(var="csq", op=AssertionOp.NE, value="ERROR")],
+        )
+        result = execute_step(
+            step,
+            index=1,
+            phase="steps",
+            ctx=CaseContext(),
+            sender=FakeSender([_ok("\r\n+CSQ: 12,9\r\n\r\nOK\r\n")]),
+            default_port="FAKE",
+            step_timeout_default=1.0,
+            clock=time.monotonic,
+            sleep=lambda s: None,
+        )
+        assert result.status is StepStatus.FAIL
+        assert "未定义" in (result.step_result.error_msg or "")
