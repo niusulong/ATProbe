@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +28,8 @@ from atprobe.infra.serial.interfaces import (
     CancelToken,
     ICommandSender,
 )
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,11 +93,19 @@ def run_pressure(
             break
 
         round_ok = True
+        round_interrupted = False
         for idx, step in enumerate(case.steps, start=1):
-            # 压测中 on_failure 固定 continue（§4.5）
-            effective_step = step
-            if step.on_failure is None:
+            # 压测中 on_failure 固定 continue（§4.5）。
+            # P1-6 修复：旧实现仅当 step.on_failure 为 None 才覆盖 → 用户配置
+            # skip/abort 时漏过：skip 使失败轮计为成功轮（成功率虚高）、abort 被
+            # 无视。现统一覆盖为 CONTINUE 并 debug 提示被忽略的配置。
+            if step.on_failure is not None:
+                _log.debug(
+                    "压测忽略步骤 %d 的 on_failure=%s（固定 continue）", idx, step.on_failure
+                )
                 effective_step = step.model_copy(update={"on_failure": FailureStrategy.CONTINUE})
+            else:
+                effective_step = step
             result: StepExecResult = execute_step(
                 effective_step,
                 index=idx,
@@ -116,6 +128,12 @@ def run_pressure(
                 # （旧实现把 SKIPPED 当 step_fail → round_ok=False，口径失真）
                 if rnd > warmup:
                     step_skip[idx] += 1
+            elif sr.status is StepStatus.INTERRUPTED:
+                # P1-6 修复：取消中断轮不计入统计——非设备失败，旧口径统计虚高
+                round_interrupted = True
+                aborted = True
+                abort_reason = "cancelled"
+                break
             else:
                 if rnd > warmup:
                     step_fail[idx] += 1
@@ -125,7 +143,7 @@ def run_pressure(
                     abort_reason = "abort_on_failure"
                     break
 
-        if rnd > warmup:
+        if rnd > warmup and not round_interrupted:
             counted += 1
             if round_ok:
                 success_rounds += 1
@@ -187,8 +205,10 @@ def _build_step_stat(
         s = sorted(times)
         n = len(s)
         avg = sum(s) / n
-        p95 = s[min(n - 1, int(n * 0.95))]
-        p99 = s[min(n - 1, int(n * 0.99))]
+        # P1-6 修复：P95/P99 用最近秩（ceil）取序——旧截断法 int(n*p) 在 n=20 时
+        # P95 取到最大值，统计系统性偏大
+        p95 = s[min(n - 1, math.ceil(n * 0.95) - 1)]
+        p99 = s[min(n - 1, math.ceil(n * 0.99) - 1)]
         return StepPressureStats(
             step_index=idx,
             command=cmd,
