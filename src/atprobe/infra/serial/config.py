@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -40,29 +41,17 @@ class FrameFormat:
 
     @classmethod
     def parse(cls, compact: str) -> FrameFormat:
-        """解析紧凑写法 ``8N1`` / ``7E2``（M5 §3.3 FRAME）."""
+        """解析紧凑写法 ``8N1`` / ``7E2`` / ``8N1.5``（M5 §3.3 FRAME）."""
         s = compact.strip()
-        if len(s) != 3:
-            raise ValueError(f"帧格式应为 3 字符紧凑写法（如 8N1），实际：{compact!r}")
-        db_ch, par_ch, sb_ch = s[0], s[1], s[2]
-        try:
-            databits = int(db_ch)
-        except ValueError as exc:
-            raise ValueError(f"数据位应为数字，实际：{db_ch!r}") from exc
-        if databits not in (5, 6, 7, 8):
-            raise ValueError(f"数据位应为 5/6/7/8，实际：{databits}")
-        try:
-            parity = Parity(par_ch.upper())
-        except ValueError as exc:
-            raise ValueError(f"校验位应为 N/E/O/M/S，实际：{par_ch!r}") from exc
-        if sb_ch == "1":
-            stopbits = 1.0
-        elif sb_ch == "2":
-            stopbits = 2.0
-        elif sb_ch == "1.5" or s.endswith("1.5"):
-            stopbits = 1.5
-        else:
-            raise ValueError(f"停止位应为 1/1.5/2，实际：{sb_ch!r}")
+        # F-4 修复：旧实现的 len(s)!=3 早退使 "8N1.5" 永远解析失败、1.5 停止位
+        # 分支不可达（与 __str__ 的 round-trip 断裂）。改为正则整体解析。
+        m = re.fullmatch(r"([5-8])([NEOMSneoms])(1(?:\.5)?|2)", s)
+        if m is None:
+            raise ValueError(f"帧格式应为紧凑写法（如 8N1 / 8N1.5 / 7E2），实际：{compact!r}")
+        databits = int(m.group(1))
+        parity = Parity(m.group(2).upper())
+        sb = m.group(3)
+        stopbits = 1.5 if sb == "1.5" else float(sb)
         return cls(databits=databits, parity=parity, stopbits=stopbits)
 
     def __str__(self) -> str:  # noqa: D401
