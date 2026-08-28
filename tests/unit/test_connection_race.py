@@ -194,6 +194,77 @@ class TestCancelDrainsPending:
         assert "SHOULD_BE_DRAINED" not in resp_b.text
 
 
+class TestP1StaleBufferStateRace:
+    """P1-1 复现（批 2a Task 4）：慢 URC handler 挂起期间引擎 reset——读线程
+    不得以陈旧缓冲状态交付/覆写。
+
+    迁移前漏网点：_process_incoming 在锁外执行 URC 回调（handler 可耗时），
+    回调返回后的三处 buffer 操作（wait_urc 交付 / 终结交付 / 空闲截断）读
+    **当前** buffer 或以陈旧 tail 无条件覆写——期间引擎 send_command 入口
+    已 reset，陈旧字节复活污染新命令。LineAssembler 迁移后交付一律用 feed
+    事件快照、buffer 推进全部在 feed 持锁内同步完成，本用例绿。
+    """
+
+    def test_idle_slow_handler_no_stale_tail_pollution(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """空闲截断漏网点：handler 挂起期间新命令入口 reset，陈旧 tail 不得复活.
+
+        空闲态读线程喂入「URC 行 + 未完结半行」——半行是空闲截断路径要写回
+        的 tail；URC 回调在读线程锁外挂起（任务描述的 sleep 100ms，此处用
+        事件对齐消除时序抖动），挂起期间主线程启动新命令（入口 reset）。
+        """
+        conn = _make_connection(monkeypatch)
+        in_handler = threading.Event()
+        release = threading.Event()
+
+        def slow_handler(evt) -> None:  # noqa: ANN001
+            in_handler.set()
+            release.wait(5.0)
+
+        conn.add_urc_handler(slow_handler)
+
+        feeder = threading.Thread(
+            target=conn._process_incoming,  # noqa: SLF001 - 模拟读线程喂字节
+            args=(b"\r\n$OLD: URC\r\nOLD_TAIL",),
+            daemon=True,
+        )
+        feeder.start()
+        assert in_handler.wait(5.0)  # 读线程已进入锁外 handler 回调
+
+        # handler 挂起期间：新命令入口 reset（清缓冲/代次+1）并进入等待态
+        box: dict = {}
+
+        def new_cmd() -> None:
+            box["resp"] = conn.send_command("AT+NEW", timeout=2.0)
+
+        t = threading.Thread(target=new_cmd, daemon=True)
+        t.start()
+        for _ in range(400):
+            if conn._awaiting.is_set():  # noqa: SLF001
+                break
+            time.sleep(0.005)
+        assert conn._awaiting.is_set()  # noqa: SLF001
+
+        # 释放 handler：读线程带着陈旧 data/tail 走完空闲截断
+        # （旧实现：self._buffer = bytearray(tail) 无代次校验——半行复活）
+        release.set()
+        feeder.join(timeout=5.0)
+
+        # 新命令的正常响应到达（读线程视角的后续 feed）
+        conn._process_incoming(b"\r\n+NEW: 1\r\nOK\r\n")  # noqa: SLF001
+        t.join(timeout=5.0)
+
+        resp = box["resp"]
+        assert resp is not None
+        assert resp.status is ResponseStatus.COMPLETE
+        # ① 新命令响应文本不含旧 URC 行 / 陈旧 tail 字节
+        assert "$OLD: URC" not in resp.text
+        assert "OLD_TAIL" not in resp.text, "陈旧 tail 复活污染新命令响应（P1-1）"
+        assert "+NEW: 1" in resp.text
+        assert "OK" in resp.text
+        # ② 无陈旧 COMPLETE 遗留入队（send_command 返回后队列为空）
+        assert conn._response_q.qsize() == 0  # noqa: SLF001
+
+
 class TestNormalPathUnaffected:
     """正常路径（无竞态）不受排空影响。"""
 

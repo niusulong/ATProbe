@@ -44,8 +44,10 @@ def _complete(data: bytes) -> RxEvent:
     return RxEvent(kind=RxEventKind.RESPONSE_COMPLETE, data=data)
 
 
-def _wurc(data: bytes) -> RxEvent:
-    return RxEvent(kind=RxEventKind.RESPONSE_URC_TERMINATED, data=data)
+def _wurc(data: bytes, keep: re.Pattern[bytes] | None = None) -> RxEvent:
+    """期望的 wait_urc 终结事件——keep 传注入 assembler 的同一正则对象（Task 4
+    起事件携带 keep_re，re.Pattern 相等性按 identity 比较）."""
+    return RxEvent(kind=RxEventKind.RESPONSE_URC_TERMINATED, data=data, keep_re=keep)
 
 
 def _truncate() -> RxEvent:
@@ -158,7 +160,7 @@ class TestWaitUrcMode:
         # 目标行命中：目标行先派发，随后整段（OK+目标行）交付，buffer 清尾
         assert asm.feed(b"+X: done\r\n") == [
             _urc("+X: done"),
-            _wurc(b"\r\nOK\r\n+X: done\r\n"),
+            _wurc(b"\r\nOK\r\n+X: done\r\n", keep=asm._wait_urc_re),
         ]
         assert asm.has_pending_half_line is False
 
@@ -167,7 +169,7 @@ class TestWaitUrcMode:
         asm = _asm(wait_urc=rb"\+X: done$", waiting=True)
         assert asm.feed(b"\r\n+X: done\r\n") == [
             _urc("+X: done"),
-            _wurc(b"\r\n+X: done\r\n"),
+            _wurc(b"\r\n+X: done\r\n", keep=asm._wait_urc_re),
         ]
 
     def test_non_target_urc_dispatched_and_kept_in_text(self) -> None:
@@ -176,7 +178,7 @@ class TestWaitUrcMode:
         # 非目标行双交付：派发 + 留文本；OK 行跨 chunk 不重复处理
         assert asm.feed(b"OK\r\n+T: v\r\n") == [
             _urc("+T: v"),
-            _wurc(b"+INSERT\r\nOK\r\n+T: v\r\n"),
+            _wurc(b"+INSERT\r\nOK\r\n+T: v\r\n", keep=asm._wait_urc_re),
         ]
 
     def test_echo_line_excluded_in_wait_urc(self) -> None:
@@ -188,9 +190,31 @@ class TestWaitUrcMode:
         asm = _asm(wait_urc=rb"\+X:", waiting=True)
         assert asm.feed(b"+X: hit\r\n$AFTER: u\r\n") == [
             _urc("+X: hit"),
-            _wurc(b"+X: hit\r\n$AFTER: u\r\n"),
+            _wurc(b"+X: hit\r\n$AFTER: u\r\n", keep=asm._wait_urc_re),
             _urc("$AFTER: u"),
         ]
+
+    def test_urc_terminated_event_carries_keep_re(self) -> None:
+        """RESPONSE_URC_TERMINATED 附带 keep_re=注入的 wait_urc 正则（Task 4 接线）.
+
+        连接层锁外分发事件（含用户回调）时经 ev.keep_re 取剥离豁免正则——
+        零读自身 _wait_urc_re（读线程分发/引擎线程 reset 的竞态面消除）。
+        其余事件（含常规终结 COMPLETE）恒 None，与迁移前 keep_re 口径一致。
+        """
+        keep = re.compile(rb"\+X:")
+        asm = _asm(wait_urc=rb"\+X:", waiting=True)
+        events = asm.feed(b"\r\nOK\r\n+X: done\r\n")
+        assert [ev.kind for ev in events] == [
+            RxEventKind.URC_LINE,
+            RxEventKind.RESPONSE_URC_TERMINATED,
+        ]
+        assert events[0].text == "+X: done"
+        assert events[1].data == b"\r\nOK\r\n+X: done\r\n"
+        assert events[1].keep_re is keep  # 注入正则本身（identity）
+        assert events[0].keep_re is None
+        # 常规终结 COMPLETE 不携带（连接层传 None，与迁移前一致）
+        asm2 = _asm(waiting=True)
+        assert asm2.feed(b"\r\nOK\r\n")[0].keep_re is None
 
 
 class TestExpectDetection:

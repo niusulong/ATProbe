@@ -36,6 +36,7 @@ from atprobe.infra.serial.interfaces import (
     URCEvent,
     URCHandler,
 )
+from atprobe.infra.serial.line_assembler import LineAssembler, RxEventKind
 from atprobe.infra.serial.rawlog import RawLogger
 
 try:
@@ -54,11 +55,12 @@ except ImportError:  # pragma: no cover - 仅无 pyserial 时
 # ---------------------------------------------------------------------------
 # 响应完整性判定（§7.5）：收到终结标志或超时
 # ---------------------------------------------------------------------------
-# AT 响应终结标志行：OK / ERROR / +CME ERROR / +CMS ERROR 等（按行匹配）。
-# 注（L3）：仅覆盖 3GPP TS 27.007 的常用结果码。拨号/语音场景的 NO CARRIER /
-# NO DIALTONE / BUSY / NO ANSWER / CONNECT（数据模式）未纳入——这些场景下设备发这些
-# 码后不再发 OK，ATProbe 会等到超时。纯数据/语音测试工具按需扩展此正则。
-_TERMINATOR_RE = re.compile(rb"^(OK|ERROR|\+CME ERROR:.*|\+CMS ERROR:.*)\s*$")
+# AT 响应终结标志行（OK/ERROR/+CME ERROR/+CMS ERROR，按行匹配）的正则与
+# 拆行/分类/终结判定状态机已迁入 LineAssembler（批 2a §3.1，其 _TERMINATOR_RE
+# 为自带副本——不 import connection 避免环）。注（L3）：仅覆盖 3GPP TS 27.007
+# 的常用结果码，拨号/语音场景的 NO CARRIER / NO DIALTONE / BUSY / NO ANSWER /
+# CONNECT 未纳入——这些场景下设备发这些码后不再发 OK，ATProbe 会等到超时；
+# 纯数据/语音测试工具按需扩展该正则。
 
 # URC 行识别：**结构化分类，零前缀知识**（N58 实机验证修订）。
 #
@@ -67,14 +69,15 @@ _TERMINATOR_RE = re.compile(rb"^(OK|ERROR|\+CME ERROR:.*|\+CMS ERROR:.*)\s*$")
 # u-blox/华为 ``^SYSSTAT`` 等）时：等待响应期间到达的行既不派发给订阅者
 # （URC 事件丢失），还可能被并入响应文本（污染字节级断言）。
 #
-# 现改为按「行在交换中的结构位置」分类，对任何前缀成立：
+# 现改为按「行在交换中的结构位置」分类，对任何前缀成立（判定逻辑在
+# LineAssembler.feed，本模块 _process_incoming 只做事件分发）：
 #   1. 空闲（无在途命令）：所有完整非空行都是主动上报——本就无前缀检查；
 #   2. 等待中、终结行之后：命令应答已在 OK/ERROR 结束，其后到达的行结构上
 #      必是主动上报——响应文本精确切到终结行，其余行立即派发（不丢失、不污染）；
 #   3. 等待中、终结行之前：双交付——行既累积进响应文本（可能是命令载荷），
 #      又派发为 URC 事件（可能是插队的主动上报）。仅排除三类结构性非 URC 行：
-#      空行、终结行（_TERMINATOR_RE）、在途命令的回显行（与刚发送的命令
-#      逐字相等，可无前缀识别）。
+#      空行、终结行（line_assembler._TERMINATOR_RE）、在途命令的回显行
+#      （与刚发送的命令逐字相等，可无前缀识别）。
 # 前缀识别从此不参与正确性判定；新增任何厂商前缀无需改代码。
 
 # 迟到响应收割窗口（秒）：send_command 超时后保持等待态的时长，用于静默消费
@@ -110,40 +113,26 @@ class SerialConnection:
 
         # 响应队列：读线程 put 完整响应，send_command get
         self._response_q: queue.Queue[Response] = queue.Queue()
-        # 当前正在累积的响应缓冲（读线程写，send_command 切换时清空）
-        self._buffer = bytearray()
+        # RX 行组装器（批 2a Task 4）：缓冲/已派发偏移/代次/孤儿标记四态收敛
+        # 于此（迁移前为本类的 _buffer/_urc_dispatched/_buffer_generation/
+        # _orphan_pending 字段）。读线程 _process_incoming 持锁 feed，引擎线程
+        # 持锁 reset/snapshot_and_reset——P1-1 三处「锁外派发后回读当前 buffer」
+        # 的交付路径结构性消除（交付一律用 feed 事件携带的快照）。
+        self._assembler = LineAssembler()
         self._buffer_lock = threading.Lock()
         # 标记当前是否在「等待响应」状态
         self._awaiting = threading.Event()
         # 异步指令 URC 等待状态（wait_urc 模式）：非 None 时 OK 不终结，须等匹配此正则的
         # URC 才把整段响应（OK+URC）入队。由 send_command 进入时设置、退出时复位。
-        # 读线程在 _process_incoming 持有 _buffer_lock 时读写，无需额外锁。
+        # 线程语义归本类：每周期经 _sync_cycle_locked 注入 assembler（feed 持锁
+        # 快照使用），终结事件经 RxEvent.keep_re 携带回读——锁外零读。
         self._wait_urc_re: re.Pattern[bytes] | None = None
-        # P1 修复（URC 去重）：等待模式下 buffer 不截断，每个新 chunk 会对全量缓冲
-        # 重新拆行处理——若无状态，历史 URC 行会被逐 chunk 重复派发给订阅者。
-        # 本字段记录「当前 buffer 内已完成拆行处理的字节偏移」，只派发新完成的行；
-        # buffer 被替换/清空的时刻同步归零（响应交付/非等待截断/入口清排/超时清空）。
-        # 与 _buffer 同受 _buffer_lock 保护。
-        self._urc_dispatched = 0
-        # 复审回归修复（offset 竞态）：读线程在锁外拆行/派发（handler 可耗时），
-        # 期间引擎线程可能清空 buffer 并归零 offset（命令切换/超时）——读线程
-        # 回写陈旧偏移会覆盖归零，下一条命令的单 chunk 响应被误判"历史行"跳过
-        # → 假 TIMEOUT。代次计数器：buffer 每次被清/换自增；回写 offset 前校验
-        # 代次未变，变了（buffer 已被引擎重置）则放弃本次回写。
-        self._buffer_generation = 0
 
         # 在途命令的回显行（strip 后的 bytes）：send_command 进入等待时设置、
         # 返回时清除。URC 结构化分类用——与刚发送命令逐字相等的行是回显，
-        # 不派发为 URC 事件（其余行不按前缀过滤，见模块头注释）。与 buffer
-        # 同受 _buffer_lock 保护（send_command 入口设置、读线程快照读取）。
+        # 不派发为 URC 事件（其余行不按前缀过滤，见模块头注释）。线程语义归
+        # 本类，与 _wait_urc_re 同经 _sync_cycle_locked 逐周期注入 assembler。
         self._echo_line: bytes | None = None
-
-        # 孤儿续行丢弃（N58 实测第三类间歇污染）：send_command 入口清空缓冲时，
-        # 若缓冲存在未完结半行（不以 \n 结尾），说明一个在途数据行的前半已被
-        # 清掉——其续行（到下一个 \n 为止）必属命令前数据，不能进入本命令的
-        # 响应文本（残缺行不匹配 urc_filter，行级不可识别）。标记后由读线程
-        # 在字节级静默丢弃该续行。与 _buffer 同受 _buffer_lock 保护。
-        self._orphan_pending = False
 
         # 噪声 URC 过滤（PortConfig.urc_filter 编译产物）：匹配行照常派发给
         # URC 订阅者（不丢失），但会从交付给断言的响应文本中整段剥离（含
@@ -386,7 +375,10 @@ class SerialConnection:
         # 却因 awaiting 未 set 而丢弃断连信号的竞态窗口。先 set 后，读线程的断连路径会
         # 把 ERROR 入队，drain 只会清掉这次命令之前入队的陈旧响应；若 drain 恰好清掉了
         # 刚入队的断连信号也无妨——紧接着 write 会失败或断连会再次触发，最终都能被感知）。
-        self._awaiting.set()
+        # set 与周期参数注入同锁原子——assembler 的 waiting 判定即刻生效。
+        with self._buffer_lock:
+            self._awaiting.set()
+            self._sync_cycle_locked()
         self._drain_response_q()
 
         self._log_tx(payload)
@@ -395,6 +387,8 @@ class SerialConnection:
             self._serial.write(payload)  # type: ignore[union-attr]
             self._serial.flush()  # type: ignore[union-attr]
         except (SerialException, OSError) as exc:
+            # 等待态退出 + wait_urc/echo 复位（_reset_wait_urc 内部持锁同步周期
+            # 参数，覆盖本处全部突变）
             self._awaiting.clear()
             self._reset_wait_urc()
             return Response(
@@ -429,7 +423,9 @@ class SerialConnection:
                 # M1 修复：取消时统一抛 OperationCancelled（与 Fake/vsim 一致），
                 # 上层 step_runner catch 后判 INTERRUPTED，而非旧实现的返回 CANCELLED
                 # Response（被 _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉）。
-                self._awaiting.clear()
+                with self._buffer_lock:
+                    self._awaiting.clear()
+                    self._sync_cycle_locked()
                 self._drain_response_q()
                 raise OperationCancelled("命令等待被取消")
             remaining = deadline - self._clock()
@@ -439,24 +435,28 @@ class SerialConnection:
                 # 回了/确实断了，而非笼统 TIMEOUT）；取不到才走超时。
                 try:
                     resp = self._response_q.get_nowait()
-                    self._awaiting.clear()
+                    with self._buffer_lock:
+                        self._awaiting.clear()
+                        self._sync_cycle_locked()
                     return resp
                 except queue.Empty:
                     break
             try:
                 resp = self._response_q.get(timeout=min(remaining, 0.2))
-                self._awaiting.clear()
+                with self._buffer_lock:
+                    self._awaiting.clear()
+                    self._sync_cycle_locked()
                 return resp
             except queue.Empty:
                 continue
         # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
-        self._awaiting.clear()
         with self._buffer_lock:
-            partial = bytes(self._buffer)
+            self._awaiting.clear()
+            self._sync_cycle_locked()
             # 快照后清缓冲：若存在未完结半行置孤儿标记（收割窗口内到达的
             # 续行由读线程字节级丢弃）
+            partial = self._assembler.snapshot_and_reset()
             keep_re = self._wait_urc_re  # wait_urc 超时：目标行不得被 filter 剥离
-            self._reset_buffer_locked()
         text = self._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
         err = "响应超时" if keep_re is None else "等待 URC 超时"
         # 迟到响应收割（N58 实测 bug 修复）：超时预算小于设备实际响应时延时
@@ -468,11 +468,15 @@ class SerialConnection:
         # 通道干净后再返回 TIMEOUT。窗口取 150ms（覆盖 0.05s 钳位预算 + 设备
         # 典型时延）；期间到达的数据按正常分流（URC 派发/响应入队后丢弃）。
         reap_deadline = self._clock() + _STALE_REAP_GRACE_S
-        self._awaiting.set()
+        with self._buffer_lock:
+            self._awaiting.set()
+            self._sync_cycle_locked()
         try:
             while True:
                 if cancel is not None and cancel.cancelled:
-                    self._awaiting.clear()
+                    with self._buffer_lock:
+                        self._awaiting.clear()
+                        self._sync_cycle_locked()
                     self._drain_response_q()
                     raise OperationCancelled("命令等待被取消")
                 remain = reap_deadline - self._clock()
@@ -485,39 +489,89 @@ class SerialConnection:
                 except queue.Empty:
                     continue
         finally:
-            self._awaiting.clear()
-            self._drain_response_q()
-            # 收割窗口内可能又累积了半行数据（迟到响应的尾巴）：清缓冲，
-            # 避免泄漏给下一条命令（其入口本也会清，此处提前消除）。
             with self._buffer_lock:
+                self._awaiting.clear()
+                self._sync_cycle_locked()
+                # 收割窗口内可能又累积了半行数据（迟到响应的尾巴）：清缓冲，
+                # 避免泄漏给下一条命令（其入口本也会清，此处提前消除）。
                 self._reset_buffer_locked()
+            self._drain_response_q()
         return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
 
     def _reset_buffer_locked(self) -> None:
-        """清空响应缓冲（调用方须已持 _buffer_lock）.
+        """清空响应缓冲（调用方须已持 _buffer_lock）——委托 assembler.reset.
 
-        孤儿续行标记为**赋值语义**（非只置位）：按当前缓冲状态重算——存在
-        未完结半行（不以 \\n 结尾）则 True，否则 False。只置位不清位的旧写法
-        有两个 bug：超时后续行 150ms 内未到时 stale 标记穿过收割尾部与下条
-        命令入口存活，吞掉下一命令响应的首个 \\n（\\r\\nOK\\r\\n 变 OK\\r\\n）；
-        重连路径对死链半行置位后吞掉新会话首行。赋值语义下各调用点天然正确：
-        超时快照（半行尚在缓冲 → True，收割期续行可被丢弃）、收割尾部/入口
-        （缓冲空 → 自动清 stale）、重连（死链半行 → 由 _maybe_reconnect 显式
-        覆写为 False，新会话无续行语义）。
+        孤儿续行标记为**赋值语义**（按当前缓冲状态重算）：迁移前语义逐字
+        等价，赋值语义下各调用点天然正确（超时快照半行置位 / 收割尾部与
+        入口缓冲空自动清 stale / 重连死链半行由 _maybe_reconnect 显式覆写
+        清除）——完整论证见 line_assembler.LineAssembler.reset 注释。
         """
-        self._orphan_pending = bool(self._buffer) and not self._buffer.endswith(b"\n")
-        self._buffer.clear()
-        self._urc_dispatched = 0
-        self._buffer_generation += 1
+        self._assembler.reset()
 
     def _reset_wait_urc(self) -> None:
-        """复位 wait_urc 状态（调用前后保持 _buffer_lock 一致性）.
+        """复位 wait_urc 状态（echo/wait_urc 清除后同步周期参数）.
 
         同时清除回显行——等待窗口结束，后续空闲数据不再需要回显排除。
         """
         with self._buffer_lock:
             self._wait_urc_re = None
             self._echo_line = None
+            self._sync_cycle_locked()
+
+    def _sync_cycle_locked(self) -> None:
+        """把线程语义状态注入 assembler 周期参数（调用方须已持 _buffer_lock）.
+
+        防接线类 bug 的单点（T3 质量审查建议）：_awaiting/_wait_urc_re/
+        _echo_line 的每个写点之后必须调用，否则 assembler 以陈旧周期参数
+        判定后续 chunk。_process_incoming 的 feed 前另有同款注入（读路径
+        每周期快照，等价迁移前在锁内读 _wait_urc_re/_echo_line 的语义）——
+        两者互为防线。expect_re 批 2a Task 5 才接线，本任务恒 None。
+        """
+        self._assembler.set_cycle(
+            waiting=self._awaiting.is_set(),
+            echo_line=self._echo_line,
+            wait_urc_re=self._wait_urc_re,
+            expect_re=None,
+        )
+
+    # ------------------------------------------------------------------
+    # 迁移兼容桥（批 2a Task 4）：迁移前的缓冲族私有字段名（_buffer/
+    # _urc_dispatched/_buffer_generation/_orphan_pending）按属性委托到
+    # assembler——状态单一来源不变。行为锁测试（test_connection_urc_dedup/
+    # structural）直接读写这些名字构造竞态场景；生产代码不得使用（状态操作
+    # 一律经 _reset_buffer_locked/snapshot_and_reset/_process_incoming）。
+    # ------------------------------------------------------------------
+    @property
+    def _buffer(self) -> bytearray:
+        """累积缓冲的活引用（ assembler.buffer 桥接，只读属性）."""
+        return self._assembler.buffer
+
+    @property
+    def _urc_dispatched(self) -> int:
+        """已拆行派发偏移（assembler.dispatched_offset 桥接）."""
+        return self._assembler.dispatched_offset
+
+    @_urc_dispatched.setter
+    def _urc_dispatched(self, value: int) -> None:
+        self._assembler.dispatched_offset = value
+
+    @property
+    def _buffer_generation(self) -> int:
+        """buffer 代次（assembler.generation 桥接）."""
+        return self._assembler.generation
+
+    @_buffer_generation.setter
+    def _buffer_generation(self, value: int) -> None:
+        self._assembler.generation = value
+
+    @property
+    def _orphan_pending(self) -> bool:
+        """孤儿续行标记（assembler.orphan_pending 桥接）."""
+        return self._assembler.orphan_pending
+
+    @_orphan_pending.setter
+    def _orphan_pending(self, value: bool) -> None:
+        self._assembler.orphan_pending = value
 
     def _drain_response_q(self) -> None:
         """排空响应队列残留，防止陈旧响应污染下次命令.
@@ -617,177 +671,41 @@ class SerialConnection:
                 pass
 
     def _process_incoming(self, chunk: bytes) -> None:
-        """处理读到的字节：累积、判定完整性、按**结构位置**分流 URC.
+        """处理读到的字节：驱动 LineAssembler 并按事件分发（语义见模块头注释）.
 
-        P1 修复（URC 去重）：等待响应期间 buffer 不截断（需保留完整文本交付），
-        每个 chunk 都会对全量缓冲重新拆行。用 ``_urc_dispatched`` 记录已完成
-        拆行处理的字节偏移——只对**新完成**的行做 URC 派发，历史行不再重复派发。
-        buffer 被替换/清空时偏移同步归零。
+        P1-1 结构性消除：交付一律用 feed 事件携带的字节快照（由进入 feed 时
+        的缓冲状态派生），buffer 替换/偏移回写/代次推进全部在 assembler 内部
+        （feed 持锁同步）完成——迁移前三处「锁外派发后回读当前 buffer / 以
+        陈旧 tail 覆写」的竞态路径（wait_urc 交付/终结交付/空闲截断）不复
+        存在。事件分发（URC 回调/响应入队）在锁外执行，期间引擎 reset 只
+        影响后续 feed，不影响本次已快照的交付内容。
 
-        URC 分类（零前缀知识，见模块头注释）：
+        URC 分类（零前缀知识，见模块头注释；判定在 assembler）：
           - 空闲：所有完整非空行 = URC；
           - 等待中、终结行之后：必是主动上报——立即派发，不入响应文本；
           - 等待中、终结行之前：双交付（累积进文本 + 派发事件），结构性排除
             空行/终结行/在途命令回显行。
         """
         with self._buffer_lock:
-            # 孤儿续行丢弃：入口清缓冲截断的在途半行，其续行（至下一个 \n 含）
-            # 属命令前数据——字节级静默丢弃，不派发、不累积（残缺行内容不可信，
-            # 如丢失 $M 前缀的 YGPSPOS:...，行级规则无法识别）。
-            if self._orphan_pending and chunk:
-                nl = chunk.find(b"\n")
-                if nl < 0:
-                    return  # 整个 chunk 都是续行内容，继续等行尾
-                chunk = chunk[nl + 1 :]
-                self._orphan_pending = False
-                if not chunk:
-                    return  # 续行恰好在本 chunk 结束，其余处理留给下个 chunk
-            self._buffer.extend(chunk)
-            data = bytes(self._buffer)
-            wait_urc_re = self._wait_urc_re
-            dispatched_offset = self._urc_dispatched
-            generation = self._buffer_generation  # 竞态校验用（见字段注释）
-            echo_line = self._echo_line
-
-        # 按行处理
-        awaiting = self._awaiting.is_set()
-        lines = data.split(b"\n")
-        # 最后一行可能不完整
-        *complete_lines, tail = lines
-
-        # 预计算每个完整行的字节跨度 [start, end)（end 含换行符），
-        # end <= dispatched_offset 的行是历史 chunk 已处理过的，跳过派发。
-        spans: list[tuple[int, int]] = []
-        _pos = 0
-        for _line in complete_lines:
-            spans.append((_pos, _pos + len(_line) + 1))
-            _pos += len(_line) + 1
-
-        def _urc_candidate(stripped: bytes) -> bool:
-            """结构位置排除后的 URC 候选行（无前缀判断）."""
-            if not stripped:
-                return False
-            if _TERMINATOR_RE.match(stripped):
-                return False
-            # 在途命令的回显行（与刚发送命令逐字相等）不是 URC
-            return not (echo_line is not None and stripped == echo_line)
-
-        def _decode(b: bytes) -> str:
-            return b.decode("utf-8", errors="replace")
-
-        # --------------------------------------------------------------
-        # wait_urc 模式（异步指令）：OK 仅受理不终结，须等匹配 wait_urc 正则的
-        # URC 才把整段响应（OK+URC）作为 COMPLETE 入队。
-        # --------------------------------------------------------------
-        if wait_urc_re is not None and awaiting:
-            for mi, (line, (_ls, le)) in enumerate(zip(complete_lines, spans, strict=True)):
-                if le <= dispatched_offset:
-                    continue  # 历史 chunk 已处理过的行（去重）
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                # 目标 URC 匹配：整段响应（含 OK）入队终结。
-                # P1 修复：正则作用在 strip 后的行上——split(b"\n") 保留行尾 \r，
-                # 旧实现用原始行匹配，含 $ 锚点的合法正则（如 \+X:ok$）永不命中。
-                if wait_urc_re.search(stripped):
-                    # URC 行也按常规分流给订阅者（§6.4）
-                    self._dispatch_urc(_decode(stripped))
-                    with self._buffer_lock:
-                        resp_bytes = bytes(self._buffer)
-                        self._buffer = bytearray(tail)
-                        self._urc_dispatched = 0  # buffer 已替换，偏移归零
-                        self._buffer_generation += 1
-                    # wait_urc 优先级规则：目标行是本命令显式声明的期待响应，
-                    # urc_filter 不得剥离（keep_re）——否则「URC 即期待响应」类
-                    # 命令（如 AT$MYGPSPOS=0,1 的 $MYGPSPOS 循环上报）在全局
-                    # filter 配置下永远无法在响应文本中见到自己的目标行。
-                    resp_text = self._strip_filtered_urcs(_decode(resp_bytes), keep_re=wait_urc_re)
-                    self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
-                    # P3 修复：匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们
-                    # 既不在缓冲也未被派发）——按 URC 分流补派发一次。
-                    # 结构位置在目标 URC 之后 → 非空即派发（无前缀判断）。
-                    for rest in complete_lines[mi + 1 :]:
-                        s2 = rest.strip()
-                        if s2:
-                            self._dispatch_urc(_decode(s2))
-                    return
-                # OK/ERROR 等终结行：仅受理不终结，继续等 URC（已累积进 buffer）
-                if _TERMINATOR_RE.match(stripped):
-                    continue
-                # 其它行：可能是插队的 URC（如 $ 前缀厂商上报）也可能是载荷——
-                # 双交付：派发事件 + 留在文本（结构性排除回显/空行/终结行）
-                if _urc_candidate(stripped):
-                    self._dispatch_urc(_decode(stripped))
-            with self._buffer_lock:
-                # 代次校验：锁外派发期间 buffer 若被引擎清/换（命令切换/超时），
-                # 陈旧偏移会覆盖归零 → 下一条命令单 chunk 响应被误判历史行（假超时）
-                if self._buffer_generation == generation:
-                    self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
-            return
-
-        # --------------------------------------------------------------
-        # 常规模式（wait_urc 未启用）：OK 即终结
-        # --------------------------------------------------------------
-        found_terminator = False
-        for line, (_ls, le) in zip(complete_lines, spans, strict=True):
-            if le <= dispatched_offset:
-                continue  # 历史 chunk 已处理过的行（去重；终结判定也无需重做）
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # 等待响应期间，URC 行同时提取（§6.4）。
-            # P1 修复：仅 awaiting 时在此派发——空闲态由下方专门分支统一派发，
-            # 旧实现（含重构前）两个循环都会派发 → 空闲态每条 URC 双派发。
-            # N58 修订：不再按 + 前缀判断——结构位置排除后（空行/终结行/回显）
-            # 均派发，$ 前缀等厂商 URC 不再丢失。
-            if awaiting and _urc_candidate(stripped):
-                self._dispatch_urc(_decode(stripped))
-            if _TERMINATOR_RE.match(stripped) and awaiting:
-                # 响应完整：交付。N58 修复（污染）：响应文本**精确切到终结行**
-                # （含）为止——与终结行同 chunk 到达的后续行是主动上报，立即
-                # 派发（不丢失），不再并入响应文本（不污染严格字节级断言）。
-                with self._buffer_lock:
-                    # 完整响应 = 从缓冲头到该终结行（含）
-                    resp_bytes = bytes(self._buffer[:le])
-                    # 保留终结行之后的数据（tail）作为下一轮缓冲
-                    self._buffer = bytearray(tail)
-                    self._urc_dispatched = 0  # buffer 已替换，偏移归零
-                    self._buffer_generation += 1
-                resp_text = self._strip_filtered_urcs(_decode(resp_bytes))
-                self._response_q.put(Response(text=resp_text, status=ResponseStatus.COMPLETE))
-                found_terminator = True
-                # 终结行之后的完整行：结构位置 = 命令应答已结束 → 必是主动上报，
-                # 立即派发（修复：旧实现把它们并入响应文本，随交付时序污染断言）
-                for rest, (_rls, rle) in zip(complete_lines, spans, strict=True):
-                    if rle <= le:
-                        continue
-                    s2 = rest.strip()
-                    if s2:
-                        self._dispatch_urc(_decode(s2))
-                break
-
-        if not found_terminator:
-            # 非等待响应状态：空闲收到的数据全部按 URC 处理（§6.4 基本策略）
-            if not awaiting:
-                for line, (_ls, le) in zip(complete_lines, spans, strict=True):
-                    if le <= dispatched_offset:
-                        continue
-                    stripped = line.strip()
-                    if stripped:
-                        self._dispatch_urc(_decode(stripped))
-                # 已处理的完整行从 buffer 截断，只保留最后一个不完整行（tail）。
-                # 否则设备持续发 URC/心跳而无人调用 send_command 时，buffer 会无限累积
-                # 所有历史字节，长会话内存缓慢增长甚至 OOM。
-                with self._buffer_lock:
-                    self._buffer = bytearray(tail)
-                    self._urc_dispatched = 0  # buffer 已替换，偏移归零
-                    self._buffer_generation += 1
-            else:
-                # 等待中但未终结：推进已处理偏移（下个 chunk 不再重复派发历史行）。
-                # 代次校验防陈旧回写（见 wait_urc 分支同款注释）
-                with self._buffer_lock:
-                    if self._buffer_generation == generation:
-                        self._urc_dispatched = spans[-1][1] if spans else dispatched_offset
+            # 周期参数注入（set_cycle 契约）：读路径每周期按当前值快照——
+            # 等价迁移前在锁内读 _wait_urc_re/_echo_line 的语义（_awaiting
+            # 旧实现在锁外读，此处更紧）。与各写点的 _sync_cycle_locked
+            # 互为防线。
+            self._sync_cycle_locked()
+            events = self._assembler.feed(chunk)
+        for ev in events:
+            if ev.kind is RxEventKind.URC_LINE:
+                self._dispatch_urc(ev.text)
+            elif ev.kind in (RxEventKind.RESPONSE_COMPLETE, RxEventKind.RESPONSE_URC_TERMINATED):
+                # keep_re 语义保持（迁移前）：URC_TERMINATED（wait_urc 目标行
+                # 命中）保留目标行不被 urc_filter 剥离；常规终结的 COMPLETE
+                # 传 None（原实现如此）。keep_re 由 assembler 从注入参数派生
+                # 附于事件——锁外零读 _wait_urc_re，不引入新竞态面。
+                text = self._strip_filtered_urcs(
+                    ev.data.decode("utf-8", errors="replace"), keep_re=ev.keep_re
+                )
+                self._response_q.put(Response(text=text, status=ResponseStatus.COMPLETE))
+            # TRUNCATED_IDLE：无动作（assembler 已推进状态）
 
     def _strip_filtered_urcs(self, text: str, keep_re: re.Pattern[bytes] | None = None) -> str:
         """从响应文本剥离 urc_filter 匹配的 URC 行（含吸附紧邻空行）.
@@ -902,9 +820,9 @@ class SerialConnection:
             with self._buffer_lock:
                 # 死句柄期间的残留缓冲（半截字节不作数）：清空。死链半行
                 # **不得**置孤儿标记——重开后的首个 chunk 是全新会话数据而非
-                # 死链续行，赋值语义下需显式覆写为 False。
+                # 死链续行，reset 的赋值语义会按半行置位，需显式覆写清除。
                 self._reset_buffer_locked()
-                self._orphan_pending = False
+                self._assembler.orphan_pending = False
             return True
         return False
 

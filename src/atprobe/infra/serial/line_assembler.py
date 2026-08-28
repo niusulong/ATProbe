@@ -40,6 +40,11 @@ class RxEvent:
     kind: RxEventKind
     text: str = ""  # URC_LINE：已解码行文本
     data: bytes = b""  # COMPLETE/URC_TERMINATED：响应原始字节
+    # RESPONSE_URC_TERMINATED 专用：wait_urc 目标正则（从 set_cycle 注入参数
+    # 派生）。连接层分发事件在锁外（含用户回调），不得回读自身 _wait_urc_re
+    # （引擎线程 reset 的竞态面）——剥离豁免正则由事件携带，锁外零读（P1-1
+    # 接线约定）。其余事件类型恒 None。
+    keep_re: re.Pattern[bytes] | None = None
 
 
 class LineAssembler:
@@ -110,6 +115,44 @@ class LineAssembler:
     def generation(self) -> int:
         """buffer 代次：每次清/换自增（调用方据此检测跨调用缓冲重置）."""
         return self._generation
+
+    # ------------------------------------------------------------------
+    # 迁移桥（批 2a Task 4）：迁移前 connection 的缓冲族私有字段
+    # （_buffer/_urc_dispatched/_buffer_generation/_orphan_pending）已收敛到
+    # 本类——行为锁测试（test_connection_urc_dedup/structural）直接读写这些
+    # 状态名，connection 侧以同名属性委托到此处。单一状态源仍在 assembler；
+    # 生产代码的状态操作一律走 reset/snapshot_and_reset/feed，不使用本桥。
+    # ------------------------------------------------------------------
+    @generation.setter
+    def generation(self, value: int) -> None:
+        self._generation = value
+
+    @property
+    def buffer(self) -> bytearray:
+        """累积缓冲的**活引用**（桥接只读；.clear() 等原位操作同步生效）."""
+        return self._buffer
+
+    @property
+    def dispatched_offset(self) -> int:
+        """已拆行派发偏移（原 _urc_dispatched）——桥接读写."""
+        return self._dispatched
+
+    @dispatched_offset.setter
+    def dispatched_offset(self, value: int) -> None:
+        self._dispatched = value
+
+    @property
+    def orphan_pending(self) -> bool:
+        """孤儿续行标记（原 _orphan_pending）——桥接读写.
+
+        生产语义：reset() 按缓冲状态赋值重算；重连路径显式置 False
+        （reset 后覆写——重开会话首行非死链续行，见 connection._maybe_reconnect）。
+        """
+        return self._orphan_pending
+
+    @orphan_pending.setter
+    def orphan_pending(self, value: bool) -> None:
+        self._orphan_pending = value
 
     def snapshot_and_reset(self) -> bytes:
         """超时快照：返回当前缓冲并 reset（供超时交付）.
@@ -249,8 +292,15 @@ class LineAssembler:
                 # 含 $ 锚点的合法正则（如 \+X:ok$）须对 strip 后行匹配。
                 if self._wait_urc_re.search(stripped):
                     _emit_urc(stripped)  # 目标行也按常规分流（§6.4）
-                    # 交付 = 全量缓冲快照（发送起至目标行含，含其间 OK 段）
-                    events.append(RxEvent(kind=RxEventKind.RESPONSE_URC_TERMINATED, data=data))
+                    # 交付 = 全量缓冲快照（发送起至目标行含，含其间 OK 段）；
+                    # keep_re 附带注入的目标正则——连接层锁外分发零读自身状态
+                    events.append(
+                        RxEvent(
+                            kind=RxEventKind.RESPONSE_URC_TERMINATED,
+                            data=data,
+                            keep_re=self._wait_urc_re,
+                        )
+                    )
                     self._complete_through(tail_start, data)
                     # 匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们既不在
                     # 缓冲也未被派发）——按 URC 分流补派发一次。
