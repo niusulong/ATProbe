@@ -168,7 +168,7 @@ class TestEnginePreservesExternalPorts:
             self._connected = True
             self._serial = None
 
-        def _fake_send(self, command, *, timeout=None, wait_urc=None, cancel=None):
+        def _fake_send(self, command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
         with (

@@ -24,5 +24,12 @@ class SendError(SerialError):
         super().__init__(f"端口 {port} 发送失败：{reason}")
 
 
+class PortBusyError(SerialError):
+    """端口命令互斥撞锁（并发发送不支持，P1-3/P1-8）."""
+
+    def __init__(self, port: str, reason: str) -> None:
+        super().__init__(f"[{port}] {reason}")
+
+
 class OperationCancelled(SerialError):
     """阻塞操作被取消（M1 §4.3，stop 触发）."""

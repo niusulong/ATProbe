@@ -180,9 +180,18 @@ class FakePortManager:
         timeout: float | None = None,
         wait_urc: str | None = None,
         cancel: CancelToken | None = None,
+        pre_check: Callable[[], None] | None = None,
     ) -> Response:
+        """发送命令（消费预设脚本）.
+
+        Args:
+            pre_check: 派发前调用的回调（对齐真实 PortManager 透传/连接层锁内执行的
+                契约——Fake 无锁，直调即可）；抛异常则透传、不派发。批 3 MCP 接线用。
+        """
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("FakeSerial 被取消")
+        if pre_check is not None:
+            pre_check()
         self.sent.append((port, command))
         # wait_urc 由测试预设的 Response.text 直接体现（Fake 不做真实读线程/终结判定），
         # 这里仅记录，便于测试断言调用方确实启用了 URC 等待模式。

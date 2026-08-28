@@ -181,9 +181,10 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         """发送命令并等待响应（含断连重发，§4.2）.
 
         Args:
-            pre_check: 获连接后、每次实际发送前调用的回调；抛异常则透传、不发送。
-                供上层（MCP）做锁内占用重检，消除 check-then-act TOCTOU
-                （批 3 接线，本批留接口）。
+            pre_check: 透传给 SerialConnection.send_command——获**命令锁后**、状态突变
+                前调用（设计 §3.2"锁内重检"），供上层（MCP）做占用重检，消除
+                check-then-act TOCTOU（批 3 接线，本批留接口）。每次实际发送
+                （含断连重发）前各执行一次，抛异常则透传、不发送。
         """
         conn = self._connections.get(port)
         if conn is None:
@@ -199,19 +200,18 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
                     error_kind=ERROR_KIND_DISCONNECT,
                 )
 
-        # pre_check：获连接后、发送前调用——供上层（MCP）做锁内占用重检，
-        # 消除 check-then-act TOCTOU（批 3 接线，本批留接口）。
-        if pre_check is not None:
-            pre_check()
-        resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
+        # pre_check 经连接层在命令锁内执行（非此处直调——锁外重检存在 TOCTOU 窗口）
+        resp = conn.send_command(
+            command, timeout=timeout, wait_urc=wait_urc, cancel=cancel, pre_check=pre_check
+        )
         # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）。
         # M3 修复：基于结构化 error_kind 判定，而非脆弱的中文字符串匹配。
         if resp.status is ResponseStatus.ERROR and resp.error_kind == ERROR_KIND_DISCONNECT:
             if self._reconnect(port):
-                # 重发前同样过 pre_check：重连窗口内占用状态可能变化（TOCTOU 同源）
-                if pre_check is not None:
-                    pre_check()
-                resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
+                # 重发同样透传 pre_check：重连窗口内占用状态可能变化（TOCTOU 同源）
+                resp = conn.send_command(
+                    command, timeout=timeout, wait_urc=wait_urc, cancel=cancel, pre_check=pre_check
+                )
         return resp
 
     # ------------------------------------------------------------------

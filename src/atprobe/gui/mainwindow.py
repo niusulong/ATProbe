@@ -37,7 +37,7 @@ from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig, Terminator
-from atprobe.infra.serial.exceptions import PortOpenError
+from atprobe.infra.serial.exceptions import PortBusyError, PortOpenError
 from atprobe.infra.serial.interfaces import CancelToken
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.rawlog import RawLogger
@@ -673,6 +673,11 @@ class MainWindow(QMainWindow):
         try:
             self._port_manager.write_command(port, command, terminator=terminator)
             return True
+        except PortBusyError:
+            # P1-3 命令锁撞锁（连接层快速失败）：并发发送周期（引擎命令/批 2b 数据
+            # 发送周期）持锁时 write_command 抛出——友好提示而非通用错误框。
+            QMessageBox.information(self, "端口忙", "另一发送周期进行中(如引擎命令),请稍候再发送")
+            return False
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "发送错误", f"发送失败：{exc}")
             return False

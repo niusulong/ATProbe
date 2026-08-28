@@ -36,7 +36,7 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         captured: dict = {}
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None):
+        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
             captured["wait_urc"] = wait_urc
             captured["command"] = command
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
@@ -53,7 +53,7 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         captured: dict = {}
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None):
+        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
             captured["wait_urc"] = wait_urc
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
@@ -72,7 +72,7 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         calls: list[dict] = []
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None):
+        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
             calls.append({"wait_urc": wait_urc, "is_disconnect_error": False})
             if len(calls) == 1:
                 # 首次返回断连 ERROR，触发 PortManager 重连重发

@@ -79,11 +79,16 @@ class VsimPortManager(FakePortManager):
         timeout: float | None = None,
         wait_urc: str | None = None,
         cancel: CancelToken | None = None,
+        pre_check: Callable[[], None] | None = None,
     ) -> Response:
+        # pre_check：派发前调用（对齐真实 PortManager 透传/连接层锁内执行契约，
+        # Vsim 无锁直调；批 3 MCP 接线用，防传参 TypeError）
         if cancel is not None and cancel.cancelled:
             from atprobe.infra.serial.exceptions import OperationCancelled
 
             raise OperationCancelled("Vsim 被取消")
+        if pre_check is not None:
+            pre_check()
         self.sent.append((port, command))
         # wait_urc 由 AtResponder 生成的响应文本体现，此处仅接受以保持接口一致
         _ = wait_urc
