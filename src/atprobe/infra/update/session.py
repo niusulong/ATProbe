@@ -66,6 +66,13 @@ class UpdateSession:
             DownloadError: 下载失败 / 校验失败 / 签名验证失败 / 公钥缺失。
         """
         filename = self.config.asset_name_for(info.version)
+        # 公钥可用性是本地 FS 查询——有签名资产而本版本无公钥时，在下整包之前
+        # 快速失败（T5 审查修复：避免白下 80MB 后才拒绝，zip 残留盘上）
+        pubkey = public_key_path() if info.minisig_url is not None else None
+        if info.minisig_url is not None and pubkey is None:
+            raise DownloadError(
+                "远端已启用签名校验但本版本未内置验签公钥（请从 GitHub Release 页手动下载核对）"
+            )
         zip_path = self.dest_dir / filename
         zip_path.unlink(missing_ok=True)
         result = download(
@@ -83,11 +90,7 @@ class UpdateSession:
             # 过渡期旧 Release：无签名资产，维持仅 SHA256 校验
             return result
 
-        pubkey = public_key_path()
-        if pubkey is None:
-            raise DownloadError(
-                "远端已启用签名校验但本版本未内置验签公钥（请从 GitHub Release 页手动下载核对）"
-            )
+        assert pubkey is not None  # 上方已拒绝无公钥场景（mypy 收窄）
         sig_name = filename + ".minisig"
         (self.dest_dir / sig_name).unlink(missing_ok=True)
         # sig 走同一 downloader（白名单/https 校验复用）；几十字节，不透传进度/取消

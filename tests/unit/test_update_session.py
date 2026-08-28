@@ -170,16 +170,20 @@ def test_sig_state1_tampered_zip_rejected(tmp_path: Path) -> None:
 
 
 def test_sig_state2_no_pubkey_blocked(tmp_path: Path) -> None:
-    """②minisig_url 而 public_key_path()=None：拒绝自动安装（防降级攻击面）。"""
-    fake = _FakeDownloader({_ZIP_URL: b"zip payload"})
+    """②minisig_url 而 public_key_path()=None：拒绝自动下载与安装（防降级攻击面）。
+
+    T5 审查修复后：公钥可用性是本地查询——在下整包**之前**快速失败（0 次网络
+    下载，不白下 80MB 后才拒绝）。
+    """
+    fake = _FakeDownloader({_ZIP_URL: b"zip payload", _SIG_URL: b"sig"})
     with (
         patch("atprobe.infra.update.session.download", fake),
         patch("atprobe.infra.update.session.public_key_path", return_value=None),
     ):
         with pytest.raises(DownloadError, match="未内置验签公钥"):
             UpdateSession(dest_dir=tmp_path).download(_info(minisig_url=_SIG_URL))
-    # 只下了 zip（1 次调用），未尝试下 sig
-    assert len(fake.calls) == 1
+    # 快速失败：zip 与 sig 均未下载
+    assert len(fake.calls) == 0
 
 
 def test_sig_state3_no_sig_url_keeps_sha256_only(tmp_path: Path) -> None:
