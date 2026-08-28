@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import uuid
 from collections import deque
 from typing import Any
@@ -25,6 +26,11 @@ from atprobe.infra.serial.interfaces import URCEvent
 from atprobe.mcp.errors import invalid_input, not_found
 
 DEFAULT_BUFFER_SIZE = 500
+# 订阅数上限（Pf-4，设计 §4.8）：LLM 循环 subscribe 不退订是常见模式，注册表
+# 只增不减会让 feed() 快照遍历越来越长；超限拒绝并提示先 unsubscribe。
+MAX_SUBSCRIPTIONS = 256
+# 超过该秒数未 poll 的订阅视为陈旧，可被惰性清理（30 分钟）。
+STALE_SUBSCRIPTION_S = 1800.0
 
 
 class _Subscription:
@@ -38,6 +44,8 @@ class _Subscription:
         self.events: deque[tuple[int, str, str]] = deque(maxlen=size)
         self.seq = 0  # 订阅内单调递增事件序号（不回绕）
         self.lock = threading.Lock()
+        # 最近一次 poll 的单调时钟：subscribe 时初始化，poll 时刷新（含空页）
+        self.last_poll: float = time.monotonic()
 
 
 class UrcRegistry:
@@ -47,14 +55,34 @@ class UrcRegistry:
         self._subs: dict[str, _Subscription] = {}
         self._buffer_size = buffer_size
 
+    def _gc_stale(self) -> None:
+        """惰性清理超时未轮询的订阅（subscribe/poll 入口调用，feed 不调用）.
+
+        被清理订阅后续 poll 得 NOT_FOUND——与显式退订同语义。仅删 ``_subs``
+        条目；PortManager 层按端口开启的 URC 转发不受影响（转发随 close_port
+        拆除）。纯 dict 操作，GIL 原子性同既有锁策略；遍历前取 ``tuple``
+        快照，避免并发 subscribe/unsubscribe 触发迭代期间字典变更。
+        """
+        now = time.monotonic()
+        stale = [
+            sid
+            for sid, sub in tuple(self._subs.items())
+            if now - sub.last_poll > STALE_SUBSCRIPTION_S
+        ]
+        for sid in stale:
+            self._subs.pop(sid, None)
+
     def subscribe(self, port: str, pattern: str | None) -> str:
-        """注册订阅，返回 sub_id；pattern 非法抛 INVALID_INPUT."""
+        """注册订阅，返回 sub_id；pattern 非法或超订阅上限抛 INVALID_INPUT."""
         compiled: re.Pattern[str] | None = None
         if pattern:
             try:
                 compiled = re.compile(pattern)
             except re.error as exc:
                 raise invalid_input(f"URC 过滤正则无效：{exc}", pattern=pattern) from exc
+        self._gc_stale()  # 先清理再查上限：惰性清出的名额可用
+        if len(self._subs) >= MAX_SUBSCRIPTIONS:
+            raise invalid_input(f"URC 订阅数超上限（{MAX_SUBSCRIPTIONS}），请先 unsubscribe 释放")
         sub_id = uuid.uuid4().hex[:12]
         self._subs[sub_id] = _Subscription(sub_id, port, compiled, self._buffer_size)
         return sub_id
@@ -80,6 +108,7 @@ class UrcRegistry:
 
     def poll(self, sub_id: str, cursor: int = 0, limit: int = 100) -> dict[str, Any]:
         """按游标增量拉取；订阅不存在抛 NOT_FOUND."""
+        self._gc_stale()
         sub = self._subs.get(sub_id)
         if sub is None:
             raise not_found(f"订阅不存在或已退订：{sub_id}")
@@ -91,6 +120,8 @@ class UrcRegistry:
             page = items[:limit]
             # 空页：无新事件可推进，游标保持调用值不变（调用方下次再轮询）
             next_cursor = page[-1][0] if page else cursor
+            # 空页也算"轮询过"：刷新活跃时间戳，防活跃订阅被惰性清理
+            sub.last_poll = time.monotonic()
         return {
             "events": [{"seq": s, "timestamp": ts, "text": text} for (s, ts, text) in page],
             "next_cursor": next_cursor,
