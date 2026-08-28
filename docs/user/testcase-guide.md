@@ -214,6 +214,24 @@ steps:
 - command: 'AT+TCPSETUP=0,{{tcp.host}},{{tcp.port}}'
 ```
 
+**内置模板函数 `{{file_size("路径")}}`**（v0.10+）：渲染为指定文件的**字节数**，
+专为两阶段发送的"指令声明长度 = 数据长度"场景设计（如 `AT+FSWF` / `AT+TCPSEND`）：
+
+```yaml
+- command: 'AT+FSWF="test.txt",0,{{file_size("./fs_payload.bin")}},10000'
+  expect: '
+>'
+- data: { file: ./fs_payload.bin }
+```
+
+- 参数必须是**引号包裹的字面量路径**（单/双引号均可；不支持变量引用——变量请写在
+  引号外由外层占位符承担）；`./` 相对**用例文件所在目录**；
+- **路径信任边界（S-8）**：`data.file` 与 `file_size()` 的渲染后路径必须落在
+  「用例文件所在目录 ∪ cases_dir ∪ mcp.allowed_roots」内，越界报错——不可信
+  用例不能借 data 步骤读取任意路径文件；
+- `file_size("")` 会取**用例目录本身**的尺寸（语义怪异，无遍历风险）——参数
+  必须指向具体文件。
+
 ### 5.3 内置变量
 
 每步执行开头自动注入：

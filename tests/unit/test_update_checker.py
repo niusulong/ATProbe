@@ -17,7 +17,7 @@ def _github_response(tag: str = "v0.3.0", *, with_asset: bool = True) -> bytes:
     ver = tag.lstrip("v")
     asset = {
         "name": f"ATProbe-{ver}-win64.zip",
-        "browser_download_url": f"https://example.com/ATProbe-{ver}-win64.zip",
+        "browser_download_url": f"https://github.com/niusulong/ATProbe/releases/download/v{ver}/ATProbe-{ver}-win64.zip",
         "size": 83558400,
     }
     body = {
@@ -56,7 +56,10 @@ def test_fetch_latest_parses_release() -> None:
         info = fetch_latest()
     assert info.version == "0.3.0"
     assert info.tag == "v0.3.0"
-    assert info.zip_url == "https://example.com/ATProbe-0.3.0-win64.zip"
+    assert (
+        info.zip_url
+        == "https://github.com/niusulong/ATProbe/releases/download/v0.3.0/ATProbe-0.3.0-win64.zip"
+    )
     assert info.zip_size == 83558400
     assert "修复 X" in info.release_notes
     assert info.html_url.endswith("v0.3.0")
@@ -108,12 +111,12 @@ def _github_response_with_sha256(tag: str = "v0.3.0", sha: str = "abc123") -> by
         "assets": [
             {
                 "name": zip_name,
-                "browser_download_url": f"https://example.com/{zip_name}",
+                "browser_download_url": f"https://github.com/niusulong/ATProbe/releases/download/{tag}/{zip_name}",
                 "size": 83558400,
             },
             {
                 "name": f"{zip_name}.sha256",
-                "browser_download_url": f"https://example.com/{zip_name}.sha256",
+                "browser_download_url": f"https://github.com/niusulong/ATProbe/releases/download/{tag}/{zip_name}.sha256",
                 "size": 95,
             },
         ],
@@ -130,7 +133,20 @@ def test_fetch_latest_parses_sha256() -> None:
     )
     sha_resp = _FakeResp(sha_content)
     responses = iter([release_resp, sha_resp])
-    with patch("urllib.request.urlopen", side_effect=lambda *a, **k: next(responses)):
+
+    class _SeqOpener:
+        def open(self, req: object, timeout: float | None = None) -> _FakeResp:
+            return next(responses)
+
+    # 批 4 终审 Minor：sha 拉取改走 S-5 体系（_validate_url + _build_opener），
+    # patch 目标随迁——第一次 open 是 Release API，第二次是 .sha256 资产
+    with (
+        patch("urllib.request.urlopen", side_effect=lambda *a, **k: next(responses)),
+        patch(
+            "atprobe.infra.update.downloader._build_opener",
+            return_value=_SeqOpener(),
+        ),
+    ):
         info = fetch_latest()
     assert info.sha256 == "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
@@ -163,7 +179,7 @@ def _github_response_with_minisig(tag: str = "v0.3.0", *, with_minisig: bool = T
     assets: list[dict[str, object]] = [
         {
             "name": zip_name,
-            "browser_download_url": f"https://example.com/{zip_name}",
+            "browser_download_url": f"https://github.com/niusulong/ATProbe/releases/download/{tag}/{zip_name}",
             "size": 83558400,
         }
     ]
@@ -171,7 +187,7 @@ def _github_response_with_minisig(tag: str = "v0.3.0", *, with_minisig: bool = T
         assets.append(
             {
                 "name": f"{zip_name}.minisig",
-                "browser_download_url": f"https://example.com/{zip_name}.minisig",
+                "browser_download_url": f"https://github.com/niusulong/ATProbe/releases/download/{tag}/{zip_name}.minisig",
                 "size": 217,
             }
         )
@@ -189,7 +205,10 @@ def test_fetch_latest_parses_minisig_url() -> None:
     resp = _FakeResp(_github_response_with_minisig("v0.3.0", with_minisig=True))
     with patch("urllib.request.urlopen", return_value=resp) as mock_open:
         info = fetch_latest()
-    assert info.minisig_url == "https://example.com/ATProbe-0.3.0-win64.zip.minisig"
+    assert (
+        info.minisig_url
+        == "https://github.com/niusulong/ATProbe/releases/download/v0.3.0/ATProbe-0.3.0-win64.zip.minisig"
+    )
     # 只取 URL 不触网下载（整个检查流程仅 1 次 API 请求，无 sha256 asset 时无第二次）
     assert mock_open.call_count == 1
 

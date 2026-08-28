@@ -128,13 +128,22 @@ def _parse_release_inner(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo
 
 
 def _fetch_sha256(url: str, cfg: UpdateConfig) -> str | None:
-    """下载 .sha256 文件并解析出摘要（小文件，失败返回 None 降级）."""
+    """下载 .sha256 文件并解析出摘要（小文件，失败返回 None 降级）.
+
+    批 4 终审 Minor：与主 zip 同走 S-5 体系（https 强制 + host 白名单 +
+    重定向复检的 opener）——此前裸 urlopen 是更新链上唯一绕开校验的触网点。
+    校验失败（DownloadError）与网络失败同口径降级为 None。
+    """
+    from atprobe.infra.update import DownloadError
+    from atprobe.infra.update.downloader import _build_opener, _validate_url
+
     req = urllib.request.Request(url, headers={"User-Agent": f"ATProbe/{current_version()}"})
     to = cfg.check_timeout
     try:
-        with urllib.request.urlopen(req, timeout=to) as resp:  # noqa: S310
+        _validate_url(url, cfg)
+        with _build_opener(cfg).open(req, timeout=to) as resp:
             raw = resp.read(256)  # sha256 摘要 64 hex 字符，读 256 字节足够
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (DownloadError, urllib.error.URLError, TimeoutError, OSError):
         return None
     # .sha256 文件格式："<64位hex>  <filename>" 或纯摘要。取首段 hex。
     text = raw.decode("utf-8", errors="replace").strip()

@@ -27,6 +27,7 @@ from typing import Any
 from atprobe.domain.case.datasource import DataPathError, data_roots, ensure_within
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import CaseParseError
+from atprobe.domain.case.redos import check_pattern
 from atprobe.domain.suite import SuiteParseError
 from atprobe.domain.suite.collect import (
     Collected,
@@ -399,6 +400,14 @@ class McpService:
                 re.compile(wait_urc.encode("utf-8"))
             except re.error as exc:
                 raise invalid_input(f"wait_urc 正则无效：{exc}", port=port) from exc
+            # S-2（批 4 终审 Important）：wait_urc 在串口读线程对每条设备行逐行
+            # search，与 urc_filter 同构——嵌套量词硬拒（对齐 urcbuffer.subscribe）
+            hard, _warns = check_pattern(wait_urc)
+            if hard is not None:
+                raise invalid_input(
+                    f"wait_urc 正则存在灾难性回溯风险（{hard}）——请改写为非嵌套量词形式",
+                    port=port,
+                )
 
         def _reject_if_running() -> None:
             # 连接命令锁内重检（设计 §3.2）：锁外预查与发送之间存在作业启动窗口

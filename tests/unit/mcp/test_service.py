@@ -782,3 +782,16 @@ def test_job_traffic_also_in_manual_log(tmp_path):
     assert "[TX] AT" in manual  # 作业期间的引擎流量也进 manual 会话
     # 用例级日志同样完整（两条通道各自成篇，互不替代）
     assert (tmp_path / "logs" / job_id / VSIM_PORT / "mini.text.log").exists()
+
+
+def test_send_at_wait_urc_redos_rejected(tmp_path):
+    """批 4 终审 Important：send_at 的 wait_urc 嵌套量词硬拒（对齐 urcbuffer/模型层）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    with pytest.raises(McpError) as ei:
+        svc.send_at(VSIM_PORT, "AT", wait_urc=r"(a+)+$")
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "灾难性回溯" in str(ei.value)
+    # 合法 wait_urc 不受影响
+    resp = svc.send_at(VSIM_PORT, "AT", wait_urc=r"\+CSQ: \d+")
+    assert resp["status"] == "complete"

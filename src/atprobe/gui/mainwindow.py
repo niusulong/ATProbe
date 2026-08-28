@@ -736,6 +736,12 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         try:
+            # 批 4 终审 Minor：停掉用例加载的分片定时器——下方引擎等待循环的
+            # processEvents 会继续伺服它，关闭期间不应再解析文件/弹解析失败框
+            case_tab = self._find_tab("case_execute")
+            abort_load = getattr(case_tab, "abort_pending_load", None)
+            if callable(abort_load):
+                abort_load()
             # 先停引擎（若在跑），避免引擎线程操作已关闭的串口
             self.stop_engine()
             # P3 修复：等待引擎线程退出（旧实现只置停止标志，窗口销毁后引擎可能

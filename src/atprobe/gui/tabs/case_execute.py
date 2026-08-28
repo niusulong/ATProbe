@@ -258,6 +258,13 @@ class CaseExecuteWidget(QWidget):
             self._load_timer.timeout.connect(self._load_step)
         self._load_timer.start()
 
+    def abort_pending_load(self) -> None:
+        """中止未完成的分片解析（窗口关闭时提前调用——批 4 终审 Minor：closeEvent
+        的引擎等待循环会继续伺服本定时器，期间不应再解析/弹解析失败框）。"""
+        self._load_seq += 1  # 使在途回调的 seq 过期
+        if self._load_timer is not None:
+            self._load_timer.stop()
+
     def _load_step(self) -> None:
         """分片解析一步（主线程 QTimer 回调）：预算内尽量多解析，完毕应用。"""
         if self._load_timer is None:
