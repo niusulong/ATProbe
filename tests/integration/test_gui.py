@@ -9,6 +9,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# 带后台 worker 的用例创建的 Qt 对象保活表：防止 GC 在工作线程回收已弃用的
+# QObject（C++ 对象非主线程析构 → 原生崩溃）。仅测试用，进程退出统一释放。
+_KEEP_ALIVE: list[object] = []
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -525,14 +529,29 @@ class TestCaseExecuteExtras:
     """B2：目录层级树、标签筛选、dry-run、报告开关、_selected_files 正确性."""
 
     @staticmethod
+    def _wait_cases_applied(widget, timeout: float = 5.0) -> None:  # noqa: ANN001
+        """等待后台解析批次应用（Pf-3：_load_path 移 worker，经信号回主线程）."""
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        target = widget._load_seq  # noqa: SLF001
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and widget._applied_seq < target:  # noqa: SLF001
+            QApplication.processEvents()
+            time.sleep(0.01)
+        assert widget._applied_seq >= target, "用例目录后台解析未在超时内完成"  # noqa: SLF001
+
+    @staticmethod
     def _count_leaves(widget) -> int:  # noqa: ANN001
-        """递归统计树中用例叶子数."""
+        """递归统计树中**可见**用例叶子数（Pf-2 增量过滤：被隐藏 = 被过滤）."""
         count = 0
 
         def walk(item) -> None:  # noqa: ANN001
             nonlocal count
             if item.childCount() == 0:
-                count += 1
+                if not item.isHidden():
+                    count += 1
                 return
             for i in range(item.childCount()):
                 walk(item.child(i))
@@ -543,11 +562,13 @@ class TestCaseExecuteExtras:
 
     @staticmethod
     def _first_leaf_name(widget) -> str | None:  # noqa: ANN001
-        """取树中第一个用例叶子的用例名（第 0 列文本）."""
+        """取树中第一个**可见**用例叶子的用例名（第 0 列文本）."""
 
         def walk(item):  # noqa: ANN001
             if item.childCount() == 0:
-                return item.text(0)
+                if not item.isHidden():
+                    return item.text(0)
+                return None
             for i in range(item.childCount()):
                 r = walk(item.child(i))
                 if r is not None:
@@ -603,6 +624,7 @@ class TestCaseExecuteExtras:
         main = _Main()
         widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), main)  # type: ignore[arg-type]
         widget._load_path(tmp_path)  # noqa: SLF001
+        self._wait_cases_applied(widget)  # Pf-3：解析在后台 worker，等批次应用
 
         # 标签聚合：下拉应含 network、sms、tcp
         tag_items = [widget.tag_combo.itemText(i) for i in range(widget.tag_combo.count())]
@@ -639,6 +661,150 @@ class TestCaseExecuteExtras:
         widget.report_check.setChecked(False)
         widget._run()  # noqa: SLF001
         assert run_calls[-1]["no_report"] is True
+
+
+class _CaseMain:
+    """case_execute 测试用的最小主窗口替身（端口 + run_cases 记录）."""
+
+    def __init__(self) -> None:  # noqa: D107
+        import PySide6.QtWidgets as _qw
+
+        self.tabs = _qw.QTabWidget()
+        self.run_calls: list[dict] = []
+
+    def available_ports(self) -> list[str]:
+        return ["COM3"]
+
+    def run_cases(self, files, port, threshold, *, dry_run=False, no_report=False):  # noqa: ANN001
+        self.run_calls.append({"files": list(files), "dry_run": dry_run, "no_report": no_report})
+
+
+def _write_case_cases(tmp_path) -> None:  # noqa: ANN001
+    """写 3 个用例：根目录 2 个（network/sms 标签）+ tcp/ 子目录 1 个."""
+    (tmp_path / "net.yaml").write_text(
+        "name: 网络用例\ntags: [network]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sms.yaml").write_text(
+        "name: 短信用例\ntags: [sms]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tcp").mkdir()
+    (tmp_path / "tcp" / "t1.yaml").write_text(
+        "name: TCP用例\ntags: [tcp]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+        encoding="utf-8",
+    )
+
+
+def _collect_leaves(widget) -> list:  # noqa: ANN001
+    """收集树的全部叶子 item 对象（按序）——用于断言过滤前后树未重建（对象同一）。"""
+
+    def walk(item, out):  # noqa: ANN001
+        if item.childCount() == 0:
+            out.append(item)
+            return
+        for i in range(item.childCount()):
+            walk(item.child(i), out)
+
+    out: list = []
+    for i in range(widget.tree.topLevelItemCount()):
+        walk(widget.tree.topLevelItem(i), out)
+    return out
+
+
+class TestCaseExecuteSearchDebounce:
+    """Pf-2：搜索防抖（300ms 单发）+ 增量过滤（setHidden，不重建树）。"""
+
+    def _make_widget(self, tmp_path):  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.tabs.case_execute import CaseExecuteWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        _write_case_cases(tmp_path)
+        widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), _CaseMain())  # type: ignore[arg-type]
+        widget._load_path(tmp_path)  # noqa: SLF001
+        TestCaseExecuteExtras._wait_cases_applied(widget)
+        return widget
+
+    def test_debounce_wiring(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        widget = self._make_widget(tmp_path)
+        # 防抖参数：300ms 单发
+        assert widget._debounce.interval() == 300  # noqa: SLF001
+        assert widget._debounce.isSingleShot()  # noqa: SLF001
+
+        # textChanged → 只启动防抖定时器，_filter 不立即执行（树未过滤）
+        widget.search_edit.setText("网络")
+        assert widget._debounce.isActive()  # noqa: SLF001
+        visible = [it for it in _collect_leaves(widget) if not it.isHidden()]
+        assert len(visible) == 3  # 防抖期内全部可见
+
+        # 模拟 300ms 到期（无事件循环环境直接触发防抖目标）
+        widget._filter()  # noqa: SLF001
+        visible = [it for it in _collect_leaves(widget) if not it.isHidden()]
+        assert len(visible) == 1
+        assert visible[0].text(0) == "网络用例"
+
+    def test_incremental_filter_keeps_tree_objects(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """增量过滤：树不重建（叶子对象同一），清空搜索后全恢复。"""
+        widget = self._make_widget(tmp_path)
+        leaves_before = _collect_leaves(widget)
+        assert len(leaves_before) == 3
+
+        widget.search_edit.setText("sms")
+        widget._filter()  # noqa: SLF001
+        leaves_after = _collect_leaves(widget)
+        # 同一批 item 对象（重建会生成新对象）——树保留
+        assert leaves_after == leaves_before
+        visible = [it for it in leaves_after if not it.isHidden()]
+        assert len(visible) == 1 and visible[0].text(0) == "短信用例"
+
+        # 清空搜索 → 全部恢复可见
+        widget.search_edit.setText("")
+        widget._filter()  # noqa: SLF001
+        assert all(not it.isHidden() for it in _collect_leaves(widget))
+
+    def test_hidden_cases_excluded_from_selection_and_checkstate_kept(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """过滤隐藏的用例不参与执行（与旧重建语义等价）；勾选态跨过滤保留。"""
+        from PySide6.QtCore import Qt
+
+        widget = self._make_widget(tmp_path)
+        net_leaf = next(it for it in _collect_leaves(widget) if it.text(0) == "网络用例")
+        net_leaf.setCheckState(0, Qt.CheckState.Unchecked)  # 只取消网络用例
+        before = set(widget._selected_files())  # noqa: SLF001
+
+        widget.search_edit.setText("网络")
+        widget._filter()  # noqa: SLF001
+        # 只显示网络用例，但它未勾选 → 无可执行项
+        assert widget._selected_files() == []  # noqa: SLF001
+
+        # 清空过滤：勾选态保留（重建语义会重置为全选）
+        widget.search_edit.setText("")
+        widget._filter()  # noqa: SLF001
+        assert set(widget._selected_files()) == before  # noqa: SLF001
+
+    def test_load_path_stale_batch_dropped(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Pf-3：连续加载两批 → 旧 worker 的迟到结果不覆盖新批次。"""
+        from atprobe.gui.tabs.case_execute import CaseExecuteWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        dir1 = tmp_path / "d1"
+        dir2 = tmp_path / "d2"
+        dir1.mkdir()
+        dir2.mkdir()
+        (dir1 / "a.yaml").write_text(
+            "name: 甲用例\ntags: [t1]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        (dir2 / "b.yaml").write_text(
+            "name: 乙用例\ntags: [t2]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), _CaseMain())  # type: ignore[arg-type]
+        widget._load_path(dir1)  # noqa: SLF001
+        widget._load_path(dir2)  # noqa: SLF001
+        TestCaseExecuteExtras._wait_cases_applied(widget)
+        # 只应用第二批（无论两个 worker 的完成顺序如何）
+        names = [c[0] for c in widget._cases]  # noqa: SLF001
+        assert names == ["乙用例"]
 
 
 class _FakeMain:
@@ -838,7 +1004,9 @@ class TestManualDebugPortControl:
 
         # 模拟模块回包（读线程上下文）→ 经信号到主线程渲染
         main.emit_rx("COM1", b"+CSQ: 23,99\r\n")
-        # emit 在测试线程（非读线程）触发信号；Qt 信号默认直连主线程槽
+        # emit 在测试线程（非读线程）触发信号；Qt 信号默认直连主线程槽。
+        # Pf-1：RX 流式路径经 RxConsole 缓冲（200ms 批量上屏）——显式 flush 后再断言
+        widget._rx_console.flush()  # noqa: SLF001
         text = widget.response_view.toPlainText()
         assert "+CSQ: 23,99" in text
 
@@ -861,6 +1029,7 @@ class TestManualDebugPortControl:
         widget._toggle_connect()  # noqa: SLF001
 
         main.emit_rx("COM1", b"AT\r\r\n+CSQ: 12,99\r\n\r\nOK\r\n")
+        widget._rx_console.flush()  # noqa: SLF001 —— Pf-1 批量渲染，显式冲刷后断言
         text = widget.response_view.toPlainText()
         # 不应出现转义字样
         assert r"\r" not in text, f"文本模式不应显示 \\r 转义: {text!r}"
@@ -1155,6 +1324,7 @@ class TestManualDebugStripped:
         widget._toggle_connect()  # noqa: SLF001
         widget.hex_check.setChecked(True)
         main.emit_rx("COM1", b"OK\r\n")
+        widget._rx_console.flush()  # noqa: SLF001 —— Pf-1 批量渲染，显式冲刷后断言
         assert "4F 4B" in widget.response_view.toPlainText()
 
 
@@ -1214,7 +1384,8 @@ class TestManualDebugFileSendCard:
 
         assert main.file_sent_event.is_set()
         assert main.last_bytes == ("COM1", b"\x01\x02\x03\x04")
-        # TX 原始数据应上屏（响应区含 TX 标记）
+        # TX 原始数据应上屏（响应区含 TX 标记）；Pf-1 经 RxConsole 批量，先冲刷
+        widget._rx_console.flush()  # noqa: SLF001
         text = widget.response_view.toPlainText()
         assert "TX" in text
 
@@ -1239,7 +1410,12 @@ class TestManualDebugFileSendCard:
 
 
 class TestManualDebugFileSendLarge:
-    @pytest.mark.skipif(True, reason="需要 pytest-qt 的 qtbot fixture（环境未安装时跳过）")
+    # 说明：曾尝试引入 pytest-qt 解锁本用例（qtbot 可用、单独跑通过），但在
+    # 全量序列下反复触发 Qt 原生崩溃（QThread 与后台线程 GC 时序，"Fatal
+    # Python error: Aborted" 整进程挂掉），故 pytest-qt 未纳入 dev 依赖、本
+    # 用例维持跳过。大文件 worker 行为已由 unit/test_file_send_worker.py 覆盖，
+    # TX 流式上屏经 RxConsole 的批量语义由 TestManualDebugBatchedRendering 覆盖。
+    @pytest.mark.skip(reason="依赖 pytest-qt 且全量序列下曾触发 Qt 原生崩溃，保持跳过")
     def test_large_file_uses_worker(self, qtbot, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         from atprobe.gui.tabs.manual_debug import ManualDebugWidget
         from atprobe.gui.tabs.registry import TabBinding
@@ -2146,3 +2322,295 @@ class TestSendManualFalseSemantics:
 
         text = widget.response_view.toPlainText()
         assert "端口未连接" not in text, f"False=原因已弹框，不得渲染误导文案: {text!r}"
+
+
+class TestManualDebugBatchedRendering:
+    """Pf-1：manual_debug 流式路径（rx 字节 / tx 文件字节）经 RxConsole 批量渲染."""
+
+    def _make_widget(self):  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        return widget, main
+
+    def test_rx_batched_until_flush(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """RX 行入缓冲（定时未到不上屏），flush 一次批量渲染两行。"""
+        widget, main = self._make_widget()
+        widget._toggle_connect()  # noqa: SLF001 —— 打开端口 + RX 订阅
+        # Pf-1：订阅建立即启动批量渲染定时器（流式会话随订阅起停）
+        assert widget._rx_console.is_running()  # noqa: SLF001
+
+        main.emit_rx("COM1", b"alpha\r\nbeta\r\n")
+        assert widget._rx_console.pending_count == 2  # noqa: SLF001 —— 两行入缓冲
+        assert widget.response_view.toPlainText() == ""  # 批量渲染点未到不上屏
+
+        widget._rx_console.flush()  # noqa: SLF001
+        text = widget.response_view.toPlainText()
+        assert "alpha" in text and "beta" in text
+        assert widget._rx_console.pending_count == 0  # noqa: SLF001
+
+    def test_rx_console_timer_stops_on_close(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """关闭端口（退订）停控制台定时器并冲刷残余。"""
+        widget, main = self._make_widget()
+        widget._toggle_connect()  # noqa: SLF001
+        main.emit_rx("COM1", b"tail-line\r\n")
+        widget._toggle_connect()  # noqa: SLF001 —— 关闭
+        assert not widget._rx_console.is_running()  # noqa: SLF001
+        # 停止时冲刷：关端口前收到的数据仍上屏（可回看）
+        assert "tail-line" in widget.response_view.toPlainText()
+
+    def test_tx_file_bytes_batched(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """文件 TX 字节流（设备数据流语义）经缓冲批量上屏。"""
+        widget, main = self._make_widget()
+        main._connected.add("COM1")  # noqa: SLF001
+        f = tmp_path / "small.bin"
+        f.write_bytes(b"hello")
+        widget._file_path = str(f)  # noqa: SLF001
+
+        widget._send_file()  # noqa: SLF001
+        assert main.last_bytes == ("COM1", b"hello")
+        assert widget._rx_console.pending_count == 1  # noqa: SLF001 —— TX 入同一控制台缓冲
+        assert widget.response_view.toPlainText() == ""
+
+        widget._rx_console.flush()  # noqa: SLF001
+        text = widget.response_view.toPlainText()
+        assert "TX" in text and "hello" in text
+
+    def test_ui_message_renders_directly(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """非流式路径（低频 UI 消息）不走缓冲——直渲染立即可见。"""
+        widget, _main = self._make_widget()
+        widget._append_line("RX", "[错误] 引擎未就绪", widget._tokens["danger"])  # noqa: SLF001
+        assert "[错误] 引擎未就绪" in widget.response_view.toPlainText()
+        assert widget._rx_console.pending_count == 0  # noqa: SLF001 —— 未入缓冲
+
+    def test_tx_command_renders_directly(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """命令型 TX（用户单发，UI 消息语义）保持即时上屏（串口助手"发送即记录"）。"""
+        widget, main = self._make_widget()
+        widget._toggle_connect()  # noqa: SLF001
+        widget.send_command("AT")
+        assert "AT" in widget.response_view.toPlainText()  # 无需 flush
+        assert main.last_command == ("COM1", "AT")
+
+
+class TestMainWindowBackgroundOpen:
+    """Pf-3：串口 open 移后台线程（慢速 COM 驱动 open 可达秒级，避免冻结 UI）。
+
+    注：用 DirectConnection 在发射线程直接捕获结果（无需事件循环驱动 Queued
+    投递），避免测试内 processEvents 自旋与后台线程竞争（曾触发原生崩溃）；
+    窗口加入 _KEEP_ALIVE 防 GC 在工作线程回收 Qt 对象。
+    """
+
+    def test_open_runs_in_worker_thread(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """open_port_async 的 open 在非主线程执行；结果经信号带回 (port, ok)。"""
+        import time
+
+        from PySide6.QtCore import Qt
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        _KEEP_ALIVE.append(win)
+        try:
+            opened_threads: list[threading.Thread] = []
+
+            class _RecordingPM:
+                def is_connected(self, port: str) -> bool:
+                    return False
+
+                def open(self, cfg) -> None:  # noqa: ANN001
+                    opened_threads.append(threading.current_thread())
+
+            win._port_manager = _RecordingPM()  # noqa: SLF001
+
+            results: list[tuple[str, bool, threading.Thread]] = []
+            win.port_open_result.connect(
+                lambda p, ok, err: results.append((p, ok, threading.current_thread())),
+                Qt.ConnectionType.DirectConnection,
+            )
+
+            win.open_port_async("COM9")
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not results:
+                time.sleep(0.01)
+
+            assert results and results[0][:2] == ("COM9", True)
+            # open 在工作线程执行（Pf-3 核心：慢速 open 不占主线程）
+            assert opened_threads and opened_threads[0] is not threading.main_thread()
+            # 结果自工作线程投递（生产侧槽为 QObject 方法 → Queued → 主线程执行）
+            assert results[0][2] is not threading.main_thread()
+        finally:
+            win._raw_logger.stop()  # 测试收尾：drain 写线程，避免跨测试泄漏
+
+    def test_open_failure_reports_via_signal_on_main(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """失败：错误消息经信号回主线程（worker 内不弹，MainWindow 槽弹窗）。"""
+        import time
+
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.exceptions import PortOpenError
+
+        dialogs: list[str] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "critical", lambda parent, title, text: dialogs.append(text)
+        )
+
+        win = MainWindow()
+        _KEEP_ALIVE.append(win)
+        try:
+
+            class _FailingPM:
+                def is_connected(self, port: str) -> bool:
+                    return False
+
+                def open(self, cfg) -> None:  # noqa: ANN001
+                    raise PortOpenError("COM9", "被占用")
+
+            win._port_manager = _FailingPM()  # noqa: SLF001
+
+            captured: list[tuple[str, bool, str]] = []
+            win.port_open_result.connect(
+                lambda p, ok, err: captured.append((p, ok, err)),
+                Qt.ConnectionType.DirectConnection,
+            )
+
+            win.open_port_async("COM9")
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not captured:
+                time.sleep(0.01)
+            assert captured and captured[0] == ("COM9", False, "端口 COM9 打开失败：被占用")
+
+            # worker 结束后冲一次事件循环：MainWindow 的 Queued 槽（主线程）弹错误框
+            QApplication.processEvents()
+            assert dialogs and "被占用" in dialogs[0]
+        finally:
+            win._raw_logger.stop()
+
+    def test_duplicate_open_request_ignored(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """同端口在途时忽略重复请求（防并发 open 同一 COM）。"""
+        import time
+
+        from PySide6.QtCore import Qt
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        _KEEP_ALIVE.append(win)
+        try:
+            open_count: list[int] = []
+            release = threading.Event()
+
+            class _SlowPM:
+                def is_connected(self, port: str) -> bool:
+                    return False
+
+                def open(self, cfg) -> None:  # noqa: ANN001
+                    open_count.append(1)
+                    release.wait(2.0)  # 模拟慢速驱动
+
+            win._port_manager = _SlowPM()  # noqa: SLF001
+            done: list[tuple[str, bool]] = []
+            win.port_open_result.connect(
+                lambda p, ok, err: done.append((p, ok)), Qt.ConnectionType.DirectConnection
+            )
+
+            win.open_port_async("COM7")
+            time.sleep(0.05)  # 让第一个 worker 进入 open
+            win.open_port_async("COM7")  # 在途重复请求
+            release.set()
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not done:
+                time.sleep(0.01)
+
+            assert done == [("COM7", True)]
+            assert len(open_count) == 1  # 第二次请求被忽略
+        finally:
+            release.set()
+            win._raw_logger.stop()
+
+
+class TestCaseParseCacheReuse:
+    """Pf-3：批量 YAML 解析缓存——run_cases 复用 _load_path 的解析结果。"""
+
+    def _write_one_case(self, tmp_path):  # noqa: ANN001, no-untyped-def
+        f = tmp_path / "c.yaml"
+        f.write_text(
+            "name: 缓存用例\ntags: [cache]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        return f
+
+    def test_cache_hits_same_mtime(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """同一路径同一 mtime 只 parse 一次；命中返回同一对象。"""
+        from atprobe.gui.mainwindow import CaseParseCache
+
+        f = self._write_one_case(tmp_path)
+        cache = CaseParseCache()
+        first = cache.get_or_parse(f)
+        second = cache.get_or_parse(f)
+        assert first is second  # 命中复用（对象同一）
+
+    def test_cache_invalidated_by_mtime_change(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """文件编辑（mtime 变化）后重解析——不执行过期内容。"""
+        import os
+        import time
+
+        from atprobe.gui.mainwindow import CaseParseCache
+
+        f = self._write_one_case(tmp_path)
+        cache = CaseParseCache()
+        first = cache.get_or_parse(f)
+        f.write_text(
+            "name: 缓存用例v2\ntags: [cache]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
+            encoding="utf-8",
+        )
+        # 同一秒内改写 mtime 可能不变，显式 utime 推进
+        os.utime(f, (time.time() + 10, time.time() + 10))
+        second = cache.get_or_parse(f)
+        assert second is not first
+        assert second.name == "缓存用例v2"  # type: ignore[attr-defined]
+
+    def test_run_cases_reuses_loaded_parse(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """端到端：加载（经缓存）后 run_cases 不再重复 parse（parse 计数一次）。"""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+
+        from atprobe.domain.case import parser as case_parser
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.config import PortConfig
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        f = self._write_one_case(tmp_path)
+        calls: list[str] = []
+        orig_parse = case_parser.parse_case_file
+
+        def counting(path):  # noqa: ANN001
+            # 只统计本用例的文件：MainWindow 构造会分片加载默认用例目录
+            # （examples/testcases），不得污染计数
+            if str(path).endswith("c.yaml"):
+                calls.append(str(path))
+            return orig_parse(path)
+
+        monkeypatch.setattr(case_parser, "parse_case_file", counting)
+
+        win = MainWindow()
+        try:
+            win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+            win._port_manager.open(PortConfig(name="COM3"))  # noqa: SLF001 —— 预开端口，dry-run 只检查
+
+            # 模拟用例树 _load_path 的解析（经共享缓存）
+            win.case_parse_cache.get_or_parse(f)
+            assert len(calls) == 1
+
+            # run_cases（dry-run 只解析 + 检查端口，不起引擎）：应命中缓存，不再 parse
+            win.run_cases([str(f)], "COM3", 95, dry_run=True)
+            assert len(calls) == 1, "run_cases 应复用 _load_path 的解析结果，不得重复 parse"
+        finally:
+            win._raw_logger.stop()

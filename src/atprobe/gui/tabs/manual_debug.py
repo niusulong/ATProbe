@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
@@ -47,6 +49,7 @@ from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import MONO_FONT, get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
+from atprobe.gui.widgets.rx_console import RxConsole
 from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 from atprobe.infra.serial.config import Terminator
 from atprobe.infra.serial.exceptions import PortBusyError
@@ -101,6 +104,17 @@ class ManualDebugWidget(QWidget):
         self._terminator = Terminator.CRLF
         # 当前订阅句柄（端口打开后建立，关闭时撤销）
         self._rx_handle: object | None = None
+        # Pf-1：流式路径（RX 字节 / TX 文件字节 / chunk_sent）经 RxConsole 缓冲，
+        # 主线程 200ms 批量上屏——高波特率持续流不再每 chunk 富文本 append。
+        # 非流式路径（错误提示/文件发送完成等低频 UI 消息）仍直渲染不走缓冲。
+        self._rx_console = RxConsole(self._render_console_items)
+        # Pf-3：后台打开端口的在途请求 (port, baud)；结果经主窗口
+        # port_open_result 信号回主线程（无该信号的旧主窗口/测试替身走同步路径）
+        self._open_pending: tuple[str, int] | None = None
+        open_sig = getattr(main_window, "port_open_result", None)
+        open_connect = getattr(open_sig, "connect", None)
+        if callable(open_connect):
+            open_connect(self._on_open_result)
         # 行缓冲：未遇到换行的 RX 片段累积，到换行再整行渲染。
         # B7 修复：用 incremental decoder 处理跨 chunk 的多字节字符边界，
         # 避免残缺字节被 errors="replace" 永久替换成 ?? 后无法与下个 chunk 拼回。
@@ -354,6 +368,9 @@ class ManualDebugWidget(QWidget):
         if not port:
             QMessageBox.warning(self, "提示", "请先选择端口")
             return
+        if self._open_pending is not None:
+            # Pf-3：后台打开在途（按钮已禁用，此为编程调用/竞态兜底）
+            return
         is_conn = getattr(self._main, "is_port_connected", None)
         if callable(is_conn) and is_conn(port):
             # 当前已连接 → 先撤销本视图的 RX 订阅，再关闭
@@ -366,9 +383,23 @@ class ManualDebugWidget(QWidget):
             if baud is None:
                 return  # 波特率校验失败（已弹提示），放弃打开
             open_port = getattr(self._main, "open_port", None)
+            open_async = getattr(self._main, "open_port_async", None)
+            if callable(open_async):
+                # Pf-3：慢速 COM 驱动的 open 可达秒级 → 后台线程打开，期间禁用
+                # 触发按钮与参数控件；结果经 port_open_result 信号回主线程
+                # （_on_open_result 恢复 UI：成功记忆波特率+建 RX 订阅；失败弹窗
+                # 由 MainWindow 统一处理）
+                self._open_pending = (port, baud)
+                self.connect_btn.setEnabled(False)
+                self.baud_combo.setEnabled(False)
+                self.frame_combo.setEnabled(False)
+                open_async(port, baud, self.frame_combo.currentText())
+                return
             if not callable(open_port):
+                # 同步/异步入口都不存在（旧主窗口/测试替身缺接口）
                 self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
                 return
+            # 同步回退路径（旧主窗口/测试替身）：行为与历史一致
             ok = open_port(port, baud, self.frame_combo.currentText())
             # 打开失败（被占用/权限/参数错，open_port 已弹错误框）→ 不记忆、不订阅。
             # 显式判 False：兼容返回 None 的旧实现（视为成功，不误杀）。
@@ -379,6 +410,22 @@ class ManualDebugWidget(QWidget):
             self._remember_baud(baud)
             self._attach_rx(port)
         self._refresh_ports()
+
+    def _on_open_result(self, port: str, ok: bool, _error: str = "") -> None:
+        """Pf-3：后台打开端口结果回调（主线程，Queued）.
+
+        失败弹窗由 MainWindow 的同名信号槽统一处理，本槽不重复弹；只恢复按钮、
+        成功时记忆波特率 + 建立 RX 订阅（与同步路径成功分支等价）。
+        """
+        pending = self._open_pending
+        if pending is None or pending[0] != port:
+            return  # 非本视图发起（或已被后续操作取代）的结果
+        self._open_pending = None
+        self.connect_btn.setEnabled(True)
+        if ok:
+            self._remember_baud(pending[1])
+            self._attach_rx(port)
+        self._refresh_ports()  # 内部 _sync_connect_state 恢复波特率/帧格式可用性
 
     def _on_baud_index_changed(self, index: int) -> None:
         """下拉项变更：选中「自定义…」→ 弹输入框；选中预设值 → 仅记录最近有效值.
@@ -773,7 +820,7 @@ class ManualDebugWidget(QWidget):
     # RX 流式接收（读线程 → 信号 → 主线程渲染）
     # ------------------------------------------------------------------
     def _attach_rx(self, port: str) -> None:
-        """打开端口后建立 RX 订阅（只订阅一次）."""
+        """打开端口后建立 RX 订阅（只订阅一次）；启动批量渲染定时器."""
         self._detach_rx()
         subscribe = getattr(self._main, "subscribe_rx", None)
         if not callable(subscribe):
@@ -781,23 +828,27 @@ class ManualDebugWidget(QWidget):
         self._rx_decoder.reset()
         self._tail_text = ""
         self._rx_handle = subscribe(port, self._on_rx_chunk)
+        # Pf-1：订阅生效 = 流式会话开始，控制台定时器随订阅起停（不空转）
+        self._rx_console.start()
 
     def _detach_rx(self) -> None:
-        if self._rx_handle is None:
-            return
-        unsubscribe = getattr(self._main, "unsubscribe_rx", None)
-        if callable(unsubscribe):
-            unsubscribe(self._rx_handle)
-        self._rx_handle = None
+        if self._rx_handle is not None:
+            unsubscribe = getattr(self._main, "unsubscribe_rx", None)
+            if callable(unsubscribe):
+                unsubscribe(self._rx_handle)
+            self._rx_handle = None
         self._rx_decoder.reset()
         self._tail_text = ""
+        # Pf-1：退订/关流 = 流式会话结束，停表并冲刷残余（保留已收数据可回看/导出）。
+        # 无条件停：TX 文件流懒启动的定时器（未经 _attach_rx）也要在此收尾
+        self._rx_console.stop()
 
     def _on_rx_chunk(self, chunk: bytes) -> None:
         """串口读线程回调：转发到主线程（避免在非主线程操作 UI）."""
         self.rx_received.emit(chunk)
 
     def _on_rx_bytes(self, chunk: bytes) -> None:
-        """主线程槽：按换行把 RX 字节拆成行渲染，未到换行的尾部留作缓冲.
+        """主线程槽：按换行把 RX 字节拆成行入 RxConsole 缓冲（Pf-1 批量上屏）.
 
         HEX 开关打开时，每行以十六进制展示（M1 §7.2）。
         文本模式下按实际换行符显示：一个 \\n 换一行，连续 \\n 之间的空行保留，
@@ -808,10 +859,11 @@ class ManualDebugWidget(QWidget):
         导致中文/多字节字符在分块边界处必然乱码。incremental decoder 保留未完成
         字节序列，等下个 chunk 到达后正确拼出完整字符。
         """
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间码（接收时刻）
         if self.hex_check.isChecked():
             hex_line = " ".join(f"{b:02X}" for b in chunk)
             if hex_line:
-                self._append_line("RX", hex_line, self._tokens["data.rx"])
+                self._rx_console.append("RX", hex_line, ts)
             # 切到 HEX 模式时清空文本层尾巴，避免切回文本模式时拼入陈旧文本
             self._tail_text = ""
             self._rx_decoder.reset()
@@ -820,12 +872,12 @@ class ManualDebugWidget(QWidget):
         # 字符自动保留在 decoder 内部状态，等下次 feed 继续解码。
         # 文本层尾巴 _tail_text 拼在本次解码结果前（上次未换行的尾部），一起按行切分。
         data = self._tail_text + self._rx_decoder.decode(chunk)
-        # 按换行切：完整的行立即渲染（保留空行），最后一段（无换行）留作下次
+        # 按换行切：完整的行入缓冲（保留空行），最后一段（无换行）留作下次
         parts = data.split("\n")
         if len(parts) > 1:
             complete = "\n".join(parts[:-1]) + "\n"
             for line in split_lines_preserving_blanks(complete):
-                self._append_line("RX", line, self._tokens["data.rx"])
+                self._rx_console.append("RX", line, ts)
         self._tail_text = parts[-1]
 
     def _render_tx_command(self, command: str) -> None:
@@ -843,19 +895,36 @@ class ManualDebugWidget(QWidget):
             self._append_line("TX", command, self._tokens["data.tx"])
 
     def _render_tx_bytes(self, chunk: bytes) -> None:
-        """渲染 TX 原始字节（文件/数据流发送）—— 复用 RX 的切分+转义逻辑.
+        """渲染 TX 原始字节（文件/数据流发送）→ RxConsole 缓冲（Pf-1 批量上屏）.
 
         HEX 开关打开时按十六进制展示；否则按 UTF-8 文本拆行，行末换行符转义。
         方向标 TX、用 data.tx 色。TX 块边界即显示边界（不跨块缓冲，简化）。
         """
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._ensure_console_running()  # 文件 TX 流可能先于/独立于 RX 订阅存在
         if self.hex_check.isChecked():
             hex_line = " ".join(f"{b:02X}" for b in chunk)
             if hex_line:
-                self._append_line("TX", hex_line, self._tokens["data.tx"])
+                self._rx_console.append("TX", hex_line, ts)
             return
         text = chunk.decode("utf-8", errors="replace")
         for line in split_lines_preserving_blanks(text):
-            self._append_line("TX", line, self._tokens["data.tx"])
+            self._rx_console.append("TX", line, ts)
+
+    def _render_console_items(self, items: Sequence[tuple[str, str, str]]) -> None:
+        """RxConsole 渲染回调（Pf-1）：一批缓冲条目逐行上屏（200ms 聚合一次）.
+
+        流式路径只有 RX/TX 两个方向，颜色按方向推导（TX=data.tx / RX=data.rx）；
+        非流式的自定义色（如 danger 错误行）不经缓冲、直渲染不受影响。
+        """
+        for direction, ts, text in items:
+            color = self._tokens["data.tx"] if direction == "TX" else self._tokens["data.rx"]
+            self._append_line(direction, text, color, ts=ts)
+
+    def _ensure_console_running(self) -> None:
+        """流式写入前确保控制台定时器在跑（懒启动守卫，幂等）."""
+        if not self._rx_console.is_running():
+            self._rx_console.start()
 
     # ------------------------------------------------------------------
     # 日志保存 + 响应区渲染
@@ -875,18 +944,20 @@ class ManualDebugWidget(QWidget):
 
             Path(path).write_text(text, encoding="utf-8")
 
-    def _append_line(self, direction: str, text: str, color: str) -> None:
+    def _append_line(self, direction: str, text: str, color: str, ts: str = "") -> None:
         """向响应区追加一行 —— 仪器屏风格（精密仪器主题 signature）.
 
         双信号通道色块（致敬示波器 CH1/CH2）：
         - 方向标做成通道色块（TX 青底 / RX 琥珀底，深墨字），替代旧的 TX>/RX> 纯文字
         - 时间码弱化为 secondary 灰 + 精简到毫秒（仪器时间码感）
         - 内容用方向色，强化「谁在说」
+
+        ts 为空时取当前时刻（直渲染路径）；RxConsole 批量路径传入接收时刻的
+        时间码（append 时采样，不受 200ms 批量延迟影响）。
         """
         import html as _html
-        from datetime import datetime
 
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间码
+        timestamp = ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间码
         safe = _html.escape(text, quote=False)
         dir_safe = _html.escape(direction, quote=False)
         muted = self._tokens["text.secondary"]
@@ -902,7 +973,7 @@ class ManualDebugWidget(QWidget):
         self.response_view.append(
             f'<div style="font-family:{MONO_FONT};font-size:12px;margin:2px 0;'
             f'line-height:1.5;white-space:pre-wrap;">'
-            f'<span style="color:{muted};font-size:10px;">{ts}</span>&nbsp;&nbsp;'
+            f'<span style="color:{muted};font-size:10px;">{timestamp}</span>&nbsp;&nbsp;'
             f"{channel} "
             f'<span style="color:{color};">{safe}</span>'
             f"</div>"
@@ -922,6 +993,10 @@ class ManualDebugWidget(QWidget):
         """
         self._detach_rx()
         self._cleanup_file_send()
+        # Pf-3：后台打开在途的请求标记作废（结果回调到达时 widget 可能已销毁，
+        # 连接随之断开；此处兜底清状态）；控制台定时器停转并冲刷残余
+        self._open_pending = None
+        self._rx_console.stop()
 
     def refresh_theme(self) -> None:
         """主题切换时刷新内联富文本配色（M11：旧实现硬编码 dark=False 不随主题变）."""

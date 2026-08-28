@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import codecs
-from collections import deque
+from collections.abc import Sequence
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QTextCursor
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 from atprobe.gui.theme import MONO_FONT, get_tokens
+from atprobe.gui.widgets.rx_console import RxConsole
 from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 
 _MAX_LINES = 10000  # 环形缓冲上限（§10.3）
@@ -47,18 +48,24 @@ class MonitorTab(ITabView):
 
 
 class _PortSubView(QWidget):
-    """单个端口的监控子页（独立 QTextEdit + 环形 buffer）.
+    """单个端口的监控子页（独立 QTextEdit + 批量渲染控制台）.
 
-    buffer 存 ``(direction, ts, text)`` 元组（direction ∈ {TX, RX}），flush 时批量
-    渲染为带方向色的 HTML（对齐 manual_debug 终端美学：方向标记加粗方向色、
-    时间戳弱化、内容方向色）。导出仍可从元组重建纯文本。
+    Pf-1：行缓冲/定时批量渲染收敛到共享组件 RxConsole——条目
+    ``(direction, ts, text)``（direction ∈ {TX, RX}），渲染回调注入本类现有
+    的 HTML 批量渲染（方向标记加粗方向色、时间戳弱化、内容方向色），对外
+    行为零变化；导出仍从渲染后的文本重建。定时器由 MonitorWidget 单实例
+    驱动（单 timer 遍历所有子页 flush），子页的 RxConsole 不自持定时器。
     """
 
     def __init__(self, port: str, tokens: dict[str, str]) -> None:
         super().__init__()
         self.port = port
         self._tokens = tokens
-        self.buffer: deque[tuple[str, str, str]] = deque(maxlen=_MAX_LINES)
+        # Pf-1：原 deque(maxlen) 缓冲 → RxConsole（max_pending 对齐旧 maxlen，
+        # 超限丢最旧并计数，语义等价的环形缓冲）
+        self._console = RxConsole(self._render_items, max_pending=_MAX_LINES)
+        # 最近一次数据方向（flush 时 CR 进度半行回填方向色用）
+        self._last_direction = "RX"
         # 跨 chunk 的不完整行缓冲（仅文本模式用；HEX 模式每 chunk 独立渲染不累积）
         self._line_buffer = ""
         # P1 修复：incremental decoder——跨 chunk 的多字节字符（中文/emoji）在分块
@@ -77,7 +84,7 @@ class _PortSubView(QWidget):
         layout.addWidget(self.view)
 
     def feed(self, direction: str, ts: str, data: bytes, hex_mode: bool) -> None:
-        """喂入一个原始字节 chunk，按行切分后入 buffer.
+        """喂入一个原始字节 chunk，按行切分后入控制台缓冲.
 
         - HEX 模式：整个 chunk 转十六进制一行显示（不跨 chunk 累积，与 manual_debug 一致）。
         - 文本模式：incremental decoder 解码后累积到 _line_buffer；\\r\\n 归一为单个
@@ -85,6 +92,9 @@ class _PortSubView(QWidget):
           \\n 切分，纯 \\r 行永不 flush——tail 无界增长且内容不可见）；末尾悬置的
           孤立 \\r 保留待下一 chunk（可能是 \\r\\n 的前半）。
         """
+        # 最近数据方向：flush 时 CR 进度半行回填方向色（旧实现取 buffer[-1]，
+        # 缓冲为空时回退 "RX"；这里按最后到达 chunk 的方向，对 TX 进度流更准确）
+        self._last_direction = direction
         if hex_mode:
             hex_line = " ".join(f"{b:02X}" for b in data)
             # 复审修复：HEX 模式期间丢弃文本模式的跨行/跨字符残留（与
@@ -92,7 +102,7 @@ class _PortSubView(QWidget):
             self._line_buffer = ""
             self._decoder.reset()
             if hex_line:
-                self.buffer.append((direction, ts, hex_line))
+                self._console.append(direction, hex_line, ts)
             return
         text = self._decoder.decode(data)
         self._line_buffer += text
@@ -107,11 +117,8 @@ class _PortSubView(QWidget):
         if len(parts) > 1:
             complete = "\n".join(parts[:-1]) + "\n"
             for line in split_lines_preserving_blanks(complete):
-                self.buffer.append((direction, ts, line))
+                self._console.append(direction, line, ts)
         self._line_buffer = parts[-1] + hold
-
-    def append(self, direction: str, ts: str, text: str) -> None:
-        self.buffer.append((direction, ts, text))
 
     def _color_of(self, direction: str) -> str:
         """方向 → 语义色（TX 蓝 / RX 深色文本，复用主题 data.* 令牌）."""
@@ -133,7 +140,7 @@ class _PortSubView(QWidget):
         )
 
     def flush(self) -> None:
-        """把 buffer 批量渲染为 HTML 写入 view 并滚到底.
+        """把控制台缓冲批量渲染为 HTML 写入 view 并滚到底.
 
         复审补充：行尾悬置 ``\\r``（设备用纯 CR 刷新进度行，如 ``42%\\r``）的半行
         也在此刻作为未完行渲染——否则该行永远滞留 _line_buffer 不上屏（进度
@@ -143,19 +150,20 @@ class _PortSubView(QWidget):
         if self._line_buffer.endswith("\r"):
             pending = self._line_buffer.rstrip("\r")
             if pending:
-                self.buffer.append((self.buffer[-1][0] if self.buffer else "RX", "", pending))
+                self._console.append(self._last_direction, pending, "")
             self._line_buffer = ""
-        if not self.buffer:
-            return
-        html = "".join(self._format_line_html(d, ts, t) for d, ts, t in self.buffer)
-        self.buffer.clear()
+        self._console.flush()
+
+    def _render_items(self, items: Sequence[tuple[str, str, str]]) -> None:
+        """RxConsole 渲染回调（Pf-1）：一批条目拼 HTML 一次 append（原 flush 渲染段）."""
+        html = "".join(self._format_line_html(d, ts, t) for d, ts, t in items)
         self.view.append(html)
         cursor = self.view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.view.setTextCursor(cursor)
 
     def clear(self) -> None:
-        self.buffer.clear()
+        self._console.clear()
         self._line_buffer = ""
         self._decoder.reset()  # 半截多字节字符一并丢弃，避免污染后续解码
         self.view.clear()

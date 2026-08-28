@@ -75,6 +75,42 @@ def _startup_error_event(result: ExecutionResult) -> tuple[str, str] | None:
     return None
 
 
+class CaseParseCache:
+    """路径级用例解析缓存（Pf-3）：目录加载与 run_cases 共用，消除重复 parse.
+
+    用例树的 ``_load_path``（分片解析）与 ``run_cases`` 原本各自 parse 同一批
+    YAML——执行前必经加载，同批文件至少解析两次。以 ``(路径, mtime)`` 为键：
+    文件在加载后、执行前被编辑 → mtime 变化 → 重解析，不会执行过期内容。
+    加锁保护：当前两处都在主线程调用，锁为后续任何一方移后台时的前向保障。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, object]] = {}
+
+    def get_or_parse(self, path: Path) -> object:
+        """命中同一 mtime 的缓存直接复用；未命中则解析并缓存.
+
+        解析失败向上抛 ``CaseParseError``（语义与直调 parse_case_file 一致，
+        调用方原有的错误处理/弹窗逻辑不变）。
+        """
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        key = str(path)
+        with self._lock:
+            hit = self._entries.get(key)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        from atprobe.domain.case.parser import parse_case_file
+
+        case = parse_case_file(path)  # 锁外解析：YAML 慢，不阻塞并发读
+        with self._lock:
+            self._entries[key] = (mtime, case)
+        return case
+
+
 class MainWindow(QMainWindow):
     """主窗口（§2.1）.
 
@@ -93,6 +129,8 @@ class MainWindow(QMainWindow):
     update_check_result = Signal(object)  # ReleaseInfo | None(无新版/失败) | Exception
     update_download_progress = Signal(int, int)  # (done, total)
     update_download_done = Signal(object)  # Path | Exception
+    # 后台打开端口结果（工作线程 → 主线程，Pf-3）：(port, ok, 错误消息)
+    port_open_result = Signal(str, bool, str)
 
     def __init__(self, app_config: AppConfig | None = None) -> None:
         super().__init__()
@@ -135,6 +173,10 @@ class MainWindow(QMainWindow):
         self._ports_cache_at: float = 0.0
         # 引擎工作线程引用（closeEvent join 用，P3）
         self._engine_thread: threading.Thread | None = None
+        # 用例解析缓存（Pf-3）：case_execute 目录加载填充、run_cases 复用
+        self._case_cache = CaseParseCache()
+        # 后台打开在途端口集合（Pf-3）：防同端口重复发起
+        self._open_in_flight: set[str] = set()
         # 环境配置页引用：开启时由内存 EnvConfig 供 run_cases 实时生效（所见即所跑）；
         # 关闭后置 None，run_cases 回退到磁盘读取。
         self._env_widget: Any = None
@@ -147,6 +189,7 @@ class MainWindow(QMainWindow):
         self.update_check_result.connect(self._on_check_result)
         self.update_download_progress.connect(self._on_download_progress)
         self.update_download_done.connect(self._on_download_done)
+        self.port_open_result.connect(self._on_port_open_result)
         self._update_in_progress = False
         # LED 信号灯呼吸动效（仅 RUNNING 状态闪烁，体现「引擎在跑」的活力）
         self._led_state = "IDLE"
@@ -643,6 +686,11 @@ class MainWindow(QMainWindow):
     def cases_dir(self) -> Path:
         return resolve_workspace_path(self._app_config.cases_dir)
 
+    @property
+    def case_parse_cache(self) -> CaseParseCache:
+        """共享用例解析缓存（Pf-3）：case_execute 目录加载填充、run_cases 复用."""
+        return self._case_cache
+
     def env_config_path(self) -> str | None:
         # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
         # 确保环境配置页默认打开就有内容可编辑，而非空白页。
@@ -747,19 +795,12 @@ class MainWindow(QMainWindow):
         """查询端口是否已连接（视图转发，避免直接访问 _port_manager）."""
         return self._port_manager.is_connected(port)
 
-    def open_port(
-        self, port: str, baud: int = 115200, frame: str = "8N1", flow: str = "none"
-    ) -> bool:
-        """手动调试：打开端口（§4.1）。成功返回 True，失败弹窗并返回 False.
-
-        Args:
-            port: 端口名（COM3 等）。
-            baud: 波特率。
-            frame: 紧凑帧格式（如 8N1），经 FrameFormat.parse 校验。
-            flow: 流控（none/rts_cts/xon_xoff）。
-        """
+    def _open_port_impl(
+        self, port: str, baud: int, frame: str, flow: str
+    ) -> tuple[bool, str | None]:
+        """执行端口打开（不弹窗——可在工作线程调用）。返回 (ok, 错误消息)."""
         if self._port_manager.is_connected(port):
-            return True
+            return True, None
         try:
             cfg = PortConfig(
                 name=port,
@@ -769,16 +810,61 @@ class MainWindow(QMainWindow):
                 urc_filter=self._app_config.urc_filter,
             )
             self._port_manager.open(cfg)
-            return True
+            return True, None
         except ValueError as exc:
-            QMessageBox.critical(self, "参数错误", f"端口参数无效：{exc}")
-            return False
+            return False, f"端口参数无效：{exc}"
         except PortOpenError as exc:
-            QMessageBox.critical(self, "端口错误", str(exc))
-            return False
+            return False, str(exc)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "端口错误", f"打开端口 {port} 失败：{exc}")
-            return False
+            return False, f"打开端口 {port} 失败：{exc}"
+
+    def open_port(
+        self, port: str, baud: int = 115200, frame: str = "8N1", flow: str = "none"
+    ) -> bool:
+        """同步打开端口（兼容入口：monitor 等仍在主线程调用）。失败弹窗并返回 False.
+
+        慢速 COM 驱动的 open 可达秒级——GUI 按钮触发的打开应改走
+        ``open_port_async``（Pf-3，后台线程 + 信号回主线程），本方法保留给
+        已有同步调用方与测试替身。
+
+        Args:
+            port: 端口名（COM3 等）。
+            baud: 波特率。
+            frame: 紧凑帧格式（如 8N1），经 FrameFormat.parse 校验。
+            flow: 流控（none/rts_cts/xon_xoff）。
+        """
+        ok, err = self._open_port_impl(port, baud, frame, flow)
+        if not ok:
+            QMessageBox.critical(self, "端口错误", err or f"打开端口 {port} 失败")
+        return ok
+
+    def open_port_async(
+        self, port: str, baud: int = 115200, frame: str = "8N1", flow: str = "none"
+    ) -> None:
+        """后台打开端口（Pf-3，参照 _check_update_worker 模式）.
+
+        慢速 COM 驱动的 open 可达秒级，同步在主线程会冻结 UI。工作线程执行
+        ``_open_port_impl``（不弹窗），结果经 ``port_open_result`` 信号回主线程
+        （Queued：失败弹窗在主线程；发起方视图监听同一信号恢复按钮/建订阅）。
+        同端口在途时忽略重复请求。
+        """
+        if port in self._open_in_flight:
+            _log.warning("端口 %s 打开中，忽略重复请求", port)
+            return
+        self._open_in_flight.add(port)
+
+        def _worker() -> None:
+            ok, err = self._open_port_impl(port, baud, frame, flow)
+            self._open_in_flight.discard(port)
+            self.port_open_result.emit(port, ok, err or "")
+
+        threading.Thread(target=_worker, daemon=True, name=f"atprobe-open-{port}").start()
+
+    def _on_port_open_result(self, port: str, ok: bool, error: str) -> None:
+        """主线程：后台打开结果——失败弹窗（成功静默；UI 恢复由发起方自行监听）."""
+        if not ok:
+            _log.warning("后台打开端口 %s 失败: %s", port, error)
+            QMessageBox.critical(self, "端口错误", error or f"打开端口 {port} 失败")
 
     def close_port(self, port: str) -> bool:
         """手动调试：关闭端口（幂等，§4.1）。"""
@@ -846,12 +932,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "正在执行", "已有用例正在执行中，请先停止后再开始。")
             return
 
-        from atprobe.domain.case.parser import CaseParseError, parse_case_file
+        from atprobe.domain.case.parser import CaseParseError
 
+        # Pf-3：经共享解析缓存取用例——用例树 _load_path 加载时已 parse 过同一批
+        # 文件（命中 mtime 一致即复用），消除「加载一次 + 执行一次」的重复解析；
+        # 错误语义不变（CaseParseError 照旧上抛此处弹窗）
         cases: list[object] = []
         for f in case_files:
             try:
-                cases.append(parse_case_file(f))
+                cases.append(self._case_cache.get_or_parse(Path(f)))
             except CaseParseError as exc:
                 QMessageBox.critical(self, "用例解析错误", str(exc))
                 return

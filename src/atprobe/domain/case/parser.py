@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,22 @@ class CaseParseError(ValueError):
         super().__init__(f"[{source}] {message}" if source else message)
 
 
-_yaml = YAML(typ="safe")
-_yaml.indent(mapping=2, sequence=4, offset=2)
+# ruamel YAML 实例**非线程安全**：并发 load 会互相破坏 composer 内部状态
+# （AttributeError: 'NoneType' object has no attribute 'anchor'，且一处损坏
+# 会波及同时解析的其它线程产出假语法错误）。任何多线程并发解析（GUI 主线程
+# 与 MCP 会话线程、引擎线程等）都必须隔离——改为每线程独立实例
+# （thread-local），单线程内行为不变。
+_yaml_local = threading.local()
+
+
+def _loader() -> YAML:
+    """当前线程的 YAML 实例（lazy 创建，同一实例复用以保留 ruamel 缓存收益）."""
+    y: YAML | None = getattr(_yaml_local, "yaml", None)
+    if y is None:
+        y = YAML(typ="safe")
+        y.indent(mapping=2, sequence=4, offset=2)
+        _yaml_local.yaml = y
+    return y
 
 
 def parse_case(data: str | bytes | dict[str, Any], *, source: str | None = None) -> Case:
@@ -42,7 +57,7 @@ def parse_case(data: str | bytes | dict[str, Any], *, source: str | None = None)
         raw: Any = data
     else:
         try:
-            raw = _yaml.load(
+            raw = _loader().load(
                 StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8"))
             )
         except YAMLError as exc:
