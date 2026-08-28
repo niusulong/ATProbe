@@ -1,7 +1,8 @@
 """M8 JobManager：异步测试作业（单并发 BUSY、进度快照、HTML 报告）.
 
 job 在专用线程执行（engine.start 阻塞）；进度事件在引擎线程回调 → 加锁写快照。
-job_id 复用 session_id 规则（%Y%m%d_%H%M%S_4hex，M5 §7.2），同时即报告目录名。
+job_id 复用 session_id 规则（%Y%m%d_%H%M%S_8hex，M5 §7.2；token_hex(4) 8 字节熵
++ 碰撞重生成，F-7），同时即报告目录名。
 端口所有权由引擎管理（scheduler 只关闭自己新开的端口，TSD §6.2）——本层不碰端口。
 """
 
@@ -59,6 +60,8 @@ class _Job:
         self.log_dir = ""
         # 进度事件环形缓冲（最近 EVENT_BUFFER 条）
         self.events: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER)
+        # 被 maxlen 挤掉的事件数（P3）：snapshot 恒附 events_truncated，>0 即有丢
+        self.events_dropped: int = 0
 
 
 class JobManager:
@@ -108,14 +111,16 @@ class JobManager:
         （Lock 不可重入）。
 
         Raises:
-            McpError: BUSY——已有作业在执行（detail.job_id 为占用中的作业 id）。
+            McpError: BUSY——已有作业在执行（detail.job_id 为占用中的作业 id）；
+                或作业线程启动失败（F-6：注册表已回滚，可重试）。
         """
         with self._lock:
             running = self._running_locked()
             if running is not None:
                 raise busy(f"已有作业在执行：{running.id}", job_id=running.id)
-            # 先生成 job_id 再调工厂：秒级时间戳相同靠 token_hex(2) 保证唯一（M5 §7.2）
-            job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
+            # 先生成 job_id 再调工厂：秒级时间戳相同靠 token_hex(4) 8 字节熵
+            # 保证唯一（M5 §7.2；F-7 升熵 + 碰撞重生成）
+            job_id = self._new_job_id()
             cfg = build_engine_cfg(job_id)
             job = _Job(job_id)
             # 与引擎落盘布局同源：scheduler 取 Path(config.log_dir)/<session_id>
@@ -129,9 +134,17 @@ class JobManager:
             # raw_logger 注入（M8）：_owns_raw_logger=False，start/stop 不管它。
             engine = Engine(sender_factory=sender_factory, raw_logger=self._raw_logger)
             self._engines[job_id] = engine
-            threading.Thread(
+            thread = threading.Thread(
                 target=self._run, args=(job, cfg, engine), name=f"mcp-job-{job_id}", daemon=True
-            ).start()
+            )
+            try:
+                thread.start()
+            except Exception as exc:  # noqa: BLE001 - RuntimeError(无法启动新线程)/OSError
+                # F-6 回滚三注册表——不留僵尸 running 条目（否则此后所有 start 永久 BUSY）
+                self._jobs.pop(job_id, None)
+                self._order.remove(job_id)
+                self._engines.pop(job_id, None)
+                raise busy(f"作业线程启动失败：{exc}", job_id=job_id) from exc
         # 启动 info 日志（锁外）：线程已成功启动，total 取配置用例数
         _log.info("job %s 启动：%d 用例", job_id, len(cfg.cases))
         return job_id
@@ -176,6 +189,8 @@ class JobManager:
                 "job_id": job.id,
                 "status": job.status,
                 "events": list(job.events),
+                # P3：恒附 int（0 = 无丢），轮询方可比对新旧，>0 即缓冲溢出有丢
+                "events_truncated": job.events_dropped,
             }
             if job.status == "running":
                 snap["progress"] = {
@@ -273,6 +288,8 @@ class JobManager:
                 job.total = event.total_cases
                 job.current_case = event.case_name
                 job.current_index = event.case_index
+                if len(job.events) >= EVENT_BUFFER:
+                    job.events_dropped += 1
                 job.events.append(
                     {
                         "event": "case_start",
@@ -293,9 +310,13 @@ class JobManager:
                 }
                 if event.error_msg:
                     ev["error"] = event.error_msg[:EVENT_ERROR_TRUNCATE]
+                if len(job.events) >= EVENT_BUFFER:
+                    job.events_dropped += 1
                 job.events.append(ev)
         elif isinstance(event, StepResultEvent) and event.status != "PASS":
             with self._lock:
+                if len(job.events) >= EVENT_BUFFER:
+                    job.events_dropped += 1
                 job.events.append(
                     {
                         "event": "step_result",
@@ -328,7 +349,30 @@ class JobManager:
         return None
 
     def _evict_locked(self) -> None:
-        """历史淘汰：超 max_history 弹最旧（单并发保证被淘汰者非 running）."""
+        """历史淘汰：超 max_history 弹最旧；running 条目跳过.
+
+        单并发下被淘汰者正常应为终态；跳过 running 是防御 F-7 组合场景
+        （碰撞覆盖/异常路径下不误删存活作业）。索引扫描不破坏 _order 顺序。
+        """
         while len(self._order) > self._max_history:
-            oldest = self._order.pop(0)
-            self._jobs.pop(oldest, None)
+            idx = 0
+            while idx < len(self._order):
+                cand = self._order[idx]
+                job = self._jobs.get(cand)
+                if job is None or job.status != "running":
+                    self._order.pop(idx)
+                    self._jobs.pop(cand, None)
+                    break  # 弹掉一个，重新从队头扫
+                idx += 1
+            else:
+                break  # 全部 running（单并发下不可达，防御死循环）
+
+    def _new_job_id(self) -> str:
+        """生成新 job_id：秒级时间戳 + token_hex(4)（8 字节熵，F-7），碰撞重生成.
+
+        调用方持锁（碰撞检查读 self._jobs）。
+        """
+        job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4)
+        while job_id in self._jobs:  # 碰撞重生成（理论概率，廉价防御）
+            job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4)
+        return job_id
