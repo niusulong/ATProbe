@@ -70,6 +70,10 @@ class AppConfig:
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8470
     mcp_token_file: str | None = None
+    # S-3 MCP 路径白名单（设计 §5）：list_cases/list_suites/start_run 等显式
+    # 路径的信任边界。解析后的 cases_dir 恒在锚集内，本字段追加额外根
+    # （编码机可放用例的共享目录等）；空元组=仅 cases_dir。
+    mcp_allowed_roots: tuple[str, ...] = ()
 
 
 def _to_int(value: object, *, what: str, source: str | None) -> int:
@@ -213,6 +217,17 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
             cfg = _replace(cfg, mcp_port=_to_int(mcp["port"], what="mcp.port", source=source))
         if "token_file" in mcp and mcp["token_file"] is not None:
             cfg = _replace(cfg, mcp_token_file=str(mcp["token_file"]))
+        # S-3 路径白名单（设计 §5）：字符串列表（空列表/显式 ~ 保持默认空元组，
+        # 即仅 cases_dir）；路径本身的存在性/可读性不在配置层校验（服务层
+        # _allowed_roots 统一 resolve 去重，越界提示由 MCP 错误契约给出）。
+        if "allowed_roots" in mcp and mcp["allowed_roots"] is not None:
+            roots_raw = mcp["allowed_roots"]
+            if not isinstance(roots_raw, list) or not all(isinstance(x, str) for x in roots_raw):
+                raise AppConfigError(
+                    f"'mcp.allowed_roots' 必须是字符串列表（路径白名单），实际：{roots_raw!r}",
+                    source=source,
+                )
+            cfg = _replace(cfg, mcp_allowed_roots=tuple(roots_raw))
     return cfg
 
 

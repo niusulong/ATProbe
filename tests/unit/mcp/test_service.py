@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from atprobe.engine.config import EngineConfig
 from atprobe.infra.config.appconfig import AppConfig
-from atprobe.infra.serial.exceptions import InvalidArgumentError
+from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.serial.exceptions import InvalidArgumentError, PortBusyError
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 from atprobe.mcp.errors import McpError
 from atprobe.mcp.service import McpService
@@ -136,7 +138,7 @@ def test_collect_default_cases_dir_missing(tmp_path):
 def test_collect_strict_parse_error_vs_skip(tmp_path):
     """同一坏文件：strict（validate_run）→ INVALID_INPUT；非 strict（list_cases）跳过."""
     svc = McpService(_app_cfg(tmp_path), vsim=True)
-    bad = _write_case(tmp_path / "bad", "bad", "name: [unclosed")
+    bad = _write_case(tmp_path / "cases" / "bad", "bad", "name: [unclosed")
     with pytest.raises(McpError) as ei:
         svc.validate_run(paths=[str(bad)], tags=[])
     assert ei.value.kind == "INVALID_INPUT"
@@ -147,7 +149,7 @@ def test_collect_strict_parse_error_vs_skip(tmp_path):
 def test_collect_suite_steps_through_cache(tmp_path):
     """显式 suite 文件经统一收集：suite 前后置带出（缓存粒度为单文件 Collected 整体）."""
     svc = McpService(_app_cfg(tmp_path), vsim=True)
-    d = tmp_path / "suite_dir"
+    d = tmp_path / "cases"
     _write_case(d, "mini", MINIMAL_CASE)
     suite = d / "suite-all.yaml"
     suite.write_text(
@@ -192,6 +194,144 @@ def test_collect_cache_reuse_and_mtime_invalidation(tmp_path, monkeypatch):
     second = svc.list_cases(path=str(case))
     assert [c["name"] for c in second] == ["edited"]
     assert calls == [case, case]
+
+
+# ---------------------------------------------------------------------------
+# S-3 路径白名单 + S-8 锚集扩展（批 4 T2，设计 §5/§7）
+# ---------------------------------------------------------------------------
+def test_allowed_roots_default_and_config(tmp_path):
+    """_allowed_roots：默认仅 cases_dir；mcp.allowed_roots 追加且 cases_dir 恒在；
+    重复项按 normcase 去重（复用 datasource.data_roots 口径）."""
+    cfg = _app_cfg(tmp_path)
+    svc = McpService(cfg, vsim=True)
+    cases_dir = resolve_workspace_path(cfg.cases_dir)
+    assert svc._allowed_roots() == [cases_dir]
+
+    extra = tmp_path / "shared"
+    cfg2 = replace(cfg, mcp_allowed_roots=(str(extra), str(cases_dir)))
+    svc2 = McpService(cfg2, vsim=True)
+    # 非空配置追加，cases_dir 恒在首；与 cases_dir 重复的额外根被去重
+    assert svc2._allowed_roots() == [cases_dir, extra.resolve()]
+
+
+def test_explicit_path_outside_whitelist_invalid_input(tmp_path):
+    """显式 path 越出白名单 → INVALID_INPUT（文案含白名单列表）；四个入口一致."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    inside = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    assert [c["name"] for c in svc.list_cases(path=str(inside))] == ["mini"]
+
+    outside = _write_case(tmp_path / "outside", "evil", MINIMAL_CASE)
+    for call in (
+        lambda: svc.list_cases(path=str(outside)),
+        lambda: svc.validate_run(paths=[str(outside)], tags=[]),
+        lambda: svc.list_suites(path=str(outside)),
+        lambda: svc.start_run(paths=[str(outside)]),
+    ):
+        with pytest.raises(McpError) as ei:
+            call()
+        assert ei.value.kind == "INVALID_INPUT"
+        assert "路径超出允许范围" in ei.value.message
+        assert "白名单" in ei.value.message
+
+
+def test_allowed_roots_config_extends_whitelist(tmp_path):
+    """mcp.allowed_roots 配置生效：额外根内的路径可用；其余越界路径仍拒."""
+    extra = tmp_path / "shared"
+    case = _write_case(extra, "shared_case", MINIMAL_CASE)
+    cfg = _app_cfg(tmp_path, mcp_allowed_roots=(str(extra),))
+    svc = McpService(cfg, vsim=True)
+    assert [c["name"] for c in svc.list_cases(path=str(case))] == ["mini"]
+
+    outside = _write_case(tmp_path / "outside", "evil", MINIMAL_CASE)
+    with pytest.raises(McpError) as ei:
+        svc.list_cases(path=str(outside))
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "路径超出允许范围" in ei.value.message
+
+
+def test_server_info_contains_allowed_roots(tmp_path):
+    """server_info.paths.allowed_roots 上报白名单（编码机可发现可用根）."""
+    cfg = _app_cfg(tmp_path, mcp_allowed_roots=(str(tmp_path / "shared"),))
+    svc = McpService(cfg, vsim=True)
+    roots = svc.server_info()["paths"]["allowed_roots"]
+    assert [Path(r) for r in roots] == [
+        resolve_workspace_path(cfg.cases_dir),
+        (tmp_path / "shared").resolve(),
+    ]
+
+
+def test_list_suites_missing_path_invalid_input(tmp_path):
+    """list_suites 显式 path 不存在 → INVALID_INPUT（统一预检，批 3 终审⑨）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    with pytest.raises(McpError) as ei:
+        svc.list_suites(path=str(tmp_path / "nope"))
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "路径不存在" in ei.value.message
+
+
+def test_list_suites_default_scans_cases_dir(tmp_path):
+    """list_suites 缺省 path：锚定解析后的 cases_dir 扫描."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    cases_dir = tmp_path / "cases"
+    (cases_dir).mkdir(parents=True, exist_ok=True)
+    (cases_dir / "suite-x.yaml").write_text("name: x\ncases: []\n", encoding="utf-8")
+    suites = svc.list_suites()
+    assert [s["file"] for s in suites] == [str(cases_dir / "suite-x.yaml")]
+
+
+def test_start_run_data_allowed_roots_from_whitelist(tmp_path, monkeypatch):
+    """S-8 锚集扩展：start_run 的 EngineConfig.data_allowed_roots=S-3 白名单."""
+    extra = tmp_path / "shared"
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    cfg = _app_cfg(tmp_path, mcp_allowed_roots=(str(extra),))
+    svc = McpService(cfg, vsim=True)
+    captured: dict[str, EngineConfig] = {}
+
+    def fake_start(*, build_engine_cfg, sender_factory):  # noqa: ANN001, ANN002, ANN003
+        captured["cfg"] = build_engine_cfg("job_s8")
+        return "job_s8"
+
+    monkeypatch.setattr(svc.jobs, "start", fake_start)
+    assert svc.start_run(paths=[str(case)])["job_id"] == "job_s8"
+    roots = [Path(p) for p in captured["cfg"].data_allowed_roots]
+    assert roots == [resolve_workspace_path(cfg.cases_dir), extra.resolve()]
+
+
+def test_start_run_data_file_in_extra_root(tmp_path):
+    """S-8 端到端（vsim）：data.file 在 allowed_roots 内、case_dir 外 → 通过.
+
+    两阶段 TCPSEND 形态（同 examples N58 tcp）：阶段一 {{file_size()}} 渲染
+    （同锚集校验），阶段二 data.file 读额外根内文件——批 2b 预留点兑现后
+    此类用例从 DataPathError 失败转为真实发送。
+    """
+    payload_dir = tmp_path / "payloads"
+    payload_dir.mkdir()
+    (payload_dir / "p.bin").write_bytes(b"HELLO")  # 5 字节
+    case = _write_case(
+        tmp_path / "cases",
+        "s8bin",
+        "name: s8bin\n"
+        "steps:\n"
+        "  - command: 'AT+TCPSEND=0,{{file_size(\"../payloads/p.bin\")}}'\n"
+        "    expect: '(\\r\\n>)'\n"
+        "  - data: { file: ../payloads/p.bin }\n"
+        "    wait_urc: '\\+TCPSEND: \\d+,\\d+'\n"
+        "    assert: [{ matches: '\\+TCPSEND: 0,5' }]\n",
+    )
+    cfg = _app_cfg(tmp_path, mcp_allowed_roots=(str(payload_dir),))
+    svc = McpService(cfg, vsim=True)
+    job_id = svc.start_run(paths=[str(case)])["job_id"]
+    snap = _wait_finished(svc, job_id)
+    assert snap["status"] == "finished"
+    assert snap["summary"]["passed"] == 1
+    assert snap["summary"]["failed"] == 0
+
+    # 反证锚集仍收紧：去掉 allowed_roots 后同一用例因 data 越界失败（S-8 生效）
+    svc2 = McpService(_app_cfg(tmp_path), vsim=True)
+    job2 = svc2.start_run(paths=[str(case)])["job_id"]
+    snap2 = _wait_finished(svc2, job2)
+    assert snap2["status"] == "finished"
+    assert snap2["summary"]["failed"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +407,26 @@ def test_send_at_invalid_argument_translated(tmp_path, monkeypatch):
         svc.send_at(VSIM_PORT, "AT")
     assert ei.value.kind == "INVALID_INPUT"
     assert "参数错误" in ei.value.message
+
+
+def test_send_at_port_busy_translated_to_busy(tmp_path, monkeypatch):
+    """PortBusyError（撞端口命令锁）→ BUSY 而非 DEVICE_ERROR（批 3 终审①）.
+
+    旧实现落入宽 catch (SerialError, OSError) → DEVICE_ERROR——编码机会把
+    「稍后重试」误判为「设备异常」。转 BUSY 且 detail 携带冲突端口。
+    """
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+
+    def fake_send_command(port, command, **kwargs):
+        raise PortBusyError(port, "端口正忙：并发发送不支持")
+
+    monkeypatch.setattr(svc.port_manager, "send_command", fake_send_command)
+    with pytest.raises(McpError) as ei:
+        svc.send_at(VSIM_PORT, "AT")
+    assert ei.value.kind == "BUSY"
+    assert "端口被占用" in ei.value.message
+    assert ei.value.detail.get("port") == VSIM_PORT
 
 
 def test_send_at_busy_recheck_inside_pre_check(tmp_path, monkeypatch):
@@ -389,8 +549,8 @@ def test_validate_run(tmp_path):
 
 def test_validate_run_no_cases(tmp_path):
     svc = McpService(_app_cfg(tmp_path), vsim=True)
-    empty = tmp_path / "empty"
-    empty.mkdir()
+    empty = tmp_path / "cases" / "empty"  # cases_dir 子目录（白名单内）→ 走"无用例"分支
+    empty.mkdir(parents=True)
     with pytest.raises(McpError) as ei:
         svc.validate_run(paths=[str(empty)], tags=[])
     assert ei.value.kind == "INVALID_INPUT"
@@ -420,7 +580,7 @@ def test_start_run_full_flow(tmp_path):
 
 def test_send_at_busy_during_job(tmp_path):
     svc = McpService(_app_cfg(tmp_path), vsim=True, report_root=tmp_path / "reports")
-    many = tmp_path / "many"
+    many = tmp_path / "cases" / "many"
     for i in range(100):
         _write_case(many, f"case{i:02d}", MINIMAL_CASE.replace("name: mini", f"name: case{i:02d}"))
     paths = [str(p) for p in sorted(many.glob("*.yaml"))]
@@ -442,7 +602,7 @@ def test_send_at_busy_during_job(tmp_path):
 def test_start_run_resolve_inputs_errors(tmp_path):
     # 1) 坏用例 YAML → INVALID_INPUT
     svc = McpService(_app_cfg(tmp_path), vsim=True)
-    bad = _write_case(tmp_path / "bad", "bad", "name: [unclosed")
+    bad = _write_case(tmp_path / "cases" / "bad", "bad", "name: [unclosed")
     with pytest.raises(McpError) as ei:
         svc.start_run(paths=[str(bad)])
     assert ei.value.kind == "INVALID_INPUT"

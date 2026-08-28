@@ -38,6 +38,7 @@ steps:
 
 def make_case_yaml(directory: Path, name: str) -> Path:
     """在 directory 写入名为 name 的最小用例 YAML，返回文件路径."""
+    directory.mkdir(parents=True, exist_ok=True)
     f = directory / f"{name}.yaml"
     f.write_text(MINIMAL_CASE_TEMPLATE.format(name=name), encoding="utf-8")
     return f
@@ -45,7 +46,9 @@ def make_case_yaml(directory: Path, name: str) -> Path:
 
 @pytest.fixture
 def case_file(tmp_path):
-    return make_case_yaml(tmp_path, "mcp_it")
+    # S-3 白名单：显式路径须在服务配置的 cases_dir 内（stdio 测试的临时配置
+    # cases_dir=<tmp>/cases），否则 start_run 直接 INVALID_INPUT
+    return make_case_yaml(tmp_path / "cases", "mcp_it")
 
 
 @pytest.fixture

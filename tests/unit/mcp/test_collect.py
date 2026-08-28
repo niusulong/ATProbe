@@ -102,6 +102,64 @@ class TestCollectCasePaths:
         assert files == [sf_yaml, sf_yml]
 
 
+class TestCollectCasePathsLimits:
+    """S-3 扫描上限（MCP 传入 max_depth/max_files；CLI 不传=行为不变）."""
+
+    def test_max_depth_excludes_fifth_level(self, tmp_path: Path) -> None:
+        # 嵌套 5 层链：max_depth=4 收 1-4 层，第 5 层不收（防全盘扫）
+        d = tmp_path
+        for i in range(1, 6):
+            d = d / f"l{i}"
+            _write(d / f"a{i}.yaml", MINIMAL_CASE)
+        files, warnings = collect_case_paths([tmp_path], cases_dir=tmp_path, max_depth=4)
+        assert [f.name for f in files] == ["a1.yaml", "a2.yaml", "a3.yaml", "a4.yaml"]
+        assert warnings == []
+
+    def test_max_depth_top_level_always_scanned(self, tmp_path: Path) -> None:
+        # max_depth=0：仅起始目录自身（不下潜任何子目录）
+        _write(tmp_path / "top.yaml", MINIMAL_CASE)
+        _write(tmp_path / "sub" / "nested.yaml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path, max_depth=0)
+        assert [f.name for f in files] == ["top.yaml"]
+
+    def test_max_files_truncates_with_warning(self, tmp_path: Path) -> None:
+        # 文件数超上限：停止收集 + 截断警告（截断后保留排序在前的确定性子集）
+        for i in range(5):
+            _write(tmp_path / f"c{i}.yaml", MINIMAL_CASE)
+        files, warnings = collect_case_paths([tmp_path], cases_dir=tmp_path, max_files=3)
+        assert [f.name for f in files] == ["c0.yaml", "c1.yaml", "c2.yaml"]
+        assert warnings == ["文件数超过上限 3，已截断"]
+
+    def test_max_files_stops_across_paths(self, tmp_path: Path) -> None:
+        # 上限跨 paths 计数：首个目录已满 → 后续路径不再收集（也不再有警告）
+        d1 = tmp_path / "d1"
+        d2 = tmp_path / "d2"
+        for i in range(2):
+            _write(d1 / f"a{i}.yaml", MINIMAL_CASE)
+        _write(d2 / "b.yaml", MINIMAL_CASE)
+        files, warnings = collect_case_paths([d1, d2], cases_dir=tmp_path, max_files=2)
+        assert [f.name for f in files] == ["a0.yaml", "a1.yaml"]
+        assert warnings == ["文件数超过上限 2，已截断"]
+
+    def test_no_limits_by_default(self, tmp_path: Path) -> None:
+        # 缺省不设限（CLI 调用点行为不变）：深嵌套照收
+        d = tmp_path
+        for i in range(6):
+            d = d / f"l{i}"
+            _write(d / f"a{i}.yaml", MINIMAL_CASE)
+        files, warnings = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert len(files) == 6
+        assert warnings == []
+
+    def test_sorted_order_preserved_with_walk(self, tmp_path: Path) -> None:
+        # os.walk 改造后仍统一按路径排序（rglob sorted 的确定性语义保留）
+        _write(tmp_path / "b" / "z.yaml", MINIMAL_CASE)
+        _write(tmp_path / "a" / "y.yaml", MINIMAL_CASE)
+        _write(tmp_path / "m.yaml", MINIMAL_CASE)
+        files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert files == sorted(files, key=str)
+
+
 class TestLoadCases:
     def test_plain_case(self, tmp_path: Path) -> None:
         _write(tmp_path / "c.yaml", MINIMAL_CASE)
@@ -152,6 +210,28 @@ class TestLoadCases:
         _write(tmp_path / "suite-bad.yaml", "- not\n- a mapping\n")
         with pytest.raises(SuiteParseError):
             load_cases([tmp_path / "suite-bad.yaml"])
+
+    # -- S-7：套件用例路径越界拒绝（防 ../.. 与绝对路径读取任意 YAML） -----------
+    def test_suite_case_parent_escape_rejected(self, tmp_path: Path) -> None:
+        outside = _write(tmp_path / "outside.yaml", MINIMAL_CASE)
+        assert outside.exists()
+        sf = _write(tmp_path / "sd" / "suite-esc.yaml", "name: esc\ncases:\n  - ../outside.yaml\n")
+        with pytest.raises(SuiteParseError, match="越界"):
+            load_cases([sf])
+
+    def test_suite_case_absolute_path_rejected(self, tmp_path: Path) -> None:
+        # 绝对路径引用：resolve 后不在套件目录内 → 拒（目标文件存在也不行）
+        target = _write(tmp_path / "outside.yaml", MINIMAL_CASE)
+        sf = _write(tmp_path / "sd" / "suite-abs.yaml", f"name: abs\ncases:\n  - {target}\n")
+        with pytest.raises(SuiteParseError, match="越界"):
+            load_cases([sf])
+
+    def test_suite_case_subdir_relative_allowed(self, tmp_path: Path) -> None:
+        # 合法相对路径：套件目录内的子目录引用通过（越界≠禁止子目录）
+        _write(tmp_path / "sd" / "sub" / "d.yaml", MINIMAL_CASE)
+        sf = _write(tmp_path / "sd" / "suite-sub.yaml", "name: sub\ncases:\n  - sub/d.yaml\n")
+        collected = load_cases([sf])
+        assert [c.name for c in collected.cases] == ["mini"]
 
 
 class TestFilterByTags:

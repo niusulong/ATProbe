@@ -73,21 +73,28 @@ async def _session(base_url: str, token: str = TOKEN) -> AsyncIterator[ClientSes
 
 
 @pytest.fixture(scope="module")
-def many_case_paths(tmp_path_factory: pytest.TempPathFactory) -> list[Path]:
-    """100 个最小用例：保证 start_run 返回后作业可观测地运行（BUSY 断言窗口）."""
-    d = tmp_path_factory.mktemp("cases")
+def http_tmp(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """serve 形态共享临时根：批量用例写在配置 cases_dir 内（S-3 白名单界内
+    路径才能 start_run），reports/logs 同锚定此根."""
+    return tmp_path_factory.mktemp("mcp_http")
+
+
+@pytest.fixture(scope="module")
+def many_case_paths(http_tmp: Path) -> list[Path]:
+    """100 个最小用例：保证 start_run 后作业可观测地运行（BUSY 断言窗口）."""
+    d = http_tmp / "cases"
     for i in range(100):
         make_case_yaml(d, f"it{i:02d}")
     return sorted(d.glob("*.yaml"))
 
 
 @pytest.fixture(scope="module")
-def base_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def base_url(http_tmp: Path) -> Iterator[str]:
     """进程内起 serve 形态：vsim 服务 + Bearer 中间件 + uvicorn 线程.
 
     用例/报告/日志目录全部锚定临时目录（绝对路径，report_path 可直接断言存在）。
     """
-    tmp = tmp_path_factory.mktemp("mcp_http")
+    tmp = http_tmp
     app_cfg = AppConfig(
         cases_dir=str(tmp / "cases"),
         report_dir=str(tmp / "reports"),

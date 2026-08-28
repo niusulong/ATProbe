@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from atprobe.domain.case.datasource import DataPathError, data_roots, ensure_within
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import CaseParseError
 from atprobe.domain.suite import SuiteParseError
@@ -39,7 +40,7 @@ from atprobe.infra.config.appconfig import AppConfig, AppConfigError, parse_port
 from atprobe.infra.config.envconfig import EnvConfig, EnvConfigError, load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path, user_workspace
 from atprobe.infra.serial.config import PortConfig
-from atprobe.infra.serial.exceptions import InvalidArgumentError, SerialError
+from atprobe.infra.serial.exceptions import InvalidArgumentError, PortBusyError, SerialError
 from atprobe.infra.serial.interfaces import ERROR_KIND_NONE
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.rawlog import RawLogger
@@ -58,6 +59,11 @@ def _display_name(c: Case) -> str:
 # 用例收集缓存上限（§4.9/P3）：MCP 工具调用高频，同批文件二次 list/validate
 # 免重复 IO+解析；超限淘汰最旧条目（dict 迭代序 = 插入序）
 _CASE_CACHE_MAX = 512
+
+# S-3 目录扫描上限（设计 §5）：MCP 收集路径的递归深度/文件数上限——rglob 式
+# 无界扫描被指向大目录（如根盘符）时会长时间占满 IO；CLI 调用点不传上限不变。
+_MCP_SCAN_MAX_DEPTH = 4
+_MCP_SCAN_MAX_FILES = 2000
 
 
 class McpService:
@@ -132,6 +138,9 @@ class McpService:
                 "cases_dir": str(resolve_workspace_path(self._app_cfg.cases_dir)),
                 "log_dir": str(resolve_workspace_path(self._app_cfg.log_dir)),
                 "report_dir": str(self.jobs.report_root),
+                # S-3 白名单（cases_dir ∪ mcp.allowed_roots，已 resolve 去重）：
+                # 编码机据此得知可放/可引用用例的全部根目录
+                "allowed_roots": [str(p) for p in self._allowed_roots()],
             },
         }
 
@@ -165,14 +174,41 @@ class McpService:
             for c in filter_by_tags(cases, tags or [], [])
         ]
 
+    def _allowed_roots(self) -> list[Path]:
+        """S-3 路径白名单（设计 §5）：解析后的 cases_dir 恒在锚集内，
+        ``mcp.allowed_roots`` 非空则追加；全部 resolve 并按 normcase 口径去重
+        （复用 datasource.data_roots，与 S-8 锚集同一套比较语义）。
+        """
+        roots = [resolve_workspace_path(self._app_cfg.cases_dir)] + [
+            Path(p) for p in self._app_cfg.mcp_allowed_roots
+        ]
+        return data_roots(None, tuple(roots))
+
+    def _check_paths_allowed(self, paths: list[Path]) -> None:
+        """S-3 显式路径越界校验：任一路径 resolve 后不在白名单 → INVALID_INPUT.
+
+        ensure_within 的 DataPathError 转译为 MCP 错误契约（文案带白名单列表，
+        编码机可自行定位可用根）；缺省 cases_dir 不走此校验（它本身是根）。
+        """
+        roots = self._allowed_roots()
+        for p in paths:
+            try:
+                ensure_within(p, roots)
+            except DataPathError as exc:
+                raise invalid_input(
+                    f"路径超出允许范围：{p}（白名单：{[str(r) for r in roots]}）"
+                ) from exc
+
     def _collect_cases(
         self, paths: list[str] | None, *, strict: bool
     ) -> tuple[list[Case], tuple[Step, ...], tuple[Step, ...]]:
         """统一用例收集（list_cases / _resolve_run_inputs 共用，§4.9）.
 
         路径预检：显式 paths 中某项不存在 → INVALID_INPUT（strict 与否一致——
-        用户显式给错路径都该报，而非静默空列表）；缺省 cases_dir 不存在仅在
+        用户显式给错路径都该报，而非静默空列表）；存在但越出 S-3 白名单 →
+        INVALID_INPUT（含白名单列表文案）；缺省 cases_dir 不存在仅在
         strict 时报（list_cases 的发现式语义允许空工作区返回空列表）。
+        目录扫描带 S-3 上限（深度 4 / 文件数 2000），超出截断。
         解析失败：strict=True 抛 INVALID_INPUT，False 跳过该文件（CLI list 语义）。
         逐文件经 ``_load_cases_cached``（mtime 缓存）；套件文件先于散用例处理，
         与 ``collect.load_cases`` 整批处理的顺序语义一致（缓存按单文件粒度）。
@@ -187,9 +223,12 @@ class McpService:
             for p in explicit:
                 if not p.exists():
                     raise invalid_input(f"路径不存在：{p}")
+            self._check_paths_allowed(explicit)
         elif strict and not base.exists():
             raise invalid_input(f"路径不存在：{base}")
-        case_files, _warnings = collect_case_paths(explicit, base)
+        case_files, _warnings = collect_case_paths(
+            explicit, base, max_depth=_MCP_SCAN_MAX_DEPTH, max_files=_MCP_SCAN_MAX_FILES
+        )
         ordered = [f for f in case_files if f.name.startswith("suite-")]
         ordered += [f for f in case_files if not f.name.startswith("suite-")]
         cases: list[Case] = []
@@ -230,8 +269,19 @@ class McpService:
         return collected
 
     def list_suites(self, path: str | None = None) -> list[dict[str, Any]]:
-        """列出套件（suite- 前缀文件，轻量元信息，不打开引用的用例文件）."""
-        base = Path(path) if path else resolve_workspace_path(self._app_cfg.cases_dir)
+        """列出套件（suite- 前缀文件，轻量元信息，不打开引用的用例文件）.
+
+        显式 path 统一预检（批 3 终审⑨）：不存在 → INVALID_INPUT；越出 S-3
+        白名单 → INVALID_INPUT（口径与 list_cases 一致）。缺省时 base 锚定
+        到工作区解析后的 cases_dir。
+        """
+        if path is not None:
+            base = Path(path)
+            if not base.exists():
+                raise invalid_input(f"路径不存在：{base}")
+            self._check_paths_allowed([base])
+        else:
+            base = resolve_workspace_path(self._app_cfg.cases_dir)
         suite_files = sorted({*base.rglob("suite-*.yaml"), *base.rglob("suite-*.yml")})
         out: list[dict[str, Any]] = []
         for f in suite_files:
@@ -339,7 +389,8 @@ class McpService:
         Raises:
             McpError: INVALID_INPUT——端口未开（先 open_port）或 wait_urc 正则
                 非法（含连接层参数校验 InvalidArgumentError 的转译）；BUSY——
-                作业运行中（detail.job_id 为占用中的作业）；DEVICE_ERROR——发送异常。
+                作业运行中（detail.job_id 为占用中的作业）或撞端口命令锁
+                （引擎步骤/手动发送进行中，批 3 终审①）；DEVICE_ERROR——发送异常。
         """
         if not self.port_manager.is_connected(port):
             raise invalid_input(f"端口未打开：{port}（请先 open_port）", port=port)
@@ -361,6 +412,9 @@ class McpService:
             )
         except InvalidArgumentError as exc:  # SerialError 子类，先于宽 catch（参数错误≠设备错误）
             raise invalid_input(f"参数错误：{exc}", port=port) from exc
+        except PortBusyError as exc:
+            # 批 3 终审①：撞端口命令锁（引擎步骤/手动发送进行中）→ BUSY 而非 DEVICE_ERROR
+            raise busy(f"端口被占用（引擎或手动发送进行中）：{exc}", port=exc.port) from exc
         except (SerialError, OSError) as exc:
             raise device_error(f"发送失败：{exc}", port=port) from exc
         out: dict[str, Any] = {"text": resp.text, "status": resp.status.value}
@@ -509,9 +563,10 @@ class McpService:
             env_config=env_cfg,
             session_id="",  # JobManager 工厂按 job_id 注入
             log_dir=str(resolve_workspace_path(self._app_cfg.log_dir)),
-            # S-8 额外数据根本批传空：锚集仍含各用例目录（scheduler 按 case.source_file
-            # 派生 case_dir）；批 4 将 mcp.allowed_roots 并入此字段
-            data_allowed_roots=(),
+            # S-8 额外数据根=S-3 路径白名单（cases_dir ∪ mcp.allowed_roots，批 4 兑现
+            # 批 2b 预留点）；锚集另含各用例自身目录（scheduler 按 case.source_file
+            # 派生 case_dir，与本字段取并集）
+            data_allowed_roots=tuple(str(p) for p in self._allowed_roots()),
         )
         job_id = self.jobs.start(
             build_engine_cfg=lambda jid: replace(cfg, session_id=jid),

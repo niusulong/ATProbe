@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,24 @@ from typing import NamedTuple
 
 from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import parse_case_file
-from atprobe.domain.suite.parser import parse_suite_file
+from atprobe.domain.suite.parser import SuiteParseError, parse_suite_file
+
+
+def _normcase(p: Path) -> Path:
+    """比较用规范化：normcase 折叠 Windows 大小写与斜杠方向.
+
+    与 datasource._norm 同口径（S-7 越界判定与 S-8 锚定判定行为一致）；
+    不 import 私有名，本地复刻。
+    """
+    return Path(os.path.normcase(str(p)))
+
+
+def _within_dir(path: Path, directory: Path) -> bool:
+    """S-7 判定：path（已 resolve）是否位于 directory（已 resolve）内.
+
+    两侧 normcase 后 is_relative_to——Windows 大小写/斜杠差异不误判越界。
+    """
+    return _normcase(path).is_relative_to(_normcase(directory))
 
 
 class SuiteMeta(NamedTuple):
@@ -79,11 +97,24 @@ class Collected:
     suite_teardown: tuple[Step, ...] = ()
 
 
-def collect_case_paths(paths: list[Path] | None, cases_dir: Path) -> tuple[list[Path], list[str]]:
+def collect_case_paths(
+    paths: list[Path] | None,
+    cases_dir: Path,
+    *,
+    max_depth: int | None = None,
+    max_files: int | None = None,
+) -> tuple[list[Path], list[str]]:
     """展开位置参数为用例文件列表（目录递归、去重、目录扫描跳过 suite- 前缀）.
 
     返回 (文件列表, 警告列表)。paths 为 None/空 → 扫 cases_dir。
     显式指定的单个 suite- 文件保留（走套件执行路径，REQ-M2 §12）。
+
+    S-3 扫描上限（MCP 传入，CLI 不传=行为不变）：max_depth 限相对起始目录的
+    下潜深度（起始目录自身为 0 层，max_depth=4 即收 1-4 层子目录内文件，
+    5 层起不收——防止 ``list_cases(path="C:\\")`` 之类全盘扫）；max_files 限
+    收集总数，达到即停止收集并在 warnings 附截断提示。目录扫描用 os.walk
+    手控深度（rglob 无法限制下潜），文件列表收集后统一按路径字符串排序
+    （保留 rglob sorted 的确定性语义）。
     """
     if not paths:
         # 无位置参数时用配置的 cases_dir（调用方负责锚定到工作区）
@@ -91,26 +122,49 @@ def collect_case_paths(paths: list[Path] | None, cases_dir: Path) -> tuple[list[
     result: list[Path] = []
     seen: set[Path] = set()
     warnings: list[str] = []
+    truncated = False
     for p in paths:
         if p.is_dir():
-            # 同时覆盖 .yaml 与 .yml 两种后缀，与单文件分支接受的后缀保持一致
-            # （否则目录下的 .yml 用例与 suite-*.yml 会被静默漏扫）
-            for f in sorted(
-                [*p.rglob("*.yaml"), *p.rglob("*.yml")],
-                key=lambda x: str(x),
-            ):
-                # 目录扫描排除套件文件避免与显式指定重复
-                if f.name.startswith("suite-"):
-                    continue
-                if f.resolve() not in seen:
-                    seen.add(f.resolve())
+            for dirpath, dirnames, filenames in os.walk(p):
+                cur = Path(dirpath)
+                # 相对起始目录的深度（起始目录为 0）：到达上限即剪枝不再下潜
+                # （当前层文件照收，下一层起不收）
+                if max_depth is not None and len(cur.relative_to(p).parts) >= max_depth:
+                    dirnames[:] = []
+                for name in filenames:
+                    # 同时覆盖 .yaml 与 .yml 两种后缀，与单文件分支一致
+                    # （否则目录下的 .yml 用例与 suite-*.yml 会被静默漏扫）
+                    f = cur / name
+                    if f.suffix not in (".yaml", ".yml"):
+                        continue
+                    # 目录扫描排除套件文件避免与显式指定重复
+                    if f.name.startswith("suite-"):
+                        continue
+                    key = f.resolve()
+                    if key in seen:
+                        continue
+                    if max_files is not None and len(result) >= max_files:
+                        truncated = True
+                        break
+                    seen.add(key)
                     result.append(f)
+                if truncated:
+                    break
         elif p.is_file() and p.suffix in (".yaml", ".yml"):
-            if p.resolve() not in seen:
-                seen.add(p.resolve())
-                result.append(p)
+            key = p.resolve()
+            if key not in seen:
+                if max_files is not None and len(result) >= max_files:
+                    truncated = True
+                else:
+                    seen.add(key)
+                    result.append(p)
         else:
             warnings.append(f"路径不存在 {p}")
+        if truncated:
+            break
+    if truncated:
+        warnings.append(f"文件数超过上限 {max_files}，已截断")
+    result.sort(key=str)
     return result, warnings
 
 
@@ -118,8 +172,10 @@ def load_cases(case_paths: list[Path]) -> Collected:
     """解析用例与套件文件（suite- 前缀走套件路径），展开参数化.
 
     顺序与原 CLI 行为一致：先按 case_paths 顺序处理全部套件，再处理散用例。
+    S-7：套件引用的用例路径（相对套件目录）resolve 后越出套件目录 →
+    SuiteParseError（../.. 与绝对路径不可借套件读取任意 YAML）。
     Raises:
-        SuiteParseError: 套件文件解析失败（原样上抛）。
+        SuiteParseError: 套件文件解析失败或用例路径越界（原样上抛）。
         CaseParseError: 用例文件解析失败（原样上抛）。
     """
     suite_files = [p for p in case_paths if p.name.startswith("suite-")]
@@ -134,8 +190,14 @@ def load_cases(case_paths: list[Path]) -> Collected:
         suite = parse_suite_file(sf)
         suite_setup.extend(suite.suite_setup)
         suite_teardown.extend(suite.suite_teardown)
+        suite_dir = sf.parent.resolve()
         for crel in suite.cases:
             cpath = (sf.parent / crel).resolve()
+            # S-7：套件引用的用例必须在套件目录内（防 ../.. 与绝对路径读取任意 YAML）
+            if not _within_dir(cpath, suite_dir):
+                raise SuiteParseError(
+                    f"套件用例路径越界：{crel!r}（须在套件目录内）", source=str(sf)
+                )
             cases.extend(expand_parameters(parse_case_file(cpath)))
 
     # 普通用例文件
