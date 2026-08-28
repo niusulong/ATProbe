@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,20 @@ class SuiteParseError(ValueError):
         super().__init__(f"[{source}] {message}" if source else message)
 
 
-_yaml = YAML(typ="safe")
-_yaml.indent(mapping=2, sequence=4, offset=2)
+# 线程安全（批 4 T6 审查补充）：ruamel YAML 实例非线程安全，模块级共享实例
+# 在 MCP 线程池并发解析下互毁 composer 状态（load_cases→parse_suite_file 与
+# case parser 同链路可达）——改为每线程独立实例（thread-local），单线程不变。
+_yaml_local = threading.local()
+
+
+def _loader() -> YAML:
+    """当前线程的 YAML 实例（lazy 创建，同一实例复用以保留 ruamel 缓存收益）."""
+    y: YAML | None = getattr(_yaml_local, "yaml", None)
+    if y is None:
+        y = YAML(typ="safe")
+        y.indent(mapping=2, sequence=4, offset=2)
+        _yaml_local.yaml = y
+    return y
 
 
 def parse_suite(data: str | bytes | dict[str, Any], *, source: str | None = None) -> Suite:
@@ -39,7 +52,7 @@ def parse_suite(data: str | bytes | dict[str, Any], *, source: str | None = None
         raw: Any = data
     else:
         try:
-            raw = _yaml.load(
+            raw = _loader().load(
                 StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8"))
             )
         except YAMLError as exc:

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from io import StringIO
@@ -123,7 +124,19 @@ def _to_str(value: object) -> str:
 # ---------------------------------------------------------------------------
 # 加载
 # ---------------------------------------------------------------------------
-_yaml = YAML(typ="safe")
+# 线程安全（批 4 T6 审查补充）：ruamel YAML 实例非线程安全，共享实例在 MCP
+# 会话线程加载 env 配置时可与其它解析互毁（composer 状态）——thread-local
+# 隔离，单线程行为不变。
+_yaml_local = threading.local()
+
+
+def _loader() -> YAML:
+    """当前线程的 YAML 实例（lazy 创建，同一实例复用以保留 ruamel 缓存收益）."""
+    y: YAML | None = getattr(_yaml_local, "yaml", None)
+    if y is None:
+        y = YAML(typ="safe")
+        _yaml_local.yaml = y
+    return y
 
 
 def load_env_config(data: str | bytes, *, source: str | None = None) -> EnvConfig:
@@ -133,7 +146,7 @@ def load_env_config(data: str | bytes, *, source: str | None = None) -> EnvConfi
         EnvConfigError: YAML 语法错误或结构非法（非两级映射、值非标量等）。
     """
     try:
-        raw = _yaml.load(
+        raw = _loader().load(
             StringIO(data) if isinstance(data, str) else StringIO(data.decode("utf-8"))
         )
     except YAMLError as exc:
