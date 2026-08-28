@@ -166,8 +166,17 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
                 conn.bind_log_file(log_file)
 
     def clear_case_log(self, port: str) -> None:
+        """清除端口用例日志绑定.
+
+        P1-2：绑定的 stem 存在时触发 raw_logger.end_case——用例结束即关闭其
+        日志句柄对，常驻进程（GUI/MCP 跨大量用例）下句柄不再无限累积。锁内
+        调用安全：end_case 只做 put_nowait 入队（满则丢弃，句柄由 RawLogger
+        内部 LRU 上限兜底），无 IO、不阻塞。
+        """
         with self._lock:
-            self._log_files.pop(port, None)
+            popped = self._log_files.pop(port, None)
+            if popped is not None and self._raw_logger is not None:
+                self._raw_logger.end_case(popped)
             conn = self._connections.get(port)
             if conn is not None:
                 conn.bind_log_file(None)
