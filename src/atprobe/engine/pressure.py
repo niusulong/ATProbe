@@ -199,6 +199,8 @@ def _step_command(step: Step) -> str:
         return step.data.file
     if step.data is not None and step.data.inline is not None:
         return step.data.inline
+    if step.data is not None and step.data.inline_hex is not None:
+        return step.data.inline_hex
     return ""
 
 

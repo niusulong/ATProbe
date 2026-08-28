@@ -90,7 +90,8 @@ class PortConfig:
 class DataStreamSpec:
     """数据流发送规格（M1 §3.2）.
 
-    source  字件路径 或 内联字节（二选一，已在外层解析）。
+    data  已解析为字节的数据（文件/内联/十六进制在引擎层完成解析——P0-1
+          修复后路径不再流入串口层，本层只携字节）。
     chunk_threshold / chunk_size / chunk_interval / append_terminator 同 M2。
     """
 

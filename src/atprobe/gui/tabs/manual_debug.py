@@ -732,7 +732,7 @@ class ManualDebugWidget(QWidget):
     def _cleanup_file_send(self) -> None:
         """析构前清理：取消进行中的文件发送并等待线程退出。
 
-        P0 修复：worker 单块 write_bytes 可阻塞至 pyserial write_timeout（5s），
+        P0 修复：worker 的 write_data 分块写可阻塞至 pyserial write_timeout（5s），
         旧实现 wait(2000) 超时后直接丢弃引用 → 运行中的 QThread 被销毁
         （"QThread destroyed while running"，release 下 UB/崩溃）。改为
         循环等待（最长约 write_timeout + 余量），期间处理事件保持 UI 响应；
