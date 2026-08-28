@@ -48,6 +48,7 @@ from atprobe.gui.theme import MONO_FONT, get_tokens
 from atprobe.gui.widgets.command_library import CommandLibraryPanel
 from atprobe.gui.widgets.text_render import split_lines_preserving_blanks
 from atprobe.infra.serial.config import Terminator
+from atprobe.infra.serial.exceptions import SerialError
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QThread
@@ -520,14 +521,29 @@ class ManualDebugWidget(QWidget):
         if callable(is_conn) and not is_conn(port):
             QMessageBox.warning(self, "提示", f"端口 {port} 未连接，请先「打开端口」")
             return
+        # P1-8：文件发送进行中禁止插入命令——大文件 worker 分块写期间，命令字节会
+        # 交叉进文件数据流污染对端接收。侧栏命令库面板已随 _enter_file_sending
+        # 禁用，此处拦主窗口「命令库」停靠面板等仍活跃的路由入口（连接层命令锁
+        # 的文件发送周期在批 2b 接线，此前由本 UI 态检查兜底）。
+        if self._file_worker is not None:
+            QMessageBox.information(self, "端口忙", "文件发送进行中，请稍候再发送")
+            return
         send_manual = getattr(self._main, "send_manual", None)
         if not callable(send_manual):
             self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
             return
-        # TX 立即上屏（串口助手语义：发送即记录）
-        self._render_tx_command(command)
-        if not send_manual(port, command, terminator=self._terminator):
-            self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+        try:
+            # TX 立即上屏（串口助手语义：发送即记录）
+            self._render_tx_command(command)
+            if not send_manual(port, command, terminator=self._terminator):
+                self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+        except SerialError as exc:
+            # P1-3 撞锁快速失败（并发引擎/数据发送周期持锁时 write_command 抛出）：
+            # 友好提示而非落入通用错误框；其余 SerialError 原样上抛（路径不变）。
+            if "端口正忙" in str(exc):
+                QMessageBox.information(self, "端口忙", "文件发送进行中，请稍候再发送")
+                return
+            raise
 
     # ------------------------------------------------------------------
     # 文件发送（原始字节，不加结束符）
@@ -679,8 +695,12 @@ class ManualDebugWidget(QWidget):
         self.file_cancel_btn.setVisible(True)
         self.file_send_btn.setEnabled(False)
         self.file_btn.setEnabled(False)
-        # 互斥：禁用文本发送框与文本发送
+        # 互斥：禁用文本发送框与文本发送按钮（按钮不随输入框联动，须显式禁）
         self.send_edit.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        # P1-8：命令库侧栏禁用——文件发送期间双击命令会把 AT 字节交叉进文件数据流
+        # （write_bytes 不参与连接层命令锁，须在 UI 层拦截）
+        self._cmd_panel.setEnabled(False)
 
     def _exit_file_sending(self) -> None:
         """退出文件发送中状态：恢复控件可用性（worker/线程由调用方清理）。"""
@@ -688,6 +708,8 @@ class ManualDebugWidget(QWidget):
         self.file_cancel_btn.setVisible(False)
         self.file_btn.setEnabled(True)
         self.send_edit.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self._cmd_panel.setEnabled(True)
         self._sync_file_send_state()
 
     def _on_file_chunk_sent(self, chunk: bytes) -> None:

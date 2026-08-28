@@ -25,6 +25,7 @@ from atprobe.infra.serial.exceptions import (
     OperationCancelled,
     PortOpenError,
     SendError,
+    SerialError,
 )
 from atprobe.infra.serial.interfaces import (
     ERROR_KIND_DISCONNECT,
@@ -167,6 +168,11 @@ class SerialConnection:
         # P1 修复（热插拔自愈）：上次主动重连尝试时刻（monotonic），限频 1 次/秒
         self._last_reconnect_attempt = 0.0
 
+        # 端口级命令互斥（P1-3/P1-8）：现状无写线程——write_command/write_bytes 在
+        # 调用方线程同步执行，本锁是并发写问题的唯一防线。三个发送入口
+        # （send_command/write_command/数据发送周期）try-acquire；撞锁快速失败。
+        self._command_lock = threading.Lock()
+
     def add_rx_observer(self, observer: Callable[[bytes], None]) -> None:
         """订阅原始 RX 字节流（每个读到 chunk 即回调，读线程上下文）."""
         with self._rx_observer_lock:
@@ -202,24 +208,32 @@ class SerialConnection:
         """写字符串命令（自动追加结束符），不等待响应——供手动调试/串口助手用.
 
         与 send_command 区别：本方法立即返回，响应须经 rx_observer 自行接收。
+        线程语义：与 send_command 共用端口级命令锁（P1-3/P1-8），撞锁快速失败。
 
         Args:
             command: 命令文本（不含结束符）。
             terminator: 逐命令覆盖的结束符；None 时回退到连接级 PortConfig.terminator。
                 手动调试页结束符下拉即经此参数透传（连接级配置固定，逐命令可变）。
         """
-        if not self._connected or self._serial is None:
-            raise SendError(self.config.name, "端口未连接")
-        term = self.config.terminator if terminator is None else terminator
-        terminator_bytes = term.value.encode("ascii")
-        payload = command.encode("utf-8") + terminator_bytes
-        self._log_tx(payload)
-        self._notify_tx_observers(payload)
+        # P1-3/P1-8：命令写串行化——try-acquire 快速失败（排队策略的反面论证见
+        # send_command 入口注释）。
+        if not self._command_lock.acquire(blocking=False):
+            raise SerialError(self.config.name, "端口正忙：并发发送不支持")
         try:
-            self._serial.write(payload)  # type: ignore[union-attr]
-            self._serial.flush()  # type: ignore[union-attr]
-        except (SerialException, OSError) as exc:
-            raise SendError(self.config.name, str(exc)) from exc
+            if not self._connected or self._serial is None:
+                raise SendError(self.config.name, "端口未连接")
+            term = self.config.terminator if terminator is None else terminator
+            terminator_bytes = term.value.encode("ascii")
+            payload = command.encode("utf-8") + terminator_bytes
+            self._log_tx(payload)
+            self._notify_tx_observers(payload)
+            try:
+                self._serial.write(payload)  # type: ignore[union-attr]
+                self._serial.flush()  # type: ignore[union-attr]
+            except (SerialException, OSError) as exc:
+                raise SendError(self.config.name, str(exc)) from exc
+        finally:
+            self._command_lock.release()
 
     # ------------------------------------------------------------------
     # §4.1 连接管理
@@ -321,6 +335,26 @@ class SerialConnection:
         URC 立即返回（整段响应文本含 OK+URC）；timeout 内无 URC 则按超时返回（text
         含已收到的 OK 段，status=TIMEOUT）。为空时 OK 即终结（原行为）。
         """
+        # P1-3/P1-8：命令周期串行化——try-acquire 快速失败（不排队：排队会把
+        # 后台线程的命令静默串到引擎命令序列里，快速失败让调用方决策）。
+        if not self._command_lock.acquire(blocking=False):
+            raise SerialError(self.config.name, "端口正忙：并发发送不支持")
+        try:
+            return self._send_command_locked(
+                command, timeout=timeout, wait_urc=wait_urc, cancel=cancel
+            )
+        finally:
+            self._command_lock.release()
+
+    def _send_command_locked(
+        self,
+        command: str,
+        *,
+        timeout: float | None,
+        wait_urc: str | None,
+        cancel: CancelToken | None,
+    ) -> Response:
+        """send_command 的原方法体（调用方已持 _command_lock）."""
         if not self._connected or self._serial is None:
             return Response(
                 text="", status=ResponseStatus.ERROR, error="端口未连接", error_kind=ERROR_KIND_SEND
@@ -495,6 +529,9 @@ class SerialConnection:
 
         与 write_command 一样通知 TX 观察者：SerialConnection 是所有字节写入的
         唯一咽喉点，订阅 TX 流应能看到这条链路上的所有写入（含原始字节/文件发送）。
+
+        线程语义：裸字节接口，不参与命令互斥——仅供持锁周期内的分块写使用
+        （数据流发送；锁由外层发送周期持有，见 _command_lock 注释）。
         """
         if not self._connected or self._serial is None:
             raise SendError(self.config.name, "端口未连接")

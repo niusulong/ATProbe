@@ -176,7 +176,15 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         timeout: float | None = None,
         wait_urc: str | None = None,
         cancel: CancelToken | None = None,
+        pre_check: Callable[[], None] | None = None,
     ) -> Response:
+        """发送命令并等待响应（含断连重发，§4.2）.
+
+        Args:
+            pre_check: 获连接后、每次实际发送前调用的回调；抛异常则透传、不发送。
+                供上层（MCP）做锁内占用重检，消除 check-then-act TOCTOU
+                （批 3 接线，本批留接口）。
+        """
         conn = self._connections.get(port)
         if conn is None:
             return Response(text="", status=ResponseStatus.ERROR, error=f"端口 {port} 未打开")
@@ -191,11 +199,18 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
                     error_kind=ERROR_KIND_DISCONNECT,
                 )
 
+        # pre_check：获连接后、发送前调用——供上层（MCP）做锁内占用重检，
+        # 消除 check-then-act TOCTOU（批 3 接线，本批留接口）。
+        if pre_check is not None:
+            pre_check()
         resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
         # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）。
         # M3 修复：基于结构化 error_kind 判定，而非脆弱的中文字符串匹配。
         if resp.status is ResponseStatus.ERROR and resp.error_kind == ERROR_KIND_DISCONNECT:
             if self._reconnect(port):
+                # 重发前同样过 pre_check：重连窗口内占用状态可能变化（TOCTOU 同源）
+                if pre_check is not None:
+                    pre_check()
                 resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
         return resp
 

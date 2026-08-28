@@ -39,6 +39,9 @@ class _ScriptedResponse:
 class FakePortManager:
     """PortManager 的 Fake 实现，供集成测试驱动引擎（无需真实硬件）.
 
+    真实 SerialConnection 有端口级命令锁互斥（P1-3：send_command/write_command
+    try-acquire，撞锁抛"端口正忙"），Fake 为单线程测试替身、不加锁。
+
     用法::
 
         fake = FakePortManager()
