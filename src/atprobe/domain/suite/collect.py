@@ -113,8 +113,8 @@ def collect_case_paths(
     下潜深度（起始目录自身为 0 层，max_depth=4 即收 1-4 层子目录内文件，
     5 层起不收——防止 ``list_cases(path="C:\\")`` 之类全盘扫）；max_files 限
     收集总数，达到即停止收集并在 warnings 附截断提示。目录扫描用 os.walk
-    手控深度（rglob 无法限制下潜），文件列表收集后统一按路径字符串排序
-    （保留 rglob sorted 的确定性语义）。
+    手控深度（rglob 无法限制下潜），单路径内按路径字符串排序（保留 rglob
+    sorted 的确定性语义），跨路径保持参数顺序（CLI 多参数执行序）。
     """
     if not paths:
         # 无位置参数时用配置的 cases_dir（调用方负责锚定到工作区）
@@ -125,6 +125,9 @@ def collect_case_paths(
     truncated = False
     for p in paths:
         if p.is_dir():
+            # 单路径内先全量收集再按路径字符串排序（对齐旧 rglob+sorted 的确定性），
+            # 跨路径保持参数顺序（CLI 多参数的执行序，T2 审查修复——不做全局排序）
+            found: list[Path] = []
             for dirpath, dirnames, filenames in os.walk(p):
                 cur = Path(dirpath)
                 # 相对起始目录的深度（起始目录为 0）：到达上限即剪枝不再下潜
@@ -132,25 +135,26 @@ def collect_case_paths(
                 if max_depth is not None and len(cur.relative_to(p).parts) >= max_depth:
                     dirnames[:] = []
                 for name in filenames:
-                    # 同时覆盖 .yaml 与 .yml 两种后缀，与单文件分支一致
-                    # （否则目录下的 .yml 用例与 suite-*.yml 会被静默漏扫）
+                    # 同时覆盖 .yaml 与 .yml 两种后缀（大小写不敏感，对齐 Windows
+                    # pathlib glob 行为——否则 .YAML 在目录扫描中被静默漏收）
                     f = cur / name
-                    if f.suffix not in (".yaml", ".yml"):
+                    if f.suffix.lower() not in (".yaml", ".yml"):
                         continue
                     # 目录扫描排除套件文件避免与显式指定重复
                     if f.name.startswith("suite-"):
                         continue
-                    key = f.resolve()
-                    if key in seen:
-                        continue
-                    if max_files is not None and len(result) >= max_files:
-                        truncated = True
-                        break
-                    seen.add(key)
-                    result.append(f)
-                if truncated:
+                    found.append(f)
+            found.sort(key=str)
+            for f in found:
+                key = f.resolve()
+                if key in seen:
+                    continue
+                if max_files is not None and len(result) >= max_files:
+                    truncated = True
                     break
-        elif p.is_file() and p.suffix in (".yaml", ".yml"):
+                seen.add(key)
+                result.append(f)
+        elif p.is_file() and p.suffix.lower() in (".yaml", ".yml"):
             key = p.resolve()
             if key not in seen:
                 if max_files is not None and len(result) >= max_files:
@@ -164,7 +168,6 @@ def collect_case_paths(
             break
     if truncated:
         warnings.append(f"文件数超过上限 {max_files}，已截断")
-    result.sort(key=str)
     return result, warnings
 
 
