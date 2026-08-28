@@ -28,6 +28,7 @@ from atprobe.infra.serial.interfaces import (
     CancelToken,
     ICommandSender,
 )
+from atprobe.infra.serial.sleep import cancellable_sleep
 
 _log = logging.getLogger(__name__)
 
@@ -94,14 +95,18 @@ def run_pressure(
 
         round_ok = True
         round_interrupted = False
+        # 本轮局部统计（轮末统一提交，设计 §4.2a）：正式轮（rnd>warmup 且非中断）
+        # 才并入全局；warmup 轮与中断轮整轮丢弃——step_stats 与 rounds 完全同口径
+        round_rt: dict[int, list[float]] = {i: [] for i in step_rt}
+        round_suc: dict[int, int] = dict.fromkeys(step_rt, 0)
+        round_fail: dict[int, int] = dict.fromkeys(step_rt, 0)
+        round_skip: dict[int, int] = dict.fromkeys(step_rt, 0)
         for idx, step in enumerate(case.steps, start=1):
             # 压测中 on_failure 固定 continue（§4.5）。
             # P1-6 修复：旧实现仅当 step.on_failure 为 None 才覆盖 → 用户配置
             # skip/abort 时漏过：skip 使失败轮计为成功轮（成功率虚高）、abort 被
             # 无视。现统一覆盖为 CONTINUE 并 debug 提示被忽略的配置。
             if step.on_failure is not None:
-                # 批 3 注意：引入用例级 on_failure 透传后，用例级 skip 会绕过此规范化
-                # （execute_step 走 case 级策略产生 SKIPPED→成功率虚高）——收敛时须一并覆盖。
                 _log.debug(
                     "压测忽略步骤 %d 的 on_failure=%s（固定 continue）", idx, step.on_failure
                 )
@@ -116,32 +121,33 @@ def run_pressure(
                 sender=sender,
                 default_port=default_port,
                 step_timeout_default=step_timeout_default,
+                # 显式规范化（设计 §4.2b 防倒退）：压测中用例级 on_failure 同步骤级
+                # 一并规范化为 CONTINUE——skip 会把失败轮计为成功轮（SKIPPED 不计
+                # 失败、不判废该轮），abort 与压测「失败默认继续」语义冲突（压测的
+                # 中止仅由 loop.abort_on_failure 控制）。
+                case_on_failure=FailureStrategy.CONTINUE,
                 clock=clock,
                 sleep=sleep,
                 cancel=cancel,
             )
             sr = result.step_result
             if sr.status is StepStatus.PASS:
-                if rnd > warmup:
-                    step_suc[idx] += 1
-                    step_rt[idx].append(sr.duration_ms)
+                round_suc[idx] += 1
+                round_rt[idx].append(sr.duration_ms)
             elif sr.status is StepStatus.SKIPPED:
                 # P3 修复：when 条件不满足的 SKIPPED 不计该步失败、不判废该轮
                 # （旧实现把 SKIPPED 当 step_fail → round_ok=False，口径失真）
-                if rnd > warmup:
-                    step_skip[idx] += 1
+                round_skip[idx] += 1
             elif sr.status is StepStatus.INTERRUPTED:
                 # P1-6 修复：取消中断轮不计入 rounds 统计（counted/success/failed）——
-                # 非设备失败。注意：该轮此前已 PASS 的步骤仍计入 step_suc/step_rt
-                # （分层统计留有 ≤1 的受控偏差，不影响 success_rate）；step_stats 与
-                # rounds 的完全对齐随批 3 _failure_strategy 收敛时统一处理。
+                # 非设备失败。中断轮整轮丢弃（含该轮此前已 PASS 的步骤），step_stats
+                # 与 rounds 完全同口径（旧实现先计入后中断，分层统计留 ≤1 受控偏差）。
                 round_interrupted = True
                 aborted = True
                 abort_reason = "cancelled"
                 break
             else:
-                if rnd > warmup:
-                    step_fail[idx] += 1
+                round_fail[idx] += 1
                 round_ok = False
                 if abort_on_fail:
                     aborted = True
@@ -154,6 +160,12 @@ def run_pressure(
                 success_rounds += 1
             else:
                 failed_rounds += 1
+            # 步骤统计轮末提交：与 counted/success/failed 同一判定同一时点
+            for i in step_rt:
+                step_rt[i].extend(round_rt[i])
+                step_suc[i] += round_suc[i]
+                step_fail[i] += round_fail[i]
+                step_skip[i] += round_skip[i]
 
         # 进度上报（含 warmup 轮）
         if on_progress is not None and (rnd % max(1, total // 20) == 0 or rnd == total):
@@ -164,7 +176,13 @@ def run_pressure(
             break
 
         if rnd < total:
-            sleep(loop.interval / 1000.0)
+            # F-14：轮间隔换 cancellable_sleep——分片睡眠、取消即提前出循环
+            # （旧实现整段 sleep 不响应取消，取消后最长滞留一个 interval）。
+            # 取消时与循环头检查同款置位（aborted/abort_reason），供上层判 INTERRUPTED。
+            if not cancellable_sleep(loop.interval / 1000.0, cancel, sleep=sleep):
+                aborted = True
+                abort_reason = "cancelled"
+                break
 
     # 构建每步统计
     step_stats = tuple(
