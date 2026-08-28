@@ -21,8 +21,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,14 +46,17 @@ from atprobe.domain.report.models import (
 )
 from atprobe.infra.config.envconfig import EnvConfig
 from atprobe.infra.serial.config import DataStreamSpec
-from atprobe.infra.serial.exceptions import OperationCancelled
+from atprobe.infra.serial.exceptions import OperationCancelled, PortBusyError
 from atprobe.infra.serial.interfaces import (
+    ERROR_KIND_SEND,
     ERROR_KIND_TIMEOUT,
     CancelToken,
     ICommandSender,
     Response,
     ResponseStatus,
 )
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,6 +119,35 @@ class _DataPayload:
     display: str
 
 
+# ---------------------------------------------------------------------------
+# 语义唯一决策点（设计 §4.1/§4.2）——同类判定收敛为单函数，防止多处内联口径漂移
+# ---------------------------------------------------------------------------
+def _filter_matched(extracted: dict[str, str], matched: dict[str, bool]) -> dict[str, str]:
+    """提取结果的唯一过滤口径（设计 §4.1）.
+
+    只放行「实际匹配到」的 extract 变量——未匹配=不并入=保持未定义→null 语义
+    （而非并入空串，毒化 `x is not null` / `!= "ERROR"` 类判定）。三个消费点
+    （提交变量池 / poll until 作用域 / 断言作用域）全部经此单一口径。
+    matched.get(k, True)：extractor 未报告的键按已匹配处理。
+    """
+    return {k: v for k, v in extracted.items() if matched.get(k, True)}
+
+
+def _merged_scope(
+    base: Mapping[str, object], extracted: dict[str, str], matched: dict[str, bool]
+) -> dict[str, object]:
+    """「已有变量池 + 本次提取」的临时作用域（设计 §4.1）.
+
+    供 poll until 判定与断言作用域构造（不污染 ctx，提交由 execute_step 统一完成）。
+    """
+    return {**base, **_filter_matched(extracted, matched)}
+
+
+def _failure_strategy(step: Step, case_on_failure: FailureStrategy | None) -> FailureStrategy:
+    """on_failure 唯一决策点（设计 §4.2）：step.on_failure > case.on_failure > 默认 ABORT."""
+    return step.on_failure or case_on_failure or FailureStrategy.ABORT
+
+
 def execute_step(
     step: Step,
     *,
@@ -146,6 +179,10 @@ def execute_step(
     # ------------------------------------------------------------------
     # 1. when 条件检查（teardown 不支持 when）
     # ------------------------------------------------------------------
+    if is_teardown and (step.when is not None or step.poll is not None):
+        # P3：teardown 无条件执行且不可轮询——此前静默忽略，用例作者配置了
+        # when/poll 却不知未生效，排查困难；告警而非硬拒（teardown 语义优先）。
+        _log.warning("teardown 步骤 %d 忽略 when/poll（teardown 无条件执行/不可轮询）", index)
     if not is_teardown and step.when is not None:
         try:
             cond = evaluate(step.when, ctx.variables, env=ctx.env)
@@ -211,15 +248,14 @@ def execute_step(
         )
         return StepExecResult(status=StepStatus.INTERRUPTED, step_result=sr, interrupted=True)
 
-    # 提交 extract 到变量池（仅匹配成功的变量；失败的等同未定义，REQ-M2 §5.1）
-    for k, v in attempt.extracted.items():
-        if attempt.matched.get(k, True):
-            ctx.variables[k] = v
+    # 提交 extract 到变量池（仅匹配成功的变量；失败的等同未定义，REQ-M2 §5.1）——
+    # 过滤口径唯一：与 until 判定/断言作用域共用 _filter_matched（设计 §4.1）
+    ctx.variables.update(_filter_matched(attempt.extracted, attempt.matched))
 
     # status 与 abort_case 一并算出（含 skip 区分，REQ-M2 §3.4）
     strategy: FailureStrategy | None = None
     if not attempt.step_passed:
-        strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
+        strategy = _failure_strategy(step, case_on_failure)
 
     if not attempt.step_passed and strategy is FailureStrategy.SKIP:
         status = StepStatus.SKIPPED  # skip：步骤记 SKIPPED（不算失败）
@@ -311,6 +347,15 @@ def _run_retry(
 # ---------------------------------------------------------------------------
 # poll：最外层独占，单次不满足不算失败（§4.4 / §11）
 # ---------------------------------------------------------------------------
+def _poll_timeout(attempt: _SingleAttempt, expr_error: str) -> _SingleAttempt:
+    """poll 超时统一出口（§4.4）：步骤失败；优先报告 until 表达式错误（若有），否则报超时."""
+    attempt.step_passed = False
+    attempt.step_error = (
+        f"poll until 表达式错误：{expr_error}" if expr_error else "poll 超时未满足条件"
+    )
+    return attempt
+
+
 def _run_poll(
     step: Step,
     request: str,
@@ -334,10 +379,18 @@ def _run_poll(
     # M7 修复：旧实现 except Exception: pass 把表达式编译错误也静默吞掉，用户看到的是
     # "poll 超时未满足条件"而非"until 表达式错误"，排查困难。
     expr_error: str = ""
+    attempt: _SingleAttempt | None = None
 
     while True:
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("poll 被取消")
+        if attempt is not None and clock() >= deadline:
+            # P3 修复（poll 头 deadline）：贴 deadline 的下一轮不再向设备发命令——
+            # 旧实现循环头只查 cancel，末次间隔 sleep 到期后仍会再发一条查询、
+            # 等响应回来才在循环尾判超时（对设备多一次无意义打扰）。超时出口与
+            # 循环尾统一（_poll_timeout，文案/返回结构一致）。首轮免查（attempt
+            # 尚未构造）：首轮立即查询是有意设计（见下方注释）。
+            return _poll_timeout(attempt, expr_error), iterations
         iterations += 1
         # 注：首轮立即查询（sleep 在循环末尾）。这是有意设计——poll 典型场景是
         # 「发指令后等设备产生结果」，首轮立即查询可在结果已就绪时省掉一个 interval
@@ -345,7 +398,8 @@ def _run_poll(
         # P2 修复（超时预算）：单次 attempt 等待上限取「步骤超时」与「poll 剩余
         # 预算」较小值——旧实现末次 attempt 可阻塞整个步骤超时，poll 实际耗时
         # 大幅超出 poll.timeout。
-        remaining_budget = max(deadline - clock(), 0.05)
+        now = clock()
+        remaining_budget = max(deadline - now, 0.05)
         attempt = _single_attempt(
             step,
             request,
@@ -358,6 +412,7 @@ def _run_poll(
             clock,
             sleep,
             cancel,
+            max_delay_s=max(deadline - now, 0.0),  # 2b②：step.interval 前置延迟钳入剩余预算
         )
         total_duration += attempt.duration_ms
         attempt.duration_ms = total_duration
@@ -367,14 +422,9 @@ def _run_poll(
         # step_passed=True，把断言失败静默翻转为 PASS（报告出现「PASS 步骤带失败
         # 断言」的自相矛盾）。poll 的成功语义 = 条件满足 + 断言通过，二者缺一不可。
         if attempt.response.ok:
-            tmp_scope = dict(ctx.variables)
-            # P1 修复：只合并「实际匹配到」的 extract 变量（与常规步骤提交口径一致，
-            # step_runner 提交池时按 matched 过滤）。旧实现把未匹配变量置 "" 合并，
-            # 导致 `x is not null` 在 extract 失败的轮次假成功、`x is null` 永远轮询
-            # 到超时——与 when/后续步骤的「未匹配=未定义→null」语义矛盾。
-            tmp_scope.update(
-                {k: v for k, v in attempt.extracted.items() if attempt.matched.get(k, True)}
-            )
+            # 作用域构造经 _merged_scope（设计 §4.1）：与提交变量池/断言作用域
+            # 共用 _filter_matched 单一过滤口径（未匹配=未定义→null）。
+            tmp_scope = _merged_scope(ctx.variables, attempt.extracted, attempt.matched)
             try:
                 if evaluate(poll.until, tmp_scope, env=ctx.env):
                     if attempt.step_passed:
@@ -392,12 +442,8 @@ def _run_poll(
                     expr_error = str(exc)
 
         if clock() >= deadline:
-            # poll 超时 → 步骤失败（§4.4）。优先报告表达式错误（若有），否则报超时
-            attempt.step_passed = False
-            attempt.step_error = (
-                f"poll until 表达式错误：{expr_error}" if expr_error else "poll 超时未满足条件"
-            )
-            return attempt, iterations
+            # poll 超时 → 步骤失败（§4.4）
+            return _poll_timeout(attempt, expr_error), iterations
         # P2 修复（耗时口径）：间隔等待计入步骤总耗时——旧实现只累计发送/等待
         # 时长，报告与压测 avg 系统性低估（retry.count=3、interval=1s 时差 ~3s）。
         # 复审补充：sleep 按剩余预算截断——贴 deadline 到达的响应通过检查后仍
@@ -423,30 +469,57 @@ def _single_attempt(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     cancel: CancelToken | None,
+    max_delay_s: float | None = None,
 ) -> _SingleAttempt:
     t0 = clock()
     # interval 接线（批 2b Task 6，此前为模型死字段）：每次 attempt 发送前的
     # 固定延迟（ms→s），command/data 统一。ch06「收到 > 提示符后延迟 50-100ms
     # 再发数据」即 data 步骤 interval 的典型场景；计入步骤耗时（t0 已起表）。
+    # 2b②：poll 路径传 max_delay_s（剩余预算）——钳制延迟不超出 poll deadline，
+    # 贴 deadline 时宁可缩短前置延迟也不超预算；retry/单次路径无预算概念（None）。
     if step.interval:
-        sleep(step.interval / 1000.0)
+        delay = step.interval / 1000.0
+        if max_delay_s is not None:
+            delay = min(delay, max_delay_s)
+        if delay > 0:
+            sleep(delay)
     matched: dict[str, bool] = {}
     # 发送分叉（P0-1 核心）：data 步骤走 send_data 通道（分块/持锁由 spec 携带），
     # command 步骤照旧 send_command。expect 从 step.expect 传入——「附加完成
     # 条件」（如 TCPSEND 提示符 \r\n>）自此对引擎步骤生效（2a 协议已备好形参）。
+    # PortBusyError 步骤级分类（2b 终审⑧）：引擎步骤与手动/文件发送路径交错的
+    # 端口命令互斥撞锁，分类为步骤级失败（走 on_failure 决策），而非逃逸到
+    # scheduler 兜底的「引擎内部错误」；只捕 PortBusyError，其他异常保持逃逸
+    # （连接层缺陷须兜底可见）。
     if payload is not None:
-        resp = sender.send_data(
-            port,
-            payload.spec,
-            timeout=timeout,
-            wait_urc=wait_urc,
-            expect=step.expect,
-            cancel=cancel,
-        )
+        try:
+            resp = sender.send_data(
+                port,
+                payload.spec,
+                timeout=timeout,
+                wait_urc=wait_urc,
+                expect=step.expect,
+                cancel=cancel,
+            )
+        except PortBusyError as exc:
+            resp = Response(
+                text="",
+                status=ResponseStatus.ERROR,
+                error=f"端口正忙：{exc}",
+                error_kind=ERROR_KIND_SEND,
+            )
     else:
-        resp = sender.send_command(
-            port, request, timeout=timeout, wait_urc=wait_urc, expect=step.expect, cancel=cancel
-        )
+        try:
+            resp = sender.send_command(
+                port, request, timeout=timeout, wait_urc=wait_urc, expect=step.expect, cancel=cancel
+            )
+        except PortBusyError as exc:
+            resp = Response(
+                text="",
+                status=ResponseStatus.ERROR,
+                error=f"端口正忙：{exc}",
+                error_kind=ERROR_KIND_SEND,
+            )
     dt = (clock() - t0) * 1000.0
 
     extracted: dict[str, str] = {}
@@ -498,12 +571,11 @@ def _single_attempt(
         values, matched = extract_all(step.extract, resp.text)
         extracted = values
 
-    # 断言求值用「本次 extract + 已有变量池」临时作用域（不污染 ctx，由外层提交）
-    tmp_scope = dict(ctx.variables)
-    # P1-5 修复：只合并「实际匹配到」的 extract 变量——与 _run_poll 的 until 判定
-    # 口径一致（「未匹配=未定义→null」）。旧实现把未匹配变量置 "" 并入断言作用域，
-    # `{var: x, op: ne, value: "ERROR"}` 在提取失败时 "" != "ERROR" 假成功。
-    tmp_scope.update({k: v for k, v in extracted.items() if matched.get(k, True)})
+    # 断言求值用「本次 extract + 已有变量池」临时作用域（不污染 ctx，由外层提交）——
+    # 构造经 _merged_scope（设计 §4.1）：与提交变量池/poll until 判定共用
+    # _filter_matched 单一过滤口径，未匹配变量在断言作用域=未定义（P1-5：旧实现
+    # 并入空串使 `{var: x, op: ne, value: "ERROR"}` 在提取失败时假成功）。
+    tmp_scope = _merged_scope(ctx.variables, extracted, matched)
     if step.assertions:
         outcomes = assess_all(step.assertions, resp.text, tmp_scope)
 
@@ -633,9 +705,10 @@ def _author_error_result(
 
     P1 修复：这类错误此前硬编码 abort_case=True，绕过 on_failure 决策——
     用户显式配置 on_failure: continue/skip 对作者错误不生效。现与普通失败
-    一致：按 step.on_failure → case.on_failure → 默认 ABORT 决策。
+    一致：经 _failure_strategy 单一决策点（step.on_failure → case.on_failure →
+    默认 ABORT，设计 §4.2）。
     """
-    strategy = step.on_failure or case_on_failure or FailureStrategy.ABORT
+    strategy = _failure_strategy(step, case_on_failure)
     status = StepStatus.SKIPPED if strategy is FailureStrategy.SKIP else StepStatus.FAIL
     sr = StepResult(
         step_index=index,
@@ -652,11 +725,13 @@ def _author_error_result(
     return StepExecResult(status=status, step_result=sr, abort_case=abort_case)
 
 
-def _build_skipped(
-    index: int, phase: str, port: str, step: Step, msg: str, *, is_fail: bool = False
-) -> StepExecResult:
+def _build_skipped(index: int, phase: str, port: str, step: Step, msg: str) -> StepExecResult:
+    """when 不满足的跳过出口（status 恒 SKIPPED、不中止用例）.
+
+    批 3：删除恒为 False 的 is_fail 死参数（唯一调用点是 when 不满足）。
+    """
     it = InputType.DATA if step.data is not None else InputType.COMMAND
-    status = StepStatus.FAIL if is_fail else StepStatus.SKIPPED
+    status = StepStatus.SKIPPED
     sr = StepResult(
         step_index=index,
         phase=phase,
@@ -668,4 +743,4 @@ def _build_skipped(
         response="",
         error_msg=msg,
     )
-    return StepExecResult(status=status, step_result=sr, abort_case=is_fail)
+    return StepExecResult(status=status, step_result=sr, abort_case=False)
