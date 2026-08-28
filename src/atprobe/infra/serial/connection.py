@@ -874,6 +874,14 @@ class SerialConnection:
     # ------------------------------------------------------------------
     # 原始日志
     # ------------------------------------------------------------------
+    def bind_log_file(self, log_file: Path | None) -> None:
+        """绑定/解绑用例级原始日志文件（引擎线程在每用例开始/结束时调用）.
+
+        替代 PortManager 直写 ``conn._log_file`` 的越封装访问（§3.3）。None 即
+        解绑（用例结束/端口关闭）——_log_tx/_log_rx 据此停写该用例日志。
+        """
+        self._log_file = log_file
+
     def _log_tx(self, data: bytes) -> None:
         if self._raw_logger is not None and self._log_file is not None:
             self._raw_logger.log(self._log_file, "TX", data)  # type: ignore[arg-type]

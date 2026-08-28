@@ -153,17 +153,30 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         ]
 
     def set_case_log(self, port: str, log_file: Path | None) -> None:
-        """引擎在每用例开始时绑定该端口的用例日志文件."""
-        self._log_files[port] = log_file
-        conn = self._connections.get(port)
-        if conn is not None:
-            conn._log_file = log_file  # noqa: SLF001 - 内部协作
+        """引擎在每用例开始时绑定该端口的用例日志文件.
+
+        锁纪律（批 2a Task 7）：与 open/close 对 _log_files/_connections 的
+        变更互斥——锁内仅 dict 操作 + 绑定转发（bind_log_file 为纯属性赋值，
+        无 IO），不与锁序 _lock → _observers_lock 冲突。
+        """
+        with self._lock:
+            self._log_files[port] = log_file
+            conn = self._connections.get(port)
+            if conn is not None:
+                conn.bind_log_file(log_file)
 
     def clear_case_log(self, port: str) -> None:
-        self._log_files.pop(port, None)
-        conn = self._connections.get(port)
-        if conn is not None:
-            conn._log_file = None  # noqa: SLF001
+        with self._lock:
+            self._log_files.pop(port, None)
+            conn = self._connections.get(port)
+            if conn is not None:
+                conn.bind_log_file(None)
+
+    def configs(self) -> set[str]:
+        """已注册端口名快照（持锁收集）——供 GUI connected_ports 等视图使用，
+        替代越过封装裸迭代 _configs（F-3 同型崩溃点，批 1 复核发现）。"""
+        with self._lock:
+            return set(self._configs.keys())
 
     # ------------------------------------------------------------------
     # §3.1 命令发送（含重连，§4.2）

@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from atprobe.infra.serial.config import PortConfig, Terminator
@@ -87,7 +88,12 @@ class FakePortManager:
         match: str | None = None,
         persistent: bool = False,
     ) -> None:
-        """预设响应。persistent=True 时该响应不消费（retry/poll 多次返回同一响应）."""
+        """预设响应。persistent=True 时该响应不消费（retry/poll 多次返回同一响应）.
+
+        match 为**子串包含**语义，非精确匹配：发送命令包含该子串即命中
+        （消费逻辑 ``sr.match in command``，如 match="AT+CSQ" 命中 "AT+CSQ?"）。
+        None = 匹配任意命令（按序消费）。
+        """
         self._scripts.setdefault(port, []).append(
             _ScriptedResponse(response=response, match=match, consume_after=not persistent)
         )
@@ -103,8 +109,16 @@ class FakePortManager:
         self._fail_open.add(port)
 
     def emit_urc(self, port: str, text: str) -> None:
-        """模拟设备主动上报 URC（测试 URC 处理）."""
-        evt = URCEvent(port=port, text=text)
+        """模拟设备主动上报 URC（测试 URC 处理）.
+
+        timestamp 格式与真实 ``SerialConnection._dispatch_urc`` 一致
+        （``%Y-%m-%d %H:%M:%S.%f`` 截毫秒）——消费者按时间戳渲染时 Fake 同构。
+        """
+        evt = URCEvent(
+            port=port,
+            text=text,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        )
         for h in self._urc_handlers.get(port, []):
             h(evt)
 
@@ -127,6 +141,9 @@ class FakePortManager:
 
     def close_all(self) -> None:
         self._connected.clear()
+        # 对齐真实 PortManager.close_all（经 close(p) 逐口清 _log_files）：全部
+        # 关闭后不得残留用例日志绑定（对齐 close 的 I1 语义）
+        self._log_files.clear()
 
     def is_connected(self, port: str) -> bool:
         return port in self._connected

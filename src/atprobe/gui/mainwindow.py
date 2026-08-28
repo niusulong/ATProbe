@@ -603,7 +603,9 @@ class MainWindow(QMainWindow):
     # 视图层共享接口（§10.5：视图只渲染转发，逻辑在此）
     # ------------------------------------------------------------------
     def connected_ports(self) -> list[str]:
-        return [p for p in self._port_manager._configs if self._port_manager.is_connected(p)]
+        # configs() 持锁快照（批 2a Task 7）：裸迭代 _configs 与 open/close 并发时
+        # 会 RuntimeError（F-3 同型崩溃点），且越封装访问私有字段（§3.3）。
+        return [p for p in self._port_manager.configs() if self._port_manager.is_connected(p)]
 
     def available_ports(self) -> list[str]:
         """枚举系统全部可用串口名（含未连接的，如 COM1）。供下拉框填充.
