@@ -28,7 +28,17 @@ class PortBusyError(SerialError):
     """端口命令互斥撞锁（并发发送不支持，P1-3/P1-8）."""
 
     def __init__(self, port: str, reason: str) -> None:
+        # 结构化端口名（GUI/MCP 据此定位冲突端口；消息格式不变——批 3 前只拼了 message）
+        self.port = port
         super().__init__(f"[{port}] {reason}")
+
+
+class InvalidArgumentError(SerialError):
+    """调用方参数错误（expect/wait_urc 互斥或正则非法）.
+
+    SerialError 子类：MCP 层据此区分 INVALID_INPUT 而非 DEVICE_ERROR
+    （批 3 T9 接线）；既有 catch SerialError 的调用方行为不变。
+    """
 
 
 class OperationCancelled(SerialError):

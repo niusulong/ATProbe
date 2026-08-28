@@ -19,9 +19,9 @@ import time
 
 import pytest
 
-from atprobe.infra.serial.config import FrameFormat, PortConfig
+from atprobe.infra.serial.config import DataStreamSpec, FrameFormat, PortConfig
 from atprobe.infra.serial.connection import SerialConnection
-from atprobe.infra.serial.exceptions import SerialError
+from atprobe.infra.serial.exceptions import InvalidArgumentError, SerialError
 from atprobe.infra.serial.interfaces import ResponseStatus
 
 
@@ -348,3 +348,77 @@ class TestExpectValidation:
         conn = _make_connection(monkeypatch)
         with pytest.raises(SerialError, match="正则无效"):
             conn.send_command("AT+X", timeout=1.0, expect="(")
+
+
+class TestInvalidArgumentErrorTyping:
+    """入口参数错误类型化（InvalidArgumentError，SerialError 子类，批 3 T1）.
+
+    _compile_cycle_params 为 send_command/send_data 共用——两个入口的互斥与
+    正则错误均抛 InvalidArgumentError；MCP 层据此区分 INVALID_INPUT 而非
+    DEVICE_ERROR（批 3 T9 接线）。既有 pytest.raises(SerialError) 用例不受
+    影响（子类兼容）。
+    """
+
+    def test_is_subclass_of_serial_error(self) -> None:
+        assert issubclass(InvalidArgumentError, SerialError)
+
+    def test_mutex_raises_invalid_argument_error(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        conn = _make_connection(monkeypatch)
+        with pytest.raises(InvalidArgumentError, match="互斥") as ei:
+            conn.send_command("AT+X", timeout=1.0, wait_urc=r"\+X:ok", expect=r"\r\n>")
+        assert isinstance(ei.value, SerialError)
+
+    def test_invalid_regex_raises_invalid_argument_error(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        conn = _make_connection(monkeypatch)
+        with pytest.raises(InvalidArgumentError, match="正则无效"):
+            conn.send_command("AT+X", timeout=1.0, expect="(")
+
+    def test_send_data_mutex_raises_invalid_argument_error(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """send_data 共用 _compile_cycle_params——数据入口同样类型化。"""
+        conn = _make_connection(monkeypatch)
+        with pytest.raises(InvalidArgumentError, match="互斥"):
+            conn.send_data(DataStreamSpec(data=b"x"), wait_urc=r"\+X:ok", expect=r"\r\n>")
+
+
+class TestExpectTimeoutKeepReExemption:
+    """expect 等待周期超时：匹配 expect 的行豁免 urc_filter 剥离（批 3 T1）.
+
+    与 wait_urc 对称——expect 匹配的是本周期显式声明的期待内容，比全局噪声
+    声明更具体。特征构造：expect 用 ``$`` 锚点实现「行级命中、字节流未命中」
+    ——expect 检测（LineAssembler）作用于原始 RX 字节（行尾 \\r 仍在，
+    ``\\d+$`` 不中）→ 等到超时；剥离豁免（_strip_filtered_urcs）作用于
+    strip 后的行（``$MYX: 1`` 命中 ``\\$MYX: \\d+$``）→ 不被 urc_filter 剥。
+    """
+
+    def _make_filtered_connection(self, monkeypatch) -> SerialConnection:  # type: ignore[no-untyped-def]
+        cfg = PortConfig(
+            name="COM9",
+            baudrate=115200,
+            frame=FrameFormat.parse("8N1"),
+            urc_filter=(r"\$MY",),
+        )
+        conn = SerialConnection(cfg)
+        monkeypatch.setattr(conn, "_serial", _StubSerial())
+        monkeypatch.setattr(conn, "_connected", True)
+        return conn
+
+    def test_expect_matched_line_kept_in_timeout_text(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """同时命中 urc_filter 与 expect 的行保留在超时 text（豁免生效）。"""
+        conn = self._make_filtered_connection(monkeypatch)
+        resp = _send_and_feed(
+            conn,
+            "AT+X",
+            chunks=[b"\r\n$MYX: 1\r\n"],
+            timeout=0.3,
+            expect=r"\$MYX: \d+$",
+        )
+        assert resp.status is ResponseStatus.TIMEOUT
+        assert "$MYX: 1" in resp.text  # 未被 urc_filter 剥离
+        assert resp.error == "响应超时"  # expect 超时文案不冒充「等待 URC 超时」
+
+    def test_filter_line_still_stripped_without_expect(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """对照：无 expect 的普通周期超时，同一行照常被 urc_filter 剥离。"""
+        conn = self._make_filtered_connection(monkeypatch)
+        resp = _send_and_feed(conn, "AT+X", chunks=[b"\r\n$MYX: 1\r\n"], timeout=0.3)
+        assert resp.status is ResponseStatus.TIMEOUT
+        assert "$MYX: 1" not in resp.text

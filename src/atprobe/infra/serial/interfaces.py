@@ -136,6 +136,7 @@ class ICommandSender(Protocol):
         wait_urc: str | None = None,
         expect: str | None = None,
         cancel: CancelToken | None = None,
+        pre_check: Callable[[], None] | None = None,
     ) -> Response:
         """发送命令（不含结束符，由实现按 PortConfig.terminator 自动追加）并等待完整响应.
 
@@ -148,9 +149,13 @@ class ICommandSender(Protocol):
             expect: 附加完成条件正则（可空，设计 §2.3）。非空时对发送后的原始字节流
                 做字节级匹配（不依赖换行），命中即交付 COMPLETE（响应文本=缓冲至命中
                 点，优先于终结行判定）；与 wait_urc 互斥，同传或正则非法由实现抛
-                ``SerialError``。
+                ``InvalidArgumentError``（``SerialError`` 子类）。
             cancel: 取消令牌；触发后阻塞操作立即抛 ``OperationCancelled``（与 Fake/vsim 一致，
                 统一取消语义，上层据此判 INTERRUPTED 而非 FAIL）。
+            pre_check: 获命令锁后、状态突变前调用的回调（设计 §3.2"锁内重检"），
+                供上层（MCP）做占用重检，消除 check-then-act TOCTOU（批 3 接线）。
+                抛异常则透传且不发送（每次实际发送——含断连重发——前各执行一次）。
+                send_data 不设此参数（数据路径无 MCP 直连需求）。
         """
         ...
 

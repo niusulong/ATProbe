@@ -24,6 +24,7 @@ from typing import Any
 from atprobe.infra.serial.config import DataStreamSpec, PortConfig, Terminator
 from atprobe.infra.serial.datastream import send_chunks
 from atprobe.infra.serial.exceptions import (
+    InvalidArgumentError,
     OperationCancelled,
     PortBusyError,
     PortOpenError,
@@ -357,8 +358,9 @@ class SerialConnection:
         expect 非空时为附加完成条件（设计 §2.3，批 2a Task 5）：对发送后的字节流
         做字节级匹配（不依赖换行，如 TCPSEND 提示符 ``\\r\\n>``），命中即交付
         COMPLETE（响应文本=缓冲至命中点，优先于终结行判定；检测在 LineAssembler）。
-        expect 与 wait_urc 互斥（均为自定义完成语义，二选一）——同传抛 SerialError；
-        expect 正则编译失败亦抛 SerialError（与 wait_urc 同款 utf-8 字节级编译）。
+        expect 与 wait_urc 互斥（均为自定义完成语义，二选一）——同传抛
+        InvalidArgumentError（SerialError 子类）；expect 正则编译失败亦抛
+        InvalidArgumentError（与 wait_urc 同款 utf-8 字节级编译）。
 
         Args:
             pre_check: 获命令锁后、状态突变前调用——上层占用重检（消 check-then-act，
@@ -385,16 +387,17 @@ class SerialConnection:
     ) -> tuple[re.Pattern[bytes] | None, re.Pattern[bytes] | None]:
         """wait_urc/expect 的互斥校验与字节级编译（发送周期共用，批 2b Task 3 抽出）.
 
-        返回 (wait_urc_re, expect_re)；两者同传抛 SerialError，正则非法抛
-        SerialError（与 wait_urc 同款 utf-8 字节级编译：正则作用于原始 RX 字节，
-        不预先转码）。须在置等待态**之前**调用：抛 SerialError 时
-        _awaiting/_wait_urc_re/_expect_re 等通道状态零污染，锁由调用方
+        返回 (wait_urc_re, expect_re)；两者同传抛 InvalidArgumentError，正则
+        非法抛 InvalidArgumentError（SerialError 子类——调用方参数错误，
+        MCP 层据此区分 INVALID_INPUT，批 3 T9；与 wait_urc 同款 utf-8 字节级
+        编译：正则作用于原始 RX 字节，不预先转码）。须在置等待态**之前**调用：
+        抛错时 _awaiting/_wait_urc_re/_expect_re 等通道状态零污染，锁由调用方
         finally 释放（acquire→try→校验抛错→release 平衡）。send_command
         与 send_data 两个发送周期入口共用（任务口径：两者均为自定义完成
         语义，二选一）。
         """
         if expect is not None and wait_urc is not None:
-            raise SerialError(
+            raise InvalidArgumentError(
                 f"[{self.config.name}] expect 与 wait_urc 互斥：均为自定义完成语义，二选一"
             )
         expect_re: re.Pattern[bytes] | None = None
@@ -402,13 +405,15 @@ class SerialConnection:
             try:
                 expect_re = re.compile(expect.encode("utf-8"))
             except re.error as exc:
-                raise SerialError(f"[{self.config.name}] expect 正则无效：{exc}") from exc
+                raise InvalidArgumentError(f"[{self.config.name}] expect 正则无效：{exc}") from exc
         wait_urc_re: re.Pattern[bytes] | None = None
         if wait_urc is not None:
             try:
                 wait_urc_re = re.compile(wait_urc.encode("utf-8"))
             except re.error as exc:
-                raise SerialError(f"[{self.config.name}] wait_urc 正则无效：{exc}") from exc
+                raise InvalidArgumentError(
+                    f"[{self.config.name}] wait_urc 正则无效：{exc}"
+                ) from exc
         return wait_urc_re, expect_re
 
     def _send_command_locked(
@@ -495,6 +500,12 @@ class SerialConnection:
         **不复位** ``_wait_urc_re``/``_echo_line``——调用方须在自己 finally 调
         ``_reset_wait_urc()``（send_command 外层 finally 调 _reset_wait_urc
         即此模式）。
+
+        超时交付：快照文本经 _strip_filtered_urcs 剥离噪声行，豁免正则 keep_re
+        取 ``_wait_urc_re or _expect_re``——expect 等待中的周期超时，匹配
+        expect 的内容同样豁免剥离（与 wait_urc 对称：匹配的是本周期显式
+        声明的期待内容，比全局噪声声明更具体）；超时文案仅 wait_urc 模式为
+        「等待 URC 超时」，expect 超时仍是普通「响应超时」。
         """
         deadline = self._clock() + timeout
         while True:
@@ -535,9 +546,16 @@ class SerialConnection:
             # 快照后清缓冲：若存在未完结半行置孤儿标记（收割窗口内到达的
             # 续行由读线程字节级丢弃）
             partial = self._assembler.snapshot_and_reset()
-            keep_re = self._wait_urc_re  # wait_urc 超时：目标行不得被 filter 剥离
+            # wait_urc/expect 超时豁免（批 3，与 wait_urc 对称）：keep_re 行级
+            # 匹配的期待内容不被 urc_filter 剥离——expect 匹配的是本周期显式
+            # 声明的期待内容（比全局噪声声明更具体，规则同 _strip_filtered_urcs
+            # 注释）；两者均为 bytes 正则，行级 search 语义直接复用无类型问题
+            keep_re = self._wait_urc_re or self._expect_re
+            is_wait_urc = self._wait_urc_re is not None
         text = self._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
-        err = "响应超时" if keep_re is None else "等待 URC 超时"
+        # 超时文案仅 wait_urc 模式用「等待 URC 超时」（expect 是附加完成条件
+        # 而非 URC 等待，其超时仍是普通「响应超时」）——与剥离豁免判定解耦
+        err = "等待 URC 超时" if is_wait_urc else "响应超时"
         # 迟到响应收割（N58 实测 bug 修复）：超时预算小于设备实际响应时延时
         # （典型：poll 末次 attempt 预算被钳到 0.05s，设备 ~60-90ms 才回），
         # 本命令的响应会在超时返回之后、下一条命令 write 前后的窗口到达——
@@ -727,7 +745,7 @@ class SerialConnection:
         send_command 取消同语义）。
 
         expect/wait_urc 语义同 send_command（互斥，同传或正则非法抛
-        SerialError，抛出时通道状态零污染、锁已释放）：expect 例——FSWF 阶段
+        InvalidArgumentError，抛出时通道状态零污染、锁已释放）：expect 例——FSWF 阶段
         二等待 ``\\+FSWF: Timeout!``；wait_urc 例——TCPSEND 阶段二等待
         ``\\+TCPSEND: \\d+,\\d+``。
         """
@@ -950,11 +968,13 @@ class SerialConnection:
         交付）、wait_urc 整段交付、超时交付的业务码文本——这三处响应文本可能
         含噪声行，由本方法按用户显式配置剥离。
 
-        优先级规则（wait_urc > urc_filter）：keep_re 是当前 wait_urc 正在等待的
-        目标正则——匹配它的行是本命令**显式声明的期待响应**（如 AT$MYGPSPOS=0,1
-        期待 $MYGPSPOS 循环上报首行），比全局噪声声明更具体，故不被剥离。
+        优先级规则（wait_urc/expect > urc_filter）：keep_re 是当前周期**显式
+        声明的期待内容**正则——wait_urc 等待的目标 URC（如 AT$MYGPSPOS=0,1
+        期待 $MYGPSPOS 循环上报首行）或 expect 等待中的附加完成内容（超时
+        交付路径，批 3 与 wait_urc 对称）——匹配它的行是本命令显式声明的
+        期待响应，比全局噪声声明更具体，故不被剥离。
         同一端口上「GPS 行对其余 49 个用例是噪声、对 GPS 用例是期待响应」的
-        冲突由该规则解决：全局 filter 声明常态，逐命令 wait_urc 声明例外。
+        冲突由该规则解决：全局 filter 声明常态，逐命令 wait_urc/expect 声明例外。
         """
         if not self._urc_filter_res or not text:
             return text

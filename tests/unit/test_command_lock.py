@@ -267,3 +267,86 @@ class TestPortManagerPreCheck:
         # pre_check 在每次实际发送前各执行一次（重连窗口内占用可能变化）
         assert calls == ["pre_check", "send", "reconnect", "pre_check", "send"]
         assert resp.text == "OK"
+
+
+class TestPortBusyErrorPortAttribute:
+    """PortBusyError.port 结构化属性（批 3 T1）——消息格式不变.
+
+    修前构造只拼 message：GUI/MCP 需解析中文消息才能拿到冲突端口名；
+    补存属性后可直接访问（消息 str 兼容不变）。
+    """
+
+    def test_port_stored_as_attribute(self) -> None:
+        exc = PortBusyError("COM9", "端口正忙：并发发送不支持")
+        assert exc.port == "COM9"
+        assert str(exc) == "[COM9] 端口正忙：并发发送不支持"  # 消息格式不变
+
+    def test_raised_from_connection_carries_port(self, conn) -> None:  # type: ignore[no-untyped-def]
+        conn._command_lock.acquire()  # noqa: SLF001
+        try:
+            with pytest.raises(PortBusyError) as ei:
+                conn.send_command("AT", timeout=0.1)
+            assert ei.value.port == "COM9"
+        finally:
+            conn._command_lock.release()  # noqa: SLF001
+
+
+class TestCommandSenderProtocolPreCheck:
+    """ICommandSender 协议签名补 pre_check（批 3 T1）——三实现 2a 已接线.
+
+    协议是高层依赖的契约（TSD §5.2.2）：上层（MCP）经接口类型注解持有实现，
+    缺形参即接口与实现脱钩（实现有参、协议无参——调用方按协议写会 TypeError）。
+    send_data 协议**不**加（数据路径无 MCP 直连需求，YAGNI）。
+    """
+
+    def test_protocol_send_command_declares_pre_check(self) -> None:
+        import inspect
+
+        from atprobe.infra.serial.interfaces import ICommandSender
+
+        params = inspect.signature(ICommandSender.send_command).parameters
+        assert "pre_check" in params
+        assert params["pre_check"].default is None
+
+    def test_protocol_send_data_has_no_pre_check(self) -> None:
+        import inspect
+
+        from atprobe.infra.serial.interfaces import ICommandSender
+
+        assert "pre_check" not in inspect.signature(ICommandSender.send_data).parameters
+
+    def test_implementations_declare_pre_check(self) -> None:
+        import inspect
+
+        from atprobe.infra.serial.fakeserial import FakePortManager
+        from atprobe.infra.serial.interfaces import ICommandSender
+        from atprobe.infra.serial.portmanager import PortManager
+        from atprobe.infra.serial.vsim import VsimPortManager
+
+        for impl in (PortManager, FakePortManager, VsimPortManager):
+            params = inspect.signature(impl.send_command).parameters
+            assert "pre_check" in params, f"{impl.__name__}.send_command 缺 pre_check"
+            # 结构满足协议（runtime_checkable 校验方法存在性）
+            assert isinstance(impl(), ICommandSender)
+
+    def test_fake_pre_check_smoke(self) -> None:
+        """Fake 冒烟：pre_check 先于脚本派发调用；抛错透传且不发送。"""
+        from atprobe.infra.serial.exceptions import PortBusyError as _PBE
+        from atprobe.infra.serial.fakeserial import FakePortManager
+        from atprobe.infra.serial.interfaces import Response
+
+        fake = FakePortManager()
+        fake.open(PortConfig(name="COM9"))
+        fake.script("COM9", Response(text="OK"), persistent=True)
+        order: list[str] = []
+        fake.send_command("COM9", "AT", pre_check=lambda: order.append("pre_check"))
+        assert order == ["pre_check"]
+        assert fake.sent == [("COM9", "AT")]
+
+        def _busy() -> None:
+            raise _PBE("COM9", "被 MCP 判定占用")
+
+        before = len(fake.sent)
+        with pytest.raises(_PBE):
+            fake.send_command("COM9", "AT", pre_check=_busy)
+        assert len(fake.sent) == before  # pre_check 抛错则不派发

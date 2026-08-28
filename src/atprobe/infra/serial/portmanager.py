@@ -30,6 +30,7 @@ from atprobe.infra.serial.interfaces import (
     URCHandler,
 )
 from atprobe.infra.serial.rawlog import RawLogger
+from atprobe.infra.serial.sleep import cancellable_sleep
 
 try:
     from serial.tools import list_ports  # type: ignore[import-not-found]
@@ -211,7 +212,8 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
 
         Args:
             expect: 附加完成条件正则（透传给 SerialConnection，设计 §2.3）——与
-                wait_urc 互斥，两者同传或正则非法由连接层入口校验抛 SerialError。
+                wait_urc 互斥，两者同传或正则非法由连接层入口校验抛
+                InvalidArgumentError（SerialError 子类）。
             pre_check: 透传给 SerialConnection.send_command——获**命令锁后**、状态突变
                 前调用（设计 §3.2"锁内重检"），供上层（MCP）做占用重检，消除
                 check-then-act TOCTOU（批 3 接线，本批留接口）。每次实际发送
@@ -222,8 +224,9 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             return Response(text="", status=ResponseStatus.ERROR, error=f"端口 {port} 未打开")
 
         if not conn.is_connected:
-            # 触发重连（用例级重试由上层 M3 决策，此处只尝试恢复连接）
-            if not self._reconnect(port):
+            # 触发重连（用例级重试由上层 M3 决策，此处只尝试恢复连接）；
+            # cancel 透传（F-1）：停止令牌触发后重连循环立即放弃，不拖满预算
+            if not self._reconnect(port, cancel=cancel):
                 return Response(
                     text="",
                     status=ResponseStatus.ERROR,
@@ -243,7 +246,7 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）。
         # M3 修复：基于结构化 error_kind 判定，而非脆弱的中文字符串匹配。
         if resp.status is ResponseStatus.ERROR and resp.error_kind == ERROR_KIND_DISCONNECT:
-            if self._reconnect(port):
+            if self._reconnect(port, cancel=cancel):
                 # 重发同样透传 pre_check：重连窗口内占用状态可能变化（TOCTOU 同源）
                 resp = conn.send_command(
                     command,
@@ -284,7 +287,8 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             return Response(text="", status=ResponseStatus.ERROR, error=f"端口 {port} 未打开")
 
         if not conn.is_connected:
-            if not self._reconnect(port):
+            # cancel 透传（F-1，同 send_command）：停止后重连循环立即放弃
+            if not self._reconnect(port, cancel=cancel):
                 return Response(
                     text="",
                     status=ResponseStatus.ERROR,
@@ -299,7 +303,17 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
     # ------------------------------------------------------------------
     # §4.2 重连
     # ------------------------------------------------------------------
-    def _reconnect(self, port: str, *, max_retries: int | None = None) -> bool:
+    def _reconnect(
+        self, port: str, *, max_retries: int | None = None, cancel: CancelToken | None = None
+    ) -> bool:
+        """按固定间隔重试重连（§4.2）；cancel 触发立即放弃（F-1）.
+
+        重试间隔经 cancellable_sleep 分片睡眠、片间查令牌：取消后最长滞留
+        一个 slice（默认 0.1s）而非整个重连预算（默认 10 次 ×
+        reconnect_interval_s）——停止引擎后 send_command 不再被断连端口的
+        重连循环拖住。循环结构照旧：每轮先试 reconnect、失败才睡（首次尝试
+        前不睡）；取消时返回 False（不抛——调用方按既有断连错误路径交付）。
+        """
         conn = self._connections.get(port)
         if conn is None:
             return False
@@ -310,7 +324,8 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         for _ in range(tries):
             if conn.reconnect():
                 return True
-            self._sleep(cfg.reconnect_interval_s)
+            if not cancellable_sleep(cfg.reconnect_interval_s, cancel, sleep=self._sleep):
+                return False
         return False
 
     def get_connection(self, port: str) -> SerialConnection | None:
