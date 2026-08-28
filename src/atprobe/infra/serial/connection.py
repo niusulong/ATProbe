@@ -17,6 +17,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -101,11 +102,14 @@ class SerialConnection:
         raw_logger: RawLogger | None = None,
         log_file: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        now_wall: Callable[[], datetime] = datetime.now,
     ) -> None:
         self.config = config
         self._raw_logger = raw_logger
         self._log_file = log_file
         self._clock = clock
+        # 时钟注入贯穿（P3）：限频与 URC 时间戳统一走注入时钟，假时钟可测
+        self._now_wall = now_wall
 
         self._serial = None  # type: ignore[assignment]
         self._read_thread: threading.Thread | None = None
@@ -814,13 +818,12 @@ class SerialConnection:
         return "\n".join(keep)
 
     def _dispatch_urc(self, text: str) -> None:
-        # P3 修复：timestamp 填实际时间（旧实现恒空串）
-        from datetime import datetime
-
+        # P3 修复：timestamp 填实际时间（旧实现恒空串）——经注入的 now_wall
+        # （原先函数内 import datetime.now，假时钟测不到此路径）
         evt = URCEvent(
             port=self.config.name,
             text=text,
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            timestamp=self._now_wall().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         )
         with self._urc_lock:
             handlers = list(self._urc_handlers)
@@ -854,7 +857,7 @@ class SerialConnection:
         """
         if self._stop_event.is_set():
             return False
-        now = time.monotonic()
+        now = self._clock()  # 注入时钟（原裸 time.monotonic，假时钟测不到限频路径）
         if now - self._last_reconnect_attempt < 1.0:
             return False
         self._last_reconnect_attempt = now
@@ -887,6 +890,8 @@ class SerialConnection:
 
         重开后调 _ensure_reader 保证读线程存活（B2 修复：旧实现重连后不重启读线程，
         导致重连成功的端口无消费线程，send_command 必然超时卡死）。
+        F-2：读线程限频自愈已恢复（连接活着）时直接返回 True，不 close+open——
+        DTR/RTS 翻转会使蜂窝模组软复位/掉承载。
         复审回归修复：stop 已请求（close 进行中）时直接拒绝——否则读线程的
         断连路径会重开刚被 close 的端口，甚至经 _ensure_reader 的
         _stop_event.clear() 起第二个读线程（同一句柄双读）。
@@ -894,6 +899,15 @@ class SerialConnection:
         if self._stop_event.is_set():
             return False
         with self._reconnecting:
+            # F-2 首查（持锁后）：读线程限频自愈已恢复时，引擎侧 reconnect 的
+            # 无条件 close+open 会 DTR/RTS 翻转，致蜂窝模组软复位/掉承载——
+            # 连接活着直接返回成功，不碰句柄。getattr 防 stub/替身无 is_open 属性。
+            if (
+                self._connected
+                and self._serial is not None
+                and getattr(self._serial, "is_open", False)
+            ):
+                return True
             try:
                 if self._serial is not None:
                     try:
