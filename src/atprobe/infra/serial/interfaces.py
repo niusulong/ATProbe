@@ -133,6 +133,7 @@ class ICommandSender(Protocol):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
         """发送命令（不含结束符，由实现按 PortConfig.terminator 自动追加）并等待完整响应.
@@ -143,6 +144,10 @@ class ICommandSender(Protocol):
             timeout: 单次响应超时（秒）；None 用端口默认。
             wait_urc: 异步指令 URC 终结正则（可空）。非空时遇 OK 不返回，继续读到
                 匹配此正则的 URC 立即返回（整段响应文本含 OK+URC）；为空时 OK 即终结。
+            expect: 附加完成条件正则（可空，设计 §2.3）。非空时对发送后的原始字节流
+                做字节级匹配（不依赖换行），命中即交付 COMPLETE（响应文本=缓冲至命中
+                点，优先于终结行判定）；与 wait_urc 互斥，同传或正则非法由实现抛
+                ``SerialError``。
             cancel: 取消令牌；触发后阻塞操作立即抛 ``OperationCancelled``（与 Fake/vsim 一致，
                 统一取消语义，上层据此判 INTERRUPTED 而非 FAIL）。
         """

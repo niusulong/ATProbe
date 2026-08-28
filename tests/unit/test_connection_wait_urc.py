@@ -17,8 +17,11 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 from atprobe.infra.serial.connection import SerialConnection
+from atprobe.infra.serial.exceptions import SerialError
 from atprobe.infra.serial.interfaces import ResponseStatus
 
 
@@ -53,6 +56,7 @@ def _send_and_feed(
     *,
     timeout: float = 5.0,
     wait_urc: str | None = None,
+    expect: str | None = None,
     feed_delay: float = 0.0,
 ) -> object:
     """子线程跑 send_command，主线程按节奏喂 chunk（模拟读线程）。
@@ -65,7 +69,7 @@ def _send_and_feed(
 
     def _runner() -> None:
         try:
-            resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc)
+            resp = conn.send_command(command, timeout=timeout, wait_urc=wait_urc, expect=expect)
             result["resp"] = resp
             result["done"] = threading.Event()
         except Exception as e:  # noqa: BLE001
@@ -74,7 +78,13 @@ def _send_and_feed(
     done = threading.Event()
     t = threading.Thread(
         target=lambda: (
-            result.update({"resp": conn.send_command(command, timeout=timeout, wait_urc=wait_urc)}),
+            result.update(
+                {
+                    "resp": conn.send_command(
+                        command, timeout=timeout, wait_urc=wait_urc, expect=expect
+                    )
+                }
+            ),
             done.set(),
         )
     )
@@ -252,3 +262,89 @@ class TestWaitUrcDefaultBehavior:
         assert resp.status is ResponseStatus.ERROR
         # 关键：发送失败路径必须复位 wait_urc 状态
         assert conn._wait_urc_re is None, "发送失败后 _wait_urc_re 未复位，会污染下条命令"  # noqa: SLF001
+
+
+class TestExpectCompletion:
+    """send_command(expect=) 附加完成条件（设计 §2.3，批 2a Task 5 连接层接线）.
+
+    expect 的字节级检测在 LineAssembler（2a-T3）已实现，本组锁定连接层入口：
+    expect 参数从 send_command 接到 _expect_re，命中即 COMPLETE、优先于终结行，
+    周期结束复位。
+    """
+
+    def test_expect_prompt_without_newline_completes(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """TCPSEND 提示符场景：expect 命中无换行的 \\r\\n> 即 COMPLETE。
+
+        不依赖换行、不等终结行、不等超时——纯字节级匹配（设计 §2.3 推荐精确
+        写法 '\\r\\n>'）。
+        """
+        conn = _make_connection(monkeypatch)
+        resp = _send_and_feed(
+            conn,
+            "AT+TCPSEND=0,5",
+            chunks=[b"\r\n>"],  # 无换行：终结行判定永远不触发
+            timeout=3.0,
+            expect=r"\r\n>",
+        )
+        assert resp.status is ResponseStatus.COMPLETE
+        assert "\r\n>" in resp.text
+        # 周期结束状态复位（不污染下一条命令）
+        assert conn._expect_re is None  # noqa: SLF001
+
+    def test_expect_priority_over_terminator(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """expect 与终结行同 chunk：expect 优先，交付截至命中点（不含其后的 OK）。"""
+        conn = _make_connection(monkeypatch)
+        resp = _send_and_feed(
+            conn,
+            "AT+TCPSEND=0,5",
+            chunks=[b"\r\n> \r\nOK\r\n"],
+            timeout=3.0,
+            expect=r"\r\n>",
+        )
+        assert resp.status is ResponseStatus.COMPLETE
+        assert "\r\n>" in resp.text
+        assert "OK" not in resp.text  # 命中点之后的字节属余量，不进本次响应
+
+    def test_wait_urc_error_immediately_completes(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """wait_urc 模式收到 ERROR 立即 COMPLETE（设计 §2.1 行为变更）。
+
+        锁定量变更，实现于 2a-T3/T4（LineAssembler._ERROR_RE 任何等待模式终结），
+        本用例在连接层锁定：不再等目标 URC 到超时，text 含已收 OK 段。
+        """
+        conn = _make_connection(monkeypatch)
+        t0 = time.monotonic()
+        resp = _send_and_feed(
+            conn,
+            "AT+X",
+            chunks=[b"\r\nOK\r\n\r\nERROR\r\n"],
+            timeout=5.0,
+            wait_urc=r"\+X: ok",
+        )
+        elapsed = time.monotonic() - t0
+        assert resp.status is ResponseStatus.COMPLETE
+        assert "OK" in resp.text
+        assert "ERROR" in resp.text
+        assert elapsed < 2.0, f"应立即终结，实际耗时 {elapsed:.2f}s（疑似等到超时）"
+
+
+class TestExpectValidation:
+    """入口校验：expect × wait_urc 互斥、expect 正则编译失败转 SerialError（解析期口径）."""
+
+    def test_expect_wait_urc_mutex_rejected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """两者同传（均为自定义完成语义）→ SerialError；且通道状态零污染、锁已释放。"""
+        conn = _make_connection(monkeypatch)
+        with pytest.raises(SerialError, match="互斥"):
+            conn.send_command("AT+X", timeout=1.0, wait_urc=r"\+X:ok", expect=r"\r\n>")
+        # 校验在置等待态之前抛出：等待态/expect 状态零污染
+        assert not conn._awaiting.is_set()  # noqa: SLF001
+        assert conn._expect_re is None  # noqa: SLF001
+        # 命令锁必须已释放（acquire→try→校验抛错→finally release 平衡）：
+        # 校验抛错后立即再发一条常规命令应正常完成，而非 PortBusyError
+        resp = _send_and_feed(conn, "AT+X", chunks=[b"\r\nOK\r\n"], timeout=3.0)
+        assert resp.status is ResponseStatus.COMPLETE
+
+    def test_invalid_expect_regex_rejected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """expect="("（非法正则）→ SerialError 带「正则无效」上下文。"""
+        conn = _make_connection(monkeypatch)
+        with pytest.raises(SerialError, match="正则无效"):
+            conn.send_command("AT+X", timeout=1.0, expect="(")

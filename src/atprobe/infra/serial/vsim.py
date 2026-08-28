@@ -78,6 +78,7 @@ class VsimPortManager(FakePortManager):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
         pre_check: Callable[[], None] | None = None,
     ) -> Response:
@@ -90,8 +91,9 @@ class VsimPortManager(FakePortManager):
         if pre_check is not None:
             pre_check()
         self.sent.append((port, command))
-        # wait_urc 由 AtResponder 生成的响应文本体现，此处仅接受以保持接口一致
+        # wait_urc/expect 由 AtResponder 生成的响应文本体现，此处仅接受以保持接口一致
         _ = wait_urc
+        _ = expect
         self._emit_tx(port, command)  # observer 派发 + 用例日志（对齐真实发送路径）
         frame = self._responder.respond(command)
         if not frame:

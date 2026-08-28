@@ -175,12 +175,15 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
         pre_check: Callable[[], None] | None = None,
     ) -> Response:
         """发送命令并等待响应（含断连重发，§4.2）.
 
         Args:
+            expect: 附加完成条件正则（透传给 SerialConnection，设计 §2.3）——与
+                wait_urc 互斥，两者同传或正则非法由连接层入口校验抛 SerialError。
             pre_check: 透传给 SerialConnection.send_command——获**命令锁后**、状态突变
                 前调用（设计 §3.2"锁内重检"），供上层（MCP）做占用重检，消除
                 check-then-act TOCTOU（批 3 接线，本批留接口）。每次实际发送
@@ -202,7 +205,12 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
 
         # pre_check 经连接层在命令锁内执行（非此处直调——锁外重检存在 TOCTOU 窗口）
         resp = conn.send_command(
-            command, timeout=timeout, wait_urc=wait_urc, cancel=cancel, pre_check=pre_check
+            command,
+            timeout=timeout,
+            wait_urc=wait_urc,
+            expect=expect,
+            cancel=cancel,
+            pre_check=pre_check,
         )
         # 断连错误 → 尝试重连后重发一次（重连计入次数，§4.2）。
         # M3 修复：基于结构化 error_kind 判定，而非脆弱的中文字符串匹配。
@@ -210,7 +218,12 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             if self._reconnect(port):
                 # 重发同样透传 pre_check：重连窗口内占用状态可能变化（TOCTOU 同源）
                 resp = conn.send_command(
-                    command, timeout=timeout, wait_urc=wait_urc, cancel=cancel, pre_check=pre_check
+                    command,
+                    timeout=timeout,
+                    wait_urc=wait_urc,
+                    expect=expect,
+                    cancel=cancel,
+                    pre_check=pre_check,
                 )
         return resp
 

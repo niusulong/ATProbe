@@ -26,6 +26,7 @@ from atprobe.infra.serial.exceptions import (
     PortBusyError,
     PortOpenError,
     SendError,
+    SerialError,
 )
 from atprobe.infra.serial.interfaces import (
     ERROR_KIND_DISCONNECT,
@@ -134,10 +135,10 @@ class SerialConnection:
         # 本类，与 _wait_urc_re 同经 _sync_cycle_locked 逐周期注入 assembler。
         self._echo_line: bytes | None = None
 
-        # expect 附加完成条件正则（设计 §2.3，assembler 已支持暂存）：批 2a
-        # Task 5 经 send_command(expect=) 设置/复位——本任务恒 None。与
-        # _wait_urc_re 同族：线程语义归本类，周期参数经 _sync_cycle_locked
-        # 透传（勿在 sync 处硬编码 None，否则 Task 5 接线时成隐形陷阱）。
+        # expect 附加完成条件正则（设计 §2.3，批 2a Task 5 接线）：send_command(expect=)
+        # 进入周期时编译设置、_reset_wait_urc 复位。与 _wait_urc_re 同族：线程语义归
+        # 本类，周期参数经 _sync_cycle_locked 逐周期注入 assembler（feed 持锁快照
+        # 使用）。与 wait_urc 的互斥在 send_command 入口校验（均为自定义完成语义）。
         self._expect_re: re.Pattern[bytes] | None = None
 
         # 噪声 URC 过滤（PortConfig.urc_filter 编译产物）：匹配行照常派发给
@@ -323,6 +324,7 @@ class SerialConnection:
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
         pre_check: Callable[[], None] | None = None,
     ) -> Response:
@@ -331,6 +333,12 @@ class SerialConnection:
         wait_urc 非空时为异步指令模式：遇 OK 不返回，继续读到匹配 wait_urc 正则的
         URC 立即返回（整段响应文本含 OK+URC）；timeout 内无 URC 则按超时返回（text
         含已收到的 OK 段，status=TIMEOUT）。为空时 OK 即终结（原行为）。
+
+        expect 非空时为附加完成条件（设计 §2.3，批 2a Task 5）：对发送后的字节流
+        做字节级匹配（不依赖换行，如 TCPSEND 提示符 ``\\r\\n>``），命中即交付
+        COMPLETE（响应文本=缓冲至命中点，优先于终结行判定；检测在 LineAssembler）。
+        expect 与 wait_urc 互斥（均为自定义完成语义，二选一）——同传抛 SerialError；
+        expect 正则编译失败亦抛 SerialError（与 wait_urc 同款 utf-8 字节级编译）。
 
         Args:
             pre_check: 获命令锁后、状态突变前调用——上层占用重检（消 check-then-act，
@@ -347,7 +355,7 @@ class SerialConnection:
             if pre_check is not None:
                 pre_check()
             return self._send_command_locked(
-                command, timeout=timeout, wait_urc=wait_urc, cancel=cancel
+                command, timeout=timeout, wait_urc=wait_urc, expect=expect, cancel=cancel
             )
         finally:
             self._command_lock.release()
@@ -358,9 +366,28 @@ class SerialConnection:
         *,
         timeout: float | None,
         wait_urc: str | None,
+        expect: str | None,
         cancel: CancelToken | None,
     ) -> Response:
-        """send_command 的原方法体（调用方已持 _command_lock；pre_check 已在锁内执行过）."""
+        """send_command 的原方法体（调用方已持 _command_lock；pre_check 已在锁内执行过）.
+
+        expect 入口校验（互斥/正则编译）在置等待态之前：抛 SerialError 时
+        _awaiting/_expect_re 等通道状态零污染，锁由 send_command 的 finally 释放
+        （acquire→try→校验抛错→release 平衡）。
+        """
+        # 互斥校验 + 正则预编译（与 wait_urc 同款字节级：正则作用于原始 RX 字节，
+        # 不预先转码）。任务口径：两者均为自定义完成语义，二选一。
+        if expect is not None and wait_urc is not None:
+            raise SerialError(
+                f"[{self.config.name}] expect 与 wait_urc 互斥：均为自定义完成语义，二选一"
+            )
+        expect_re: re.Pattern[bytes] | None = None
+        if expect is not None:
+            try:
+                expect_re = re.compile(expect.encode("utf-8"))
+            except re.error as exc:
+                raise SerialError(f"[{self.config.name}] expect 正则无效：{exc}") from exc
+
         if not self._connected or self._serial is None:
             return Response(
                 text="", status=ResponseStatus.ERROR, error="端口未连接", error_kind=ERROR_KIND_SEND
@@ -370,13 +397,15 @@ class SerialConnection:
         terminator = self.config.terminator.value.encode("ascii")
         payload = command.encode("utf-8") + terminator
 
-        # 切换到「等待响应」状态，清空缓冲；wait_urc 模式设置 URC 终结正则；
-        # 记录回显行（URC 结构化分类用：与命令逐字相等的行是回显，不派发 URC）
+        # 切换到「等待响应」状态，清空缓冲；wait_urc 模式设置 URC 终结正则；expect
+        # 模式设置附加完成正则（无条件赋值——None 显式落空，防异常路径残留）；记录
+        # 回显行（URC 结构化分类用：与命令逐字相等的行是回显，不派发 URC）
         with self._buffer_lock:
             self._reset_buffer_locked()
             self._echo_line = command.strip().encode("utf-8") if command.strip() else None
             if wait_urc is not None:
                 self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
+            self._expect_re = expect_re
         # 先 set awaiting 再排空队列（B3 修复：消除 set 与 drain 之间读线程恰好检测到断连
         # 却因 awaiting 未 set 而丢弃断连信号的竞态窗口。先 set 后，读线程的断连路径会
         # 把 ERROR 入队，drain 只会清掉这次命令之前入队的陈旧响应；若 drain 恰好清掉了
@@ -417,7 +446,8 @@ class SerialConnection:
 
         调用前置（调用方负责，参照 send_command 入口）：
             1. 已持锁 ``_reset_buffer_locked()``（清残留缓冲，防污染超时快照文本）；
-            2. 已设 ``_echo_line``（等待期回显排除）与 ``_wait_urc_re``（按需）；
+            2. 已设 ``_echo_line``（等待期回显排除）与 ``_wait_urc_re``/``_expect_re``
+               （按需，二者互斥）；
             3. 已 ``_awaiting.set()`` 且已 ``_drain_response_q()``。
         调用后置：内部 finally 仅清 ``_awaiting``/清排队列/清缓冲；
         **不复位** ``_wait_urc_re``/``_echo_line``——调用方须在自己 finally 调
@@ -515,13 +545,16 @@ class SerialConnection:
         self._assembler.reset()
 
     def _reset_wait_urc(self) -> None:
-        """复位 wait_urc 状态（echo/wait_urc 清除后同步周期参数）.
+        """复位周期等待状态（wait_urc/expect/echo 清除后同步周期参数）.
 
-        同时清除回显行——等待窗口结束，后续空闲数据不再需要回显排除。
+        同时清除回显行与 expect 正则——等待窗口结束，后续空闲数据不再需要回显
+        排除，expect 也不再终结任何数据（assembler 的周期参数经下方 sync 即刻
+        更新，不留残留在途语义）。
         """
         with self._buffer_lock:
             self._wait_urc_re = None
             self._echo_line = None
+            self._expect_re = None
             self._sync_cycle_locked()
 
     def _sync_cycle_locked(self) -> None:
@@ -537,7 +570,7 @@ class SerialConnection:
             waiting=self._awaiting.is_set(),
             echo_line=self._echo_line,
             wait_urc_re=self._wait_urc_re,
-            expect_re=self._expect_re,  # Task 5 经 send_command(expect=) 设置
+            expect_re=self._expect_re,  # send_command(expect=) 设置/_reset_wait_urc 复位
         )
 
     # ------------------------------------------------------------------

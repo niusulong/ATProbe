@@ -36,8 +36,11 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         captured: dict = {}
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
+        def _capture(
+            command, *, timeout=None, wait_urc=None, expect=None, cancel=None, pre_check=None
+        ):
             captured["wait_urc"] = wait_urc
+            captured["expect"] = expect
             captured["command"] = command
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
@@ -46,6 +49,7 @@ class TestPortManagerWaitUrcForwarding:
         resp = pm.send_command("COM9", "AT+X", wait_urc=r"\+X:done", timeout=5)
 
         assert captured["wait_urc"] == r"\+X:done"
+        assert captured["expect"] is None  # 未启用 expect 时转发 None（不误置）
         assert resp.status is ResponseStatus.COMPLETE
 
     def test_wait_urc_none_forwarded_by_default(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -53,8 +57,11 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         captured: dict = {}
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
+        def _capture(
+            command, *, timeout=None, wait_urc=None, expect=None, cancel=None, pre_check=None
+        ):
             captured["wait_urc"] = wait_urc
+            captured["expect"] = expect
             return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
         monkeypatch.setattr(conn, "send_command", _capture)
@@ -62,6 +69,7 @@ class TestPortManagerWaitUrcForwarding:
         pm.send_command("COM9", "AT")
 
         assert captured["wait_urc"] is None
+        assert captured["expect"] is None
 
     def test_wait_urc_forwarded_on_reconnect_resend(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """断连重发路径（第二处调用）：首次断连 ERROR，重连后重发也必须带 wait_urc。
@@ -72,7 +80,9 @@ class TestPortManagerWaitUrcForwarding:
         pm, conn = _make_connected_portmanager(monkeypatch)
         calls: list[dict] = []
 
-        def _capture(command, *, timeout=None, wait_urc=None, cancel=None, pre_check=None):
+        def _capture(
+            command, *, timeout=None, wait_urc=None, expect=None, cancel=None, pre_check=None
+        ):
             calls.append({"wait_urc": wait_urc, "is_disconnect_error": False})
             if len(calls) == 1:
                 # 首次返回断连 ERROR，触发 PortManager 重连重发

@@ -68,6 +68,8 @@ class FakePortManager:
         self.sent: list[tuple[str, str]] = []
         # 记录启用 wait_urc 的调用（port, urc_pattern），供测试断言
         self.wait_urc_calls: list[tuple[str, str]] = []
+        # 记录启用 expect 的调用（port, expect_pattern），供测试断言（与 wait_urc_calls 同款）
+        self.expect_calls: list[tuple[str, str]] = []
         self._urc_handlers: dict[str, list[URCHandler]] = {}
         self._rx_observers: dict[str, list[Callable[[bytes], None]]] = {}
         self._tx_observers: dict[str, list[Callable[[bytes], None]]] = {}
@@ -179,12 +181,17 @@ class FakePortManager:
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
         pre_check: Callable[[], None] | None = None,
     ) -> Response:
         """发送命令（消费预设脚本）.
 
         Args:
+            expect: 附加完成条件正则（签名对齐真实 PortManager 透传，批 2a Task 5）。
+                与 wait_urc 一样由测试预设的 Response.text 直接体现（Fake 不做真实
+                读线程/字节级匹配），这里仅记录到 expect_calls，便于测试断言调用方
+                确实启用了 expect 完成条件。
             pre_check: 派发前调用的回调（对齐真实 PortManager 透传/连接层锁内执行的
                 契约——Fake 无锁，直调即可）；抛异常则透传、不派发。批 3 MCP 接线用。
         """
@@ -197,6 +204,8 @@ class FakePortManager:
         # 这里仅记录，便于测试断言调用方确实启用了 URC 等待模式。
         if wait_urc is not None:
             self.wait_urc_calls.append((port, wait_urc))
+        if expect is not None:
+            self.expect_calls.append((port, expect))
         self._emit_tx(port, command)  # observer 派发 + 用例日志（对齐真实发送路径）
         scripts = self._scripts.get(port, [])
         # 找匹配的脚本（先 match 精确，再通配）
