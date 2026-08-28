@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+import types
+
 import pytest
 
+from atprobe.mcp import auth
 from atprobe.mcp.auth import bearer_middleware, load_token
 
 
@@ -83,8 +87,48 @@ def test_load_token_path_is_directory(tmp_path):
         load_token(token_file=None, token=None, config_token_file=str(d))
 
 
+def test_load_token_cli_token_stripped(monkeypatch):
+    """--token strip（S-4）：首尾空白剥离；strip 后全空白 → 落到下一级 env."""
+    long_token = "t" * 32  # ≥32：不混入强度 warning 断言面
+    assert load_token(token_file=None, token=f"  {long_token}  \n") == long_token
+    monkeypatch.setenv("ATPROBE_MCP_TOKEN", "env-token")
+    assert load_token(token_file=None, token="   ") == "env-token"  # 空白视为未提供
+    monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)
+    assert load_token(token_file=None, token="\t\n ") is None
+
+
+def test_load_token_weak_token_warns(caplog):
+    """强度 warning（S-4）：<32 字符 → WARNING（含阈值与强随机建议）；≥32 静默."""
+    weak = "w" * 31
+    with caplog.at_level(logging.WARNING, logger="atprobe.mcp"):
+        assert load_token(token_file=None, token=weak) == weak  # 仅告警不阻断
+    assert "32" in caplog.text
+    assert "secrets.token_hex(32)" in caplog.text
+    strong = "s" * 32
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="atprobe.mcp"):
+        assert load_token(token_file=None, token=strong) == strong
+    assert caplog.text == ""
+
+
+@pytest.fixture
+def recorded_sleeps(monkeypatch):
+    """桩掉 auth 模块引用的 asyncio（失败退避 sleep），记录延迟序列.
+
+    只替换 atprobe.mcp.auth 命名空间内的 asyncio 引用，不碰全局；
+    供中间件测试断言指数退避序列，同时避免真实 sleep 拖慢套件。
+    """
+    calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    monkeypatch.setattr(auth, "asyncio", types.SimpleNamespace(sleep=fake_sleep))
+    return calls
+
+
 @pytest.mark.anyio
-async def test_middleware_401_and_pass():
+async def test_middleware_401_and_pass(recorded_sleeps):
     sent: list[dict] = []
 
     async def app(scope, receive, send):
@@ -121,7 +165,9 @@ async def test_middleware_401_and_pass():
     )
     assert sent[0]["status"] == 401
     assert sent[1]["body"] == b'{"error":"unauthorized"}'
-    # 正确 Token → 放行到下游
+    # 3 次失败退避序列（S-4）：0.5s 起 ×2
+    assert recorded_sleeps == [0.5, 1.0, 2.0]
+    # 正确 Token → 放行到下游（且成功不产生退避）
     sent.clear()
     await mw(
         {"type": "http", "headers": [(b"authorization", b"Bearer secret")]},
@@ -129,6 +175,7 @@ async def test_middleware_401_and_pass():
         send,
     )
     assert sent[0]["status"] == 200
+    assert recorded_sleeps == [0.5, 1.0, 2.0]
 
 
 @pytest.mark.anyio
@@ -144,3 +191,105 @@ async def test_middleware_non_http_passthrough():
     mw = bearer_middleware(app, "secret")
     await mw({"type": "lifespan"}, noop, noop)
     assert called == ["lifespan"]
+
+
+@pytest.mark.anyio
+async def test_middleware_wrong_token_lengths_equivalent(recorded_sleeps):
+    """长度信号消除（S-4）：短/长错误凭据行为等价（均 401 + JSON 体）.
+
+    双侧 SHA-256 后比较恒定 32 字节——不做时序断言，仅断言行为等价。
+    """
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):
+        sent.append(msg)
+
+    mw = bearer_middleware(app, "expected-secret-of-decent-length")
+    wrongs = [b"Bearer x", b"Bearer ", b"Bearer " + b"x" * 300, "Bearer 密码".encode()]
+    for wrong in wrongs:
+        sent.clear()
+        await mw({"type": "http", "headers": [(b"authorization", wrong)]}, receive, send)
+        assert sent[0]["status"] == 401
+        assert sent[1]["body"] == b'{"error":"unauthorized"}'
+
+
+@pytest.mark.anyio
+async def test_middleware_failure_backoff_cap_and_reset(monkeypatch):
+    """失败限速（S-4）：0.5s 起 ×2 封顶 5s；退避先于 401；成功 reset 回 0.5s.
+
+    推到连续 6 次失败验证封顶：第 5、6 次恒 5.0。
+    """
+    sent: list[dict] = []
+    events: list[tuple[str, float | str]] = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):
+        events.append(("send", str(msg.get("type", msg.get("status")))))
+        sent.append(msg)
+
+    async def fake_sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+
+    monkeypatch.setattr(auth, "asyncio", types.SimpleNamespace(sleep=fake_sleep))
+
+    mw = bearer_middleware(app, "secret")
+
+    async def fail_once() -> None:
+        sent.clear()
+        await mw(
+            {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]},
+            receive,
+            send,
+        )
+        assert sent[0]["status"] == 401
+
+    # 第 1 次失败：退避 sleep 先于 401 响应发送
+    await fail_once()
+    assert events == [
+        ("sleep", 0.5),
+        ("send", "http.response.start"),
+        ("send", "http.response.body"),
+    ]
+    # 连续 3 次失败：[0.5, 1.0, 2.0]
+    await fail_once()
+    await fail_once()
+    assert [e[1] for e in events if e[0] == "sleep"] == [0.5, 1.0, 2.0]
+
+    # 成功 → reset（成功路径无退避）
+    events.clear()
+    sent.clear()
+    await mw(
+        {"type": "http", "headers": [(b"authorization", b"Bearer secret")]},
+        receive,
+        send,
+    )
+    assert sent[0]["status"] == 200
+    assert [e for e in events if e[0] == "sleep"] == []
+
+    # reset 后：第 4 次（本轮第 1 次）失败回到 0.5；连推 6 次封顶——第 5、6 次恒 5.0
+    events.clear()
+    for _ in range(6):
+        await fail_once()
+    assert [e[1] for e in events if e[0] == "sleep"] == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0]
+
+
+def test_fail_limiter_thread_safe_sequence():
+    """_FailLimiter 契约直测：序列 0.5→5.0 封顶；reset 清零（锁为防御，单线程验证语义）."""
+    from atprobe.mcp.auth import _FailLimiter
+
+    lim = _FailLimiter()
+    assert [lim.delay_for_failure() for _ in range(7)] == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 5.0]
+    lim.reset()
+    assert lim.delay_for_failure() == 0.5
