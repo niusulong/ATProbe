@@ -18,6 +18,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from atprobe.domain.case.redos import check_pattern
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 
 _yaml = YAML(typ="safe")
@@ -179,7 +180,7 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
                 ),
             )
     # 噪声 URC 过滤（列表项须为字符串；编译合法性由 SerialConnection 构造时
-    # re.compile 校验——此处仅做类型收敛）
+    # re.compile 校验——此处做类型收敛 + S-2 ReDoS 分级检测）
     urc_filter_raw = raw.get("urc_filter")
     if urc_filter_raw is not None:
         if not isinstance(urc_filter_raw, list) or not all(
@@ -189,6 +190,16 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
                 f"'urc_filter' 必须是字符串列表（正则，匹配整行内容），实际：{urc_filter_raw!r}",
                 source=source,
             )
+        # S-2（设计 §5）：urc_filter 在串口读线程对每行噪声文本反复匹配，
+        # 嵌套量词会被设备持续上报触发灾难性回溯卡死读线程——解析期硬拒。
+        # 存量 N58 模式（如 ^\$MYGPSPOS:）不含嵌套量词，零误拒。
+        for pat in urc_filter_raw:
+            hard, _warnings = check_pattern(pat)
+            if hard is not None:
+                raise AppConfigError(
+                    f"urc_filter 模式 {pat!r} 存在灾难性回溯风险（{hard}）——请改写为非嵌套量词形式",
+                    source=source,
+                )
         cfg = _replace(cfg, urc_filter=tuple(urc_filter_raw))
     mcp = raw.get("mcp") or {}
     if isinstance(mcp, dict):

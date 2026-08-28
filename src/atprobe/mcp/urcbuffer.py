@@ -15,6 +15,7 @@ cursor 早于缓冲最早事件 → 返回现存全部并置 truncated=true（�
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -22,8 +23,11 @@ import uuid
 from collections import deque
 from typing import Any
 
+from atprobe.domain.case.redos import check_pattern
 from atprobe.infra.serial.interfaces import URCEvent
 from atprobe.mcp.errors import invalid_input, not_found
+
+_log = logging.getLogger("atprobe.mcp")
 
 DEFAULT_BUFFER_SIZE = 500
 # 订阅数上限（Pf-4，设计 §4.8）：LLM 循环 subscribe 不退订是常见模式，注册表
@@ -80,6 +84,13 @@ class UrcRegistry:
                 compiled = re.compile(pattern)
             except re.error as exc:
                 raise invalid_input(f"URC 过滤正则无效：{exc}", pattern=pattern) from exc
+            # S-2（设计 §5）：feed 在串口读线程对每行 URC 逐订阅匹配，嵌套量词
+            # 会被噪声持续触发灾难性回溯卡死读线程——硬拒；重叠交替类仅告警。
+            hard, warnings = check_pattern(pattern)
+            if hard is not None:
+                raise invalid_input(f"URC 过滤正则存在灾难性回溯风险：{hard}", pattern=pattern)
+            for w in warnings:
+                _log.warning("URC 过滤正则 %r 存在回溯风险：%s", pattern, w)
         self._gc_stale()  # 先清理再查上限：惰性清出的名额可用
         if len(self._subs) >= MAX_SUBSCRIPTIONS:
             raise invalid_input(f"URC 订阅数超上限（{MAX_SUBSCRIPTIONS}），请先 unsubscribe 释放")

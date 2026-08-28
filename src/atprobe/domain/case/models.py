@@ -19,8 +19,28 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from atprobe.domain.case.redos import check_pattern
+
 # 模型层解析期告警通道（data×retry/poll 慎用提示等，不硬拒）
 _log = logging.getLogger("atprobe.case")
+
+
+def _validate_regex(pattern: str, what: str) -> None:
+    """正则解析期校验：语法编译 + ReDoS 静态分级（S-2，设计 §5）.
+
+    四处用户正则（wait_urc/expect/extract/assert.matches）统一口径：
+    语法错误抛 ``{what} 正则无效``；嵌套量词等灾难性回溯形态硬拒
+    （30-40 字符输入即可卡死引擎线程）；重叠交替类告警经模块 logger。
+    """
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"{what} 正则无效：{exc}") from exc
+    hard, warnings = check_pattern(pattern)
+    if hard is not None:
+        raise ValueError(f"{what} 正则存在灾难性回溯风险（{hard}）——请改写为非嵌套量词形式")
+    for w in warnings:
+        _log.warning("%s 正则 %r 存在回溯风险：%s", what, pattern, w)
 
 
 class _Frozen(BaseModel):
@@ -289,19 +309,13 @@ class Step(BaseModel):
             raise ValueError("wait_urc 与 poll 互斥，不可同时指定")
         # wait_urc 正则合法性预校验（解析期拦截无效正则，优于运行期才发现）
         if self.wait_urc is not None:
-            try:
-                re.compile(self.wait_urc)
-            except re.error as exc:
-                raise ValueError(f"wait_urc 正则无效：{exc}") from exc
+            _validate_regex(self.wait_urc, "wait_urc")
         # expect 与 wait_urc 互斥：均为「自定义完成语义」，叠加则完成判定歧义
         if self.expect is not None and self.wait_urc is not None:
             raise ValueError("expect 与 wait_urc 互斥，不可同时指定")
         # expect 正则合法性预校验（与 wait_urc 同款口径）
         if self.expect is not None:
-            try:
-                re.compile(self.expect)
-            except re.error as exc:
-                raise ValueError(f"expect 正则无效：{exc}") from exc
+            _validate_regex(self.expect, "expect")
         # P1 修复：extract 与 assert.matches 正则同样在解析期预校验（与 wait_urc
         # 口径一致）。旧实现这两个正则编译失败在执行期抛裸 re.error，逃出引擎
         # 线程（无 CaseParseError 包装、无文件行号，用户直面 traceback）。
@@ -312,18 +326,10 @@ class Step(BaseModel):
                     raise ValueError(
                         f"extract 变量名 {var_name!r} 与内置保留字冲突（每步注入，会被覆盖）"
                     )
-                try:
-                    re.compile(pattern)
-                except re.error as exc:
-                    raise ValueError(f"extract 变量 {var_name!r} 正则无效：{exc}") from exc
+                _validate_regex(pattern, f"extract 变量 {var_name!r}")
         for a in self.assertions:
             if a.matches is not None:
-                try:
-                    re.compile(a.matches)
-                except re.error as exc:
-                    raise ValueError(
-                        f"断言 {a.name or '(未命名)'} 的 matches 正则无效：{exc}"
-                    ) from exc
+                _validate_regex(a.matches, f"断言 {a.name or '(未命名)'} 的 matches")
         # data×retry / data×poll 组合不硬拒但告警：数据流不可重入（设计 §2.2）——
         # 设备收满声明长度后，重试/轮询重发的字节会被设备当 AT 命令解析、污染后续命令。
         # Step 无 name 字段，%s 以数据源声明值（file/inline/inline_hex）定位步骤。
