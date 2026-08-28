@@ -121,6 +121,16 @@ class AssertElement(_Frozen):
         # 变量断言：必须同时有 var 与 op
         is_var = self.var is not None or self.op is not None
         if is_var:
+            # F-15 修复：变量断言不可混入响应断言字段。求值器按 is_var 分派只执行
+            # 变量断言，混入的 contains/matches 等会静默丢失——校验器与求值器口径
+            # 对齐，解析期拦截优于运行期静默吞掉用户意图。
+            present = [
+                k
+                for k in ("contains", "not_contains", "matches", "equals")
+                if getattr(self, k) is not None
+            ]
+            if present:
+                raise ValueError(f"变量断言不可同时指定响应断言字段：{present}")
             if self.var is None or self.op is None:
                 raise ValueError("变量断言需同时提供 var 与 op")
             # between 需 min/max；in 需 values；其余需 value
@@ -232,6 +242,9 @@ class Step(BaseModel):
 
     由 StepInput（输入方式）+ 行为修饰符（retry/poll/when/timeout/interval/port）
     + 输出处理（extract/assert）+ 失败处理（on_failure）组成。
+
+    内置变量 ``timestamp``（当前时间）/``port``（执行端口）每步注入步骤上下文，
+    不可作 extract 变量名（提取结果会被每步注入覆盖，解析期拒绝）。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
@@ -294,6 +307,11 @@ class Step(BaseModel):
         # 线程（无 CaseParseError 包装、无文件行号，用户直面 traceback）。
         if self.extract is not None:
             for var_name, pattern in self.extract.items():
+                # P3：内置变量每步注入（step_runner），extract 同名提取会被覆盖——解析期拒绝
+                if var_name in ("timestamp", "port"):
+                    raise ValueError(
+                        f"extract 变量名 {var_name!r} 与内置保留字冲突（每步注入，会被覆盖）"
+                    )
                 try:
                     re.compile(pattern)
                 except re.error as exc:
@@ -391,10 +409,25 @@ class Case(_Frozen):
     param_index: int | None = None
 
     @model_validator(mode="after")
-    def _name_not_blank(self) -> Case:
+    def _validate(self) -> Case:
         # P3 修复：纯空白字符串通过 min_length=1（"   "），与 quickcmd 侧口径统一
         if not self.name.strip():
             raise ValueError("name 不能为空白字符串")
+        # F-12 修复：warmup>=count 时统计轮数为 0（全部轮次只预热不计入），
+        # 压测报告必判 FAIL——这类配置只可能是笔误，解析期硬拒
+        if self.loop is not None and self.loop.warmup >= self.loop.count:
+            raise ValueError(
+                f"压测 warmup（{self.loop.warmup}）须小于 count（{self.loop.count}）："
+                f"否则统计轮数为 0，全 warmup 压测必判 FAIL"
+            )
+        # 2b 终审⑨：data 步骤×压测不硬拒但按用例粒度告警（与 Step 级 data×retry/poll
+        # 同族）——数据流不可重入，压测每轮重发的字节会被设备当 AT 命令解析、污染后续命令。
+        if self.loop is not None and any(s.data is not None for s in self.steps):
+            _log.warning(
+                "用例 %s 含 data 步骤且配置压测：数据流不可重入——压测每轮重发的字节"
+                "会被设备当 AT 命令解析、污染后续命令",
+                self.name,
+            )
         return self
 
     @property

@@ -1,8 +1,10 @@
-"""用例模型解析期校验单测（批 2b Task 1）.
+"""用例模型解析期校验单测（批 2b Task 1 / 批 3 Task 2）.
 
 覆盖：Step.expect（附加完成条件正则）、DataInput.inline_hex（三选一数据源与
 十六进制校验）、data×retry / data×poll 组合的解析期 warning（设计 §2.2，
-数据流不可重入——不硬拒，仅告警）。
+数据流不可重入——不硬拒，仅告警）；批 3 追加：F-15 变量断言×响应断言混合
+解析期拒绝、extract 保留字（timestamp/port）、warmup<count（F-12）、
+data×压测 Case 级警告（2b 终审⑨）。
 """
 
 from __future__ import annotations
@@ -11,12 +13,26 @@ import logging
 
 import pytest
 
-from atprobe.domain.case.models import DataInput, PollConfig, RetryConfig, Step
+from atprobe.domain.case.models import (
+    AssertElement,
+    AssertionOp,
+    Case,
+    DataInput,
+    LoopConfig,
+    PollConfig,
+    RetryConfig,
+    Step,
+)
 
 
 def _case_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     """筛出 atprobe.case logger 的 WARNING 级记录."""
     return [r for r in caplog.records if r.name == "atprobe.case" and r.levelno == logging.WARNING]
+
+
+def _pressure_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """筛出 Case 级压测警告（文案含「压测」；Step 级 data×retry/poll 警告不含，以此区分层级）."""
+    return [r for r in _case_warnings(caplog) if "压测" in r.getMessage()]
 
 
 class TestStepExpect:
@@ -111,3 +127,110 @@ class TestDataRetryPollWarning:
         with caplog.at_level(logging.WARNING, logger="atprobe.case"):
             Step(command="AT", retry=RetryConfig(count=2))
         assert _case_warnings(caplog) == []
+
+
+class TestAssertVarResponseExclusive:
+    """F-15：变量断言与响应原文断言不可混用（解析期拒绝）.
+
+    求值器按 is_var 分派只执行变量断言，混入的响应断言会静默丢失——
+    校验器与求值器口径对齐，解析期拦截优于运行期静默。
+    """
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            pytest.param({"contains": "OK"}, id="contains"),
+            pytest.param({"not_contains": "ERR"}, id="not_contains"),
+            pytest.param({"matches": r"OK$"}, id="matches"),
+            pytest.param({"equals": "OK"}, id="equals"),
+        ],
+    )
+    def test_mixed_rejected(self, field: dict[str, str]) -> None:
+        """任一响应断言字段与 var/op 同现 → ValueError."""
+        with pytest.raises(ValueError, match="不可同时指定"):
+            AssertElement(var="x", op=AssertionOp.EQ, value="1", **field)
+
+    def test_var_only_ok(self) -> None:
+        """纯变量断言照常通过（既有口径零回归）."""
+        a = AssertElement(var="x", op=AssertionOp.EQ, value="1")
+        assert a.var == "x"
+        assert a.contains is None
+
+    def test_response_only_ok(self) -> None:
+        """纯响应断言照常通过（既有口径零回归）."""
+        a = AssertElement(contains="OK")
+        assert a.contains == "OK"
+        assert a.var is None
+
+
+class TestExtractReservedWords:
+    """extract 变量名不可与内置保留字冲突（timestamp/port 每步注入，会被覆盖）."""
+
+    @pytest.mark.parametrize("name", ["timestamp", "port"])
+    def test_reserved_rejected(self, name: str) -> None:
+        with pytest.raises(ValueError, match="保留字"):
+            Step(command="AT", extract={name: r"\d+"})
+
+    def test_near_name_ok(self) -> None:
+        """近似名（ported/timestamps）不冲突，正常通过."""
+        s = Step(command="AT", extract={"ported": r"\d+", "timestamps": r"\d+"})
+        assert set(s.extract) == {"ported", "timestamps"}
+
+
+class TestLoopWarmupLessThanCount:
+    """F-12：warmup>=count 时统计轮数为 0，全 warmup 压测必判 FAIL——解析期拒绝."""
+
+    @pytest.mark.parametrize(
+        ("count", "warmup"),
+        [(3, 3), (2, 5)],
+        ids=["equal", "greater"],
+    )
+    def test_warmup_ge_count_rejected(self, count: int, warmup: int) -> None:
+        with pytest.raises(ValueError, match="warmup"):
+            Case(name="p", steps=(Step(command="AT"),), loop=LoopConfig(count=count, warmup=warmup))
+
+    def test_warmup_lt_count_ok(self) -> None:
+        c = Case(name="p", steps=(Step(command="AT"),), loop=LoopConfig(count=3, warmup=2))
+        assert c.loop is not None and c.loop.warmup == 2
+
+    def test_no_loop_not_affected(self) -> None:
+        """非压测用例不触发 warmup 校验."""
+        c = Case(name="basic", steps=(Step(command="AT"),))
+        assert c.loop is None
+
+
+class TestCaseLoopDataWarning:
+    """2b 终审⑨：data 步骤×压测组合的 Case 级解析期 warning（不硬拒）.
+
+    与 Step 级 data×retry/poll 警告同族（数据流不可重入），但按用例粒度
+    提示压测每轮重发的字节会被设备当 AT 命令解析。
+    """
+
+    def test_loop_with_data_step_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """loop+data 步骤 → Case 级 warning 含「不可重入」."""
+        with caplog.at_level(logging.WARNING, logger="atprobe.case"):
+            Case(
+                name="p",
+                steps=(Step(data=DataInput(inline="payload")),),
+                loop=LoopConfig(count=3, warmup=1),
+            )
+        pw = _pressure_warnings(caplog)
+        assert any("不可重入" in w.getMessage() for w in pw), (
+            f"应发出 Case 级 data×压测 warning，实际：{[w.getMessage() for w in _case_warnings(caplog)]}"
+        )
+
+    def test_loop_without_data_step_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """loop 无 data 步骤：无 Case 级压测 warning."""
+        with caplog.at_level(logging.WARNING, logger="atprobe.case"):
+            Case(name="p", steps=(Step(command="AT"),), loop=LoopConfig(count=3, warmup=1))
+        assert _pressure_warnings(caplog) == []
+
+    def test_data_without_loop_no_case_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """data 无 loop：Step 级 data×retry 警告仍发，但 Case 级压测警告不重复发出."""
+        with caplog.at_level(logging.WARNING, logger="atprobe.case"):
+            Case(
+                name="d",
+                steps=(Step(data=DataInput(inline="payload"), retry=RetryConfig(count=1)),),
+            )
+        assert _pressure_warnings(caplog) == []
+        assert _case_warnings(caplog), "Step 级 data×retry 警告应照常发出"
