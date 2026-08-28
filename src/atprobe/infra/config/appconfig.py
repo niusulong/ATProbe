@@ -10,6 +10,7 @@ AttributeError/TypeError，CLI 直面 traceback）。CLI 入口对 AppConfigErro
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -22,6 +23,7 @@ from atprobe.domain.case.redos import check_pattern
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 
 _yaml = YAML(typ="safe")
+_log = logging.getLogger("atprobe.config")
 
 
 class AppConfigError(ValueError):
@@ -194,12 +196,14 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
         # 嵌套量词会被设备持续上报触发灾难性回溯卡死读线程——解析期硬拒。
         # 存量 N58 模式（如 ^\$MYGPSPOS:）不含嵌套量词，零误拒。
         for pat in urc_filter_raw:
-            hard, _warnings = check_pattern(pat)
+            hard, warns = check_pattern(pat)
             if hard is not None:
                 raise AppConfigError(
                     f"urc_filter 模式 {pat!r} 存在灾难性回溯风险（{hard}）——请改写为非嵌套量词形式",
                     source=source,
                 )
+            for w in warns:
+                _log.warning("urc_filter 模式 %r：%s（静态提示，不阻断）", pat, w)
         cfg = _replace(cfg, urc_filter=tuple(urc_filter_raw))
     mcp = raw.get("mcp") or {}
     if isinstance(mcp, dict):
