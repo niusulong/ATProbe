@@ -134,6 +134,12 @@ class SerialConnection:
         # 本类，与 _wait_urc_re 同经 _sync_cycle_locked 逐周期注入 assembler。
         self._echo_line: bytes | None = None
 
+        # expect 附加完成条件正则（设计 §2.3，assembler 已支持暂存）：批 2a
+        # Task 5 经 send_command(expect=) 设置/复位——本任务恒 None。与
+        # _wait_urc_re 同族：线程语义归本类，周期参数经 _sync_cycle_locked
+        # 透传（勿在 sync 处硬编码 None，否则 Task 5 接线时成隐形陷阱）。
+        self._expect_re: re.Pattern[bytes] | None = None
+
         # 噪声 URC 过滤（PortConfig.urc_filter 编译产物）：匹配行照常派发给
         # URC 订阅者（不丢失），但会从交付给断言的响应文本中整段剥离（含
         # 吸附紧邻空行，字节级还原"如同该 URC 从未到达"）。默认空 = 不剥离。
@@ -521,17 +527,17 @@ class SerialConnection:
     def _sync_cycle_locked(self) -> None:
         """把线程语义状态注入 assembler 周期参数（调用方须已持 _buffer_lock）.
 
-        防接线类 bug 的单点（T3 质量审查建议）：_awaiting/_wait_urc_re/
-        _echo_line 的每个写点之后必须调用，否则 assembler 以陈旧周期参数
-        判定后续 chunk。_process_incoming 的 feed 前另有同款注入（读路径
-        每周期快照，等价迁移前在锁内读 _wait_urc_re/_echo_line 的语义）——
-        两者互为防线。expect_re 批 2a Task 5 才接线，本任务恒 None。
+        不变量：_process_incoming 的 feed 时 sync 是**机制本体**——消费者端
+        单一位置，对写点遗漏自愈（正是接线类 bug 的防线）；各写点后的 sync
+        为 belt-and-suspenders，供未来 feed 之外的新消费者。删除 feed 时
+        sync 须先迁移 35 处测试直写点（_awaiting/_wait_urc_re/_echo_line
+        等，批 5 删桥时处理）。
         """
         self._assembler.set_cycle(
             waiting=self._awaiting.is_set(),
             echo_line=self._echo_line,
             wait_urc_re=self._wait_urc_re,
-            expect_re=None,
+            expect_re=self._expect_re,  # Task 5 经 send_command(expect=) 设置
         )
 
     # ------------------------------------------------------------------
@@ -539,7 +545,8 @@ class SerialConnection:
     # _urc_dispatched/_buffer_generation/_orphan_pending）按属性委托到
     # assembler——状态单一来源不变。行为锁测试（test_connection_urc_dedup/
     # structural）直接读写这些名字构造竞态场景；生产代码不得使用（状态操作
-    # 一律经 _reset_buffer_locked/snapshot_and_reset/_process_incoming）。
+    # 一律经 _reset_buffer_locked/snapshot_and_reset/_process_incoming 及
+    # _maybe_reconnect 的 clear_orphan 一等方法）。
     # ------------------------------------------------------------------
     @property
     def _buffer(self) -> bytearray:
@@ -677,8 +684,10 @@ class SerialConnection:
         的缓冲状态派生），buffer 替换/偏移回写/代次推进全部在 assembler 内部
         （feed 持锁同步）完成——迁移前三处「锁外派发后回读当前 buffer / 以
         陈旧 tail 覆写」的竞态路径（wait_urc 交付/终结交付/空闲截断）不复
-        存在。事件分发（URC 回调/响应入队）在锁外执行，期间引擎 reset 只
-        影响后续 feed，不影响本次已快照的交付内容。
+        存在。实证口径：空闲截断漏点有红绿复现（test_connection_race.
+        TestP1StaleBufferStateRace）；wait_urc/终结交付漏点由同一结构性论证
+        覆盖（feed 快照），无独立复现用例。事件分发（URC 回调/响应入队）在
+        锁外执行，期间引擎 reset 只影响后续 feed，不影响本次已快照的交付内容。
 
         URC 分类（零前缀知识，见模块头注释；判定在 assembler）：
           - 空闲：所有完整非空行 = URC；
@@ -689,8 +698,8 @@ class SerialConnection:
         with self._buffer_lock:
             # 周期参数注入（set_cycle 契约）：读路径每周期按当前值快照——
             # 等价迁移前在锁内读 _wait_urc_re/_echo_line 的语义（_awaiting
-            # 旧实现在锁外读，此处更紧）。与各写点的 _sync_cycle_locked
-            # 互为防线。
+            # 旧实现在锁外读，此处更紧）。此 sync 是机制本体（不变量见
+            # _sync_cycle_locked 注释）。
             self._sync_cycle_locked()
             events = self._assembler.feed(chunk)
         for ev in events:
@@ -822,7 +831,7 @@ class SerialConnection:
                 # **不得**置孤儿标记——重开后的首个 chunk 是全新会话数据而非
                 # 死链续行，reset 的赋值语义会按半行置位，需显式覆写清除。
                 self._reset_buffer_locked()
-                self._assembler.orphan_pending = False
+                self._assembler.clear_orphan()
             return True
         return False
 

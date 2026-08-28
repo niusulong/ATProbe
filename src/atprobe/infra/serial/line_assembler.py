@@ -111,6 +111,11 @@ class LineAssembler:
         self._dispatched = 0
         self._generation += 1
 
+    def clear_orphan(self) -> None:
+        """重连后清除孤儿续行标记（_maybe_reconnect 专用）——新会话首 chunk
+        不是死链续行，reset 的赋值语义会误置 True，需显式覆写。"""
+        self._orphan_pending = False
+
     @property
     def generation(self) -> int:
         """buffer 代次：每次清/换自增（调用方据此检测跨调用缓冲重置）."""
@@ -121,7 +126,8 @@ class LineAssembler:
     # （_buffer/_urc_dispatched/_buffer_generation/_orphan_pending）已收敛到
     # 本类——行为锁测试（test_connection_urc_dedup/structural）直接读写这些
     # 状态名，connection 侧以同名属性委托到此处。单一状态源仍在 assembler；
-    # 生产代码的状态操作一律走 reset/snapshot_and_reset/feed，不使用本桥。
+    # 生产代码的状态操作一律走 reset/clear_orphan/snapshot_and_reset/feed，
+    # 不使用本桥。
     # ------------------------------------------------------------------
     @generation.setter
     def generation(self, value: int) -> None:
