@@ -8,6 +8,8 @@ tests/unit/test_persistent_subscribe.py 的 mock 模式）。
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from atprobe.infra.serial.config import FrameFormat, PortConfig
@@ -97,8 +99,6 @@ class TestAwaitResponsePrimitive:
     """
 
     def test_manual_cycle_returns_complete(self, monkeypatch) -> None:
-        import threading
-
         conn = _make_connection(monkeypatch)
         # 等价 send_command 前半（置等待态 → 清排 → 清缓冲/记回显），不经过 send_command
         conn._awaiting.set()
@@ -123,3 +123,6 @@ class TestAwaitResponsePrimitive:
         assert len(result) == 1
         assert result[0].status is ResponseStatus.COMPLETE
         assert "OK" in result[0].text
+        # 后置契约：原语返回后自身清理等待态与队列（wait_urc/echo 由调用方复位）
+        assert not conn._awaiting.is_set()
+        assert conn._response_q.empty()

@@ -369,9 +369,15 @@ class SerialConnection:
         """等待响应队列（带超时 + 取消轮询 + 超时快照 + 迟到收割，§7.5）.
 
         send_command 与数据发送周期（批 2b）共用的等待原语。
-        调用前提：调用方已置 _awaiting、已清排响应队列。
+
+        调用前置（调用方负责，参照 send_command 入口）：
+            1. 已持锁 ``_reset_buffer_locked()``（清残留缓冲，防污染超时快照文本）；
+            2. 已设 ``_echo_line``（等待期回显排除）与 ``_wait_urc_re``（按需）；
+            3. 已 ``_awaiting.set()`` 且已 ``_drain_response_q()``。
+        调用后置：内部 finally 仅清 ``_awaiting``/清排队列/清缓冲；
+        **不复位** ``_wait_urc_re``/``_echo_line``——调用方须在自己 finally 调
+        ``_reset_wait_urc()``（send_command :364-366 即此模式）。
         """
-        # 等待响应队列（带超时 + 取消轮询）
         deadline = self._clock() + timeout
         while True:
             if cancel is not None and cancel.cancelled:
@@ -407,7 +413,7 @@ class SerialConnection:
             keep_re = self._wait_urc_re  # wait_urc 超时：目标行不得被 filter 剥离
             self._reset_buffer_locked()
         text = self._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
-        err = "响应超时" if self._wait_urc_re is None else "等待 URC 超时"
+        err = "响应超时" if keep_re is None else "等待 URC 超时"
         # 迟到响应收割（N58 实测 bug 修复）：超时预算小于设备实际响应时延时
         # （典型：poll 末次 attempt 预算被钳到 0.05s，设备 ~60-90ms 才回），
         # 本命令的响应会在超时返回之后、下一条命令 write 前后的窗口到达——
