@@ -1967,13 +1967,17 @@ class TestEngineThreadNoDirectUi:
 
 
 class TestDownloadWorkerPassesSha256:
-    """P1-9：GUI 下载链路必须传入 expected_sha256（仅长度校验防不了等大小替换）."""
+    """P1-9：GUI 下载链路必须传入 expected_sha256（仅长度校验防不了等大小替换）.
+
+    T5（D-3）迁移：_download_worker 改经 UpdateSession 编排，patch 目标随迁
+    到 session 层——断言不变：sha256/size 仍端到端贯通至 downloader.download。
+    """
 
     def test_download_receives_expected_sha256(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         import pathlib
         from types import SimpleNamespace
 
-        import atprobe.infra.update.downloader as dl_mod
+        import atprobe.infra.update.session as session_mod
         from atprobe.gui.mainwindow import MainWindow
 
         recorded: dict[str, object] = {}
@@ -1983,14 +1987,16 @@ class TestDownloadWorkerPassesSha256:
         ):  # type: ignore[no-untyped-def]
             recorded["expected_sha256"] = kwargs.get("expected_sha256")
             recorded["expected_size"] = expected_size
+            recorded["filename"] = filename
             return SimpleNamespace(path=pathlib.Path(dest) / filename)
 
-        monkeypatch.setattr(dl_mod, "download", _fake_download)
+        monkeypatch.setattr(session_mod, "download", _fake_download)
         info = SimpleNamespace(
             zip_url="https://example.invalid/x.zip",
             version="0.10.0",
             zip_size=123,
             sha256="deadbeef",
+            minisig_url=None,
         )
         win = MainWindow()
         # 主线程同步调用 _download_worker 时，emit 为直接连接，会同步执行
@@ -2005,6 +2011,8 @@ class TestDownloadWorkerPassesSha256:
             "_download_worker 未把 ReleaseInfo.sha256 传给 download——GUI 更新链路缺内容校验"
         )
         assert recorded["expected_size"] == 123
+        # D-3：文件名由 UpdateSession 按模板生成（旧 GUI 硬编码路径的回归哨兵）
+        assert recorded["filename"] == "ATProbe-0.10.0-win64.zip"
 
 
 # ===========================================================================

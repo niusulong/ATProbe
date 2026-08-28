@@ -1,13 +1,12 @@
 """`update` 子命令：检查更新 / 交互安装 / 非交互安装。
 
-复用 infra/update 的 checker/downloader/installer，只在展示与交互层不同。
+复用 infra/update 的 checker/session/installer（D-3：下载编排收敛到
+UpdateSession，本层只做展示与交互），只在展示与交互层不同。
 """
 
 from __future__ import annotations
 
 import sys
-import tempfile
-from pathlib import Path
 
 import typer
 
@@ -18,9 +17,8 @@ from atprobe.infra.update import (
     UpdateError,
 )
 from atprobe.infra.update.checker import fetch_latest, is_newer
-from atprobe.infra.update.config import DEFAULT_CONFIG
-from atprobe.infra.update.downloader import download
 from atprobe.infra.update.installer import apply_update
+from atprobe.infra.update.session import UpdateSession
 from atprobe.infra.version import current_version
 
 
@@ -42,7 +40,9 @@ def update(
         typer.echo(f"当前 {local}，已是最新版本。")
         return
 
-    typer.echo(f"当前 {local}，最新 {info.version}，有新版本可用。")
+    # P3：预发布版本显式标注，避免 -rc1 被 semver 比较剥掉后缀后当正式版推荐
+    ver_label = f"{info.version}（预发布）" if info.prerelease else info.version
+    typer.echo(f"当前 {local}，最新 {ver_label}，有新版本可用。")
     typer.echo(f"下载：{info.zip_url}")
     typer.echo(f"大小：{_mb(info.zip_size)} MB")
     if info.release_notes:
@@ -58,21 +58,14 @@ def update(
         raise typer.Exit(1)
 
     if not yes:
-        confirm = typer.confirm(f"确认升级到 {info.version}？", default=False)
+        confirm = typer.confirm(f"确认升级到 {ver_label}？", default=False)
         if not confirm:
             typer.echo("已取消。")
             return
 
-    dest = Path(tempfile.gettempdir())
     try:
-        result = download(
-            info.zip_url,
-            dest,
-            filename=DEFAULT_CONFIG.asset_name_for(info.version),
-            expected_size=info.zip_size,
-            expected_sha256=info.sha256,  # B9：SHA256 内容校验（None 时降级为仅校验 size）
-            progress_cb=_print_progress,
-        )
+        # D-3：下载编排收敛 UpdateSession（文件名模板/校验参数/签名策略单点）
+        result = UpdateSession().download(info, progress_cb=_print_progress)
     except DownloadCancelled:
         typer.echo("\n已取消下载。")
         raise typer.Exit(1) from None

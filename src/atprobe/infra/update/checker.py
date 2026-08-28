@@ -35,6 +35,10 @@ class ReleaseInfo(BaseModel):
     # 旧版本无此资产 → None。此处只识别 URL 不下载；下载与验签由 UpdateSession
     # （T5 接线）负责，过渡期策略见 docs/user/update-signing.md。
     minisig_url: str | None = None
+    # P3：是否预发布版本（tag 含 -rc1/-beta 等 ``-`` 后缀）。GitHub 的
+    # releases/latest 端点理论上只返回正式版，但 tag 命名带后缀时旧实现
+    # 把预发布当正式版静默推荐升级；此标记供 CLI/GUI 在确认提示处标注。
+    prerelease: bool = False
 
 
 def fetch_latest(
@@ -119,6 +123,7 @@ def _parse_release_inner(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo
         html_url=str(body.get("html_url", "")),
         sha256=sha256_digest,
         minisig_url=minisig_url,
+        prerelease=is_prerelease(tag),
     )
 
 
@@ -151,6 +156,22 @@ def _http_error_msg(code: int) -> str:
 def is_newer(remote: str, local: str) -> bool:
     """remote 版本是否比 local 新（semver 元组比较）。"""
     return _parse_semver(remote) > _parse_semver(local)
+
+
+def is_prerelease(version: str) -> bool:
+    """版本是否为预发布（semver prerelease 段：core 后带 ``-`` 后缀）。
+
+    P3：``_parse_semver`` 为比较而忽略 ``-rc1`` 后缀，导致 ``v0.10.0-rc1``
+    被当作 ``0.10.0`` 正式版参与比较；本函数单独识别预发布形态，供
+    ``ReleaseInfo.prerelease`` 与 CLI/GUI 的确认提示标注用。
+
+    >>> is_prerelease("v0.10.0-rc1"), is_prerelease("0.10.0"), is_prerelease("0.10")
+    (True, False, False)
+    """
+    # 去 v 前缀与 +build 元数据后，剩余部分含 "-" 即预发布（semver 语法中
+    # prerelease 段是第三个 "." 段之后以 "-" 起始的整段，此处按宽松口径识别）
+    core = version.strip().lstrip("vV").split("+", 1)[0]
+    return "-" in core
 
 
 def _parse_semver(v: str) -> tuple[int, int, int]:

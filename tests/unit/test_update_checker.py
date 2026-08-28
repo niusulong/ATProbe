@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from atprobe.infra.update import AssetNotFoundError, UpdateCheckError
-from atprobe.infra.update.checker import fetch_latest, is_newer
+from atprobe.infra.update.checker import fetch_latest, is_newer, is_prerelease
 
 
 def _github_response(tag: str = "v0.3.0", *, with_asset: bool = True) -> bytes:
@@ -220,3 +220,41 @@ def test_fetch_latest_no_minisig_asset_returns_none() -> None:
 )
 def test_is_newer(remote: str, local: str, expected: bool) -> None:
     assert is_newer(remote, local) is expected
+
+
+# ---------- P3：预发布识别 ----------
+
+
+@pytest.mark.parametrize(
+    "version, expected",
+    [
+        ("v0.10.0-rc1", True),  # tag 形态
+        ("0.10.0-rc1", True),  # 去前缀 version 形态
+        ("1.0.0-beta.2", True),  # beta 段
+        ("1.0.0-alpha+b1", True),  # 带 build 元数据（+ 后仍识别 prerelease 段）
+        ("0.10.0", False),  # 正式版
+        ("0.10", False),  # 缺位补 0
+        ("v1.2.3", False),  # v 前缀正式版
+        ("", False),  # 空串兜底
+    ],
+)
+def test_is_prerelease(version: str, expected: bool) -> None:
+    assert is_prerelease(version) is expected
+
+
+def test_fetch_latest_prerelease_flag() -> None:
+    """tag 含 - 后缀 → ReleaseInfo.prerelease=True（供 CLI/GUI 标注）。"""
+    resp = _FakeResp(_github_response("v0.10.0-rc1"))
+    with patch("urllib.request.urlopen", return_value=resp):
+        info = fetch_latest()
+    assert info.version == "0.10.0-rc1"
+    assert info.prerelease is True
+
+
+def test_fetch_latest_stable_flag_false() -> None:
+    """正式 tag → prerelease=False（默认值路径）。"""
+    resp = _FakeResp(_github_response("v0.3.0"))
+    with patch("urllib.request.urlopen", return_value=resp):
+        info = fetch_latest()
+    assert info.version == "0.3.0"
+    assert info.prerelease is False

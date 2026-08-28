@@ -424,7 +424,10 @@ class MainWindow(QMainWindow):
         from atprobe.infra.version import current_version
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("发现新版本")
+        # P3：预发布版本在弹窗标题标注（info.prerelease 由 checker 按 tag 后缀解析）
+        dlg.setWindowTitle(
+            "发现新版本（预发布）" if getattr(info, "prerelease", False) else "发现新版本"
+        )
         dlg.setMinimumWidth(480)
         layout = QVBoxLayout(dlg)
         layout.addWidget(
@@ -474,23 +477,14 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._download_worker, args=(info,), daemon=True).start()
 
     def _download_worker(self, info: object) -> None:
-        import tempfile
-        from pathlib import Path
-
         from atprobe.infra.update import DownloadCancelled, DownloadError
-        from atprobe.infra.update.downloader import download
+        from atprobe.infra.update.session import UpdateSession
 
-        url = getattr(info, "zip_url", "")
-        name = f"ATProbe-{getattr(info, 'version', '')}-win64.zip"
         try:
-            result = download(
-                url,
-                Path(tempfile.gettempdir()),
-                filename=name,
-                expected_size=getattr(info, "zip_size", None),
-                # P1-9 修复：CLI 链路已传而 GUI 漏传——等大小恶意/损坏 zip 可绕过
-                # 长度校验直达安装。sha256 资产由 release.yml 生成，正常必有。
-                expected_sha256=getattr(info, "sha256", None),
+            # D-3/P1-9 结构修：下载编排收敛 UpdateSession（此前 GUI 此处硬编码
+            # 文件名、漏传校验参数，与 CLI 两处拼装各自漂移——单点后天然一致）
+            result = UpdateSession().download(
+                info,  # type: ignore[arg-type]
                 progress_cb=lambda d, t: self.update_download_progress.emit(d, t),
                 cancel_token=lambda: getattr(self, "_cancelled", False),
             )
