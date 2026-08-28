@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from atprobe.domain.case.templater import (
+    TemplateRenderError,
     UndefinedReferenceError,
     find_references,
     render,
@@ -87,3 +90,85 @@ class TestFindReferences:
     def test_distinguishes_dot_and_simple(self) -> None:
         refs = find_references("{{x}} {{group.param}}")
         assert refs == ["x", "group.param"]
+
+    def test_skips_function_form(self) -> None:
+        # 函数形态不是变量引用，UI 校验引用不应报未定义
+        refs = find_references('{{a}} {{file_size("x.bin")}} {{group.param}}')
+        assert refs == ["a", "group.param"]
+
+
+class TestBuiltinFunctions:
+    """{{file_size("path")}} 内置函数（S-8 路径锚定，设计 §5）."""
+
+    def test_file_size_double_quoted(self, tmp_path: Path) -> None:
+        (tmp_path / "x.bin").write_bytes(b"abc")
+        assert render('{{file_size("./x.bin")}}', {}, case_dir=tmp_path) == "3"
+
+    def test_file_size_single_quoted(self, tmp_path: Path) -> None:
+        (tmp_path / "x.bin").write_bytes(b"abc")
+        assert render("{{file_size('./x.bin')}}", {}, case_dir=tmp_path) == "3"
+
+    def test_file_size_mixed_with_vars(self, tmp_path: Path) -> None:
+        (tmp_path / "fw.bin").write_bytes(b"abcd")
+        out = render(
+            'AT+UPD={{file_size("fw.bin")}},name={{n}}',
+            {"n": "fw"},
+            case_dir=tmp_path,
+        )
+        assert out == "AT+UPD=4,name=fw"
+
+    def test_file_size_escape_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(TemplateRenderError):
+            render('{{file_size("../out.bin")}}', {}, case_dir=tmp_path)
+
+    def test_file_size_absolute_outside_rejected(self, tmp_path: Path) -> None:
+        outside = tmp_path.parent / "secret.bin"
+        with pytest.raises(TemplateRenderError):
+            render(f'{{{{file_size("{outside}")}}}}', {}, case_dir=tmp_path)
+
+    def test_unknown_function(self) -> None:
+        with pytest.raises(TemplateRenderError, match="未知内置"):
+            render('{{nope("x")}}', {})
+
+    def test_non_quoted_argument(self, tmp_path: Path) -> None:
+        with pytest.raises(TemplateRenderError, match="引号"):
+            render("{{file_size(x.bin)}}", {}, case_dir=tmp_path)
+
+    def test_missing_file_inside_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(TemplateRenderError, match="file_size"):
+            render('{{file_size("./missing.bin")}}', {}, case_dir=tmp_path)
+
+    def test_allow_partial_does_not_swallow_function_errors(self, tmp_path: Path) -> None:
+        # 函数求值失败不是「未定义变量」——allow_partial 下照抛
+        with pytest.raises(TemplateRenderError):
+            render(
+                '{{file_size("./missing.bin")}}',
+                {},
+                case_dir=tmp_path,
+                allow_partial=True,
+            )
+
+    def test_data_allowed_roots_extra_root(self, tmp_path: Path) -> None:
+        # 文件在额外根内、case_dir 外（绝对路径）→ 通过
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        (extra / "y.bin").write_bytes(b"abcd")
+        out = render(
+            f'{{{{file_size("{extra / "y.bin"}")}}}}',
+            {},
+            case_dir=case_dir,
+            data_allowed_roots=(extra,),
+        )
+        assert out == "4"
+
+    def test_no_case_dir_no_roots_rejects(self, tmp_path: Path) -> None:
+        # 锚集为空：相对路径按 CWD 解析后无锚根可比 → 拒绝
+        with pytest.raises(TemplateRenderError):
+            render("{{file_size('x.bin')}}", {})
+
+    def test_default_params_keep_legacy_behavior(self, tmp_path: Path) -> None:
+        # 不传新参数：占位符解析与既有行为完全一致
+        assert render("{{a}}", {"a": 1}) == "1"
+        assert render("plain", {}) == "plain"
