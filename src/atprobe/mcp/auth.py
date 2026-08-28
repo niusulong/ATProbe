@@ -138,6 +138,19 @@ def bearer_middleware(
         # S-4 消长度信号：剥 "Bearer " 后对凭据双侧 SHA-256 再比较——比较恒定
         # 32 字节，无任何与 Token 长度相关的分支/耗时差（hmac.compare_digest
         # 对不等长 bytes 本身安全，但"拼接+按长度比较"的路径仍有长度依赖）。
+        # scheme 前缀是公开常量，startswith 检查不引入时序信号（审查修复：
+        # 盲切 [7:] 会使任意 7 字节前缀 + 正确凭据通过）。
+        if not auth_raw.startswith(b"Bearer "):
+            await asyncio.sleep(limiter.delay_for_failure())
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+            return
         auth_token = auth_raw[7:]
         actual_hash = hashlib.sha256(auth_token).digest()
         if not hmac.compare_digest(actual_hash, expected_hash):

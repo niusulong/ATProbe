@@ -293,3 +293,44 @@ def test_fail_limiter_thread_safe_sequence():
     assert [lim.delay_for_failure() for _ in range(7)] == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 5.0]
     lim.reset()
     assert lim.delay_for_failure() == 0.5
+
+
+@pytest.mark.anyio
+async def test_middleware_rejects_wrong_scheme(recorded_sleeps):
+    """审查修复锁定：非 Bearer scheme（任意 7 字节前缀+正确凭据）必须 401."""
+    from atprobe.mcp.auth import bearer_middleware
+
+    calls: list[object] = []
+
+    async def app(scope, receive, send):  # type: ignore[no-untyped-def]
+        calls.append(scope)
+
+    async def receive() -> dict[str, object]:  # type: ignore[no-untyped-def]
+        return {"type": "http.request"}
+
+    sent: list[dict[str, object]] = []
+
+    async def send(event: dict[str, object]) -> None:  # type: ignore[no-untyped-def]
+        sent.append(event)
+
+    mw = bearer_middleware(app, "secret")
+
+    for header_value in (b"BasicX secret", b"basic secret", b"Bearersecret", b""):
+        sent.clear()
+        calls.clear()
+        await mw(
+            {"type": "http", "headers": [(b"authorization", header_value)]},
+            receive,
+            send,
+        )
+        assert sent and sent[0]["status"] == 401, header_value
+        assert not calls, header_value  # 未透传给 app
+    # 合法 scheme + 正确凭据仍通过（透传 app，无 401 响应）
+    sent.clear()
+    calls.clear()
+    await mw(
+        {"type": "http", "headers": [(b"authorization", b"Bearer secret")]},
+        receive,
+        send,
+    )
+    assert calls and not sent
