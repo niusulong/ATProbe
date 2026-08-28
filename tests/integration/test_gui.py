@@ -2005,3 +2005,136 @@ class TestDownloadWorkerPassesSha256:
             "_download_worker 未把 ReleaseInfo.sha256 传给 download——GUI 更新链路缺内容校验"
         )
         assert recorded["expected_size"] == 123
+
+
+# ===========================================================================
+# 批3 T7：启动级错误消费侧呈现（设计 §4.4②）+ send_manual False 语义（2a）
+# ===========================================================================
+class TestStartupErrorConsumption:
+    """engine.start 正常返回但 result.error 非空 → engine_error 事件（非 done）."""
+
+    def test_startup_error_event_mapping(self) -> None:
+        """纯函数 _startup_error_event：error 非空 → ("engine_error", "执行失败：…")；否则 None."""
+        from atprobe.domain.report.models import ExecutionResult, Summary
+        from atprobe.gui.mainwindow import _startup_error_event
+
+        ev = _startup_error_event(
+            ExecutionResult(summary=Summary(), error="端口全部打开失败：COM3 被占用")
+        )
+        assert ev == ("engine_error", "执行失败：端口全部打开失败：COM3 被占用")
+        # 无启动错误（正常执行路径）→ None（走 done/done_noreport 分支）
+        assert (
+            _startup_error_event(ExecutionResult(summary=Summary(total_cases=1, passed=1))) is None
+        )
+
+    def test_run_emits_engine_error_not_done(self, qapp, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+        """§4.4② 回归：启动级错误（error 非空、case_results 空）旧实现走 done 分支
+        ——绿色 FINISHED + "通过 0 / 失败 0" 弹窗，失败原因完全不可见。
+        修复后应投递 engine_error（与 done/done_noreport 三分支互斥）。
+        """
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.report.models import ExecutionResult, Summary
+        from atprobe.gui import mainwindow as mw
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.config import PortConfig
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+
+        case_file = tmp_path / "net.yaml"
+        case_file.write_text(
+            "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+        )
+
+        result = ExecutionResult(summary=Summary(), error="端口全部打开失败：COM9 不存在")
+
+        class _FakeEngine:
+            """start 正常返回（不抛异常）但携带启动级错误的引擎替身."""
+
+            def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                pass
+
+            def start(self, cfg, handler=None):  # noqa: ANN001
+                return result
+
+        monkeypatch.setattr(mw, "Engine", _FakeEngine)
+
+        win = MainWindow()
+        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+        win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
+
+        events: list[object] = []
+        win.progress.connect(lambda ev: events.append(ev))
+
+        try:
+            win.run_cases([str(case_file)], "COM9", 90)
+            if win._engine_thread is not None:
+                win._engine_thread.join(timeout=5)
+            qapp.processEvents()  # 投递引擎线程 queued 信号
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+        tags = [ev[0] for ev in events if isinstance(ev, tuple) and ev]
+        assert "engine_error" in tags, f"启动级错误应投递 engine_error，实际事件: {events}"
+        assert "done" not in tags and "done_noreport" not in tags, (
+            f"engine_error 与 done/done_noreport 应互斥，实际事件: {events}"
+        )
+        err = next(ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "engine_error")
+        assert "执行失败" in err[1] and "COM9 不存在" in err[1]  # type: ignore[union-attr]
+
+
+class TestSendManualFalseSemantics:
+    """2a：send_manual 返回 False = 未发送（原因已弹框告知），调用方不得渲染误导文案."""
+
+    @staticmethod
+    def _busy_main():  # type: ignore[no-untyped-def]
+        """已连接但 send_manual 恒 False 的替身——模拟端口忙/引擎运行（真实实现已弹框）."""
+
+        class _BusyMain(_FakeMain):
+            def send_manual(self, port, command, *, terminator=None):  # noqa: ANN001
+                return False
+
+        main = _BusyMain()
+        return main
+
+    def test_multiline_send_false_no_misleading_label(self, qapp, monkeypatch):  # type: ignore[no-untyped-def]
+        """多行发送中 False：响应区不得出现"端口未连接"误导文案，且中止剩余命令."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = self._busy_main()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+        widget.send_edit.setPlainText("AT\nAT+CSQ")
+        widget._send()  # noqa: SLF001
+
+        text = widget.response_view.toPlainText()
+        assert "端口未连接" not in text, f"False=原因已弹框，不得渲染误导文案: {text!r}"
+        # 首条失败即中止本轮（原因持续存在，逐条重发只会逐条弹框）：仅 1 条 TX 上屏
+        assert text.count("TX") == 1, f"应中止剩余命令，实际 TX 行数: {text.count('TX')}"
+
+    def test_send_command_false_no_misleading_label(self, qapp, monkeypatch):  # type: ignore[no-untyped-def]
+        """命令库单发 False：同 2a 语义，不渲染"端口未连接"误导文案."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = self._busy_main()
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        widget._toggle_connect()  # noqa: SLF001
+        widget.send_command("AT+CSQ")
+
+        text = widget.response_view.toPlainText()
+        assert "端口未连接" not in text, f"False=原因已弹框，不得渲染误导文案: {text!r}"

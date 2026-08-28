@@ -196,6 +196,98 @@ class TestHtmlReporter:
         assert "P95" in html or "p95" in html.lower()
 
 
+class TestOverallVerdictHtml:
+    """整体判定口径（设计 §4.4②）：0/0 不判"全部通过"、启动级错误判"执行错误"."""
+
+    def test_zero_zero_is_not_all_pass(self) -> None:
+        # total=0/passed=0/failed=0（如端口全部打开失败但 error 未设/空选集）：
+        # 旧实现 0==0 误判"全部通过"（绿色）——必须落"全部跳过"（neutral）
+        result = ExecutionResult(summary=aggregate([]))
+        html = HtmlReporter().render_html(result)
+        assert "全部跳过" in html
+        assert "全部通过" not in html
+        assert "执行错误" not in html
+
+    def test_startup_error_overrides_verdict(self) -> None:
+        # 启动级错误：执行没开始——"执行错误"（fail 红色），且错误原因须可见
+        result = ExecutionResult(summary=aggregate([]), error="端口全部打开失败：COM3 被占用")
+        html = HtmlReporter().render_html(result)
+        assert "执行错误" in html
+        assert "全部通过" not in html
+        assert "全部跳过" not in html
+        # 错误详情必须呈现在报告里（模板 hero-error 块）
+        assert "COM3 被占用" in html
+
+    def test_all_pass_verdict_kept(self) -> None:
+        # 正常全部通过：既有口径零回归
+        case = CaseResult(case_name="通过用例", case_file="a.yaml", status=CaseStatus.PASS)
+        result = ExecutionResult(summary=aggregate([case]), case_results=(case,))
+        html = HtmlReporter().render_html(result)
+        assert "全部通过" in html
+        assert "全部跳过" not in html
+        assert "执行错误" not in html
+
+    def test_all_fail_keeps_failed_guard(self) -> None:
+        # 有失败且无通过 → "全部失败"（failed>0 守卫防全部跳过误判）
+        step = StepResult(
+            step_index=1,
+            phase="steps",
+            input_type=InputType.COMMAND,
+            command="AT+BAD",
+            port="COM3",
+            status=StepStatus.FAIL,
+            request="AT+BAD",
+            response="ERROR",
+        )
+        case = CaseResult(
+            case_name="失败用例", case_file="b.yaml", status=CaseStatus.FAIL, step_results=(step,)
+        )
+        result = ExecutionResult(summary=aggregate([case]), case_results=(case,))
+        html = HtmlReporter().render_html(result)
+        assert "全部失败" in html
+        assert "全部通过" not in html
+
+
+class TestOverallVerdictConsole:
+    """console 汇总与 html 同口径（§4.4②）."""
+
+    def _render(self, result: ExecutionResult, capsys: pytest.CaptureFixture[str]) -> str:
+        ConsoleReporter().render(result, ReportOutput(to_console=True, color=False))
+        return capsys.readouterr().out
+
+    def test_zero_zero_is_skipped_not_pass(self, capsys: pytest.CaptureFixture[str]) -> None:
+        out = self._render(ExecutionResult(summary=aggregate([])), capsys)
+        assert "全部跳过" in out
+        assert "全部通过" not in out
+        assert "全部失败" not in out
+
+    def test_startup_error_shown(self, capsys: pytest.CaptureFixture[str]) -> None:
+        result = ExecutionResult(summary=aggregate([]), error="端口全部打开失败：COM3 不存在")
+        out = self._render(result, capsys)
+        assert "执行错误" in out
+        assert "COM3 不存在" in out
+        assert "全部通过" not in out
+
+    def test_all_fail_keeps_failed_guard(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # passed=0 且 failed>0 → "全部失败"（守卫回归：不得被 0/0→跳过分支吃掉）
+        step = StepResult(
+            step_index=1,
+            phase="steps",
+            input_type=InputType.COMMAND,
+            command="AT+BAD",
+            port="COM3",
+            status=StepStatus.FAIL,
+            request="AT+BAD",
+            response="ERROR",
+        )
+        case = CaseResult(
+            case_name="失败用例", case_file="b.yaml", status=CaseStatus.FAIL, step_results=(step,)
+        )
+        out = self._render(ExecutionResult(summary=aggregate([case]), case_results=(case,)), capsys)
+        assert "全部失败" in out
+        assert "全部通过" not in out
+
+
 class TestConsoleReporter:
     def test_renders_summary(self, capsys: pytest.CaptureFixture[str]) -> None:
         result = _make_result()

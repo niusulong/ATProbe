@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from typing import TextIO
 
-from atprobe.domain.report.models import CaseStatus, ExecutionResult, StepStatus, Summary
+from atprobe.domain.report.models import CaseStatus, ExecutionResult, StepStatus
 from atprobe.reporting.interfaces import IReporter, ReportOutput
 
 # ANSI 颜色码（§3.4）
@@ -61,7 +61,7 @@ class ConsoleReporter(IReporter):
             f"用例总数: {s.total_cases} | 通过 {s.passed} | 失败 {s.failed} "
             f"| 跳过 {s.skipped} | 中断 {s.interrupted}\n"
         )
-        overall = _overall(s, color)
+        overall = _overall(result, color)
         stream.write(f"通过率: {s.pass_rate:.1f}%  {overall}\n\n")
 
         failed = [c for c in result.case_results if c.status is CaseStatus.FAIL]
@@ -111,11 +111,23 @@ class ConsoleReporter(IReporter):
         stream.write(f"\n{'=' * 118}\n")
 
 
-def _overall(s: Summary, color: bool) -> str:
-    if s.failed == 0 and s.interrupted == 0:
-        if s.passed == s.total_cases:
-            return _color("全部通过", "PASS", enabled=color)
-    if s.passed == 0:
+def _overall(result: ExecutionResult, color: bool) -> str:
+    """整体判定文案（§4.4② 消费侧修复，与 HtmlReporter.render_html 同口径）.
+
+    优先级：启动级错误 > 全部通过（需 total>0，0/0 不得误判）> 全部跳过（含 0/0）
+    > 全部失败（需 failed>0）> 部分通过。
+    """
+    s = result.summary
+    if result.error:
+        # 启动级错误（sender 解析失败/端口全部打开失败）：执行没开始，
+        # 0/0 旧实现会误判"全部通过"——不是跳过，是错误。
+        return _color(f"执行错误：{result.error}", "FAIL", enabled=color)
+    if s.total_cases > 0 and s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0:
+        return _color("全部通过", "PASS", enabled=color)
+    if s.passed == 0 and s.failed == 0:
+        # 无通过、无失败（全部跳过/中断，含 0/0 空执行）
+        return _color("全部跳过", "SKIPPED", enabled=color)
+    if s.failed > 0 and s.passed == 0:
         return _color("全部失败", "FAIL", enabled=color)
     return _color("部分通过", "SKIPPED", enabled=color)
 

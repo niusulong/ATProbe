@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
 
     from atprobe.gui.widgets.file_send import FileSendWorker
     from atprobe.infra.serial.interfaces import CancelToken
+
+_log = logging.getLogger("atprobe.manual_debug")
 
 # 常见波特率（可编辑输入自定义值）
 _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
@@ -505,12 +508,21 @@ class ManualDebugWidget(QWidget):
         if self._file_worker is not None:
             QMessageBox.information(self, "端口忙", "另一发送周期进行中（文件发送），请稍候再发送")
             return
-        for command in commands:
+        for i, command in enumerate(commands):
             # TX 立即上屏（串口助手语义：发送即记录）
             self._render_tx_command(command)
             ok = send_manual(port, command, terminator=self._terminator)
             if not ok:
-                self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+                # 2a 语义：False=未发送，原因已由 MainWindow.send_manual 弹框告知
+                # （引擎运行/端口忙/发送异常）。旧实现再渲染"[错误] 发送失败（端口
+                # 未连接）"——误导。原因持续存在（引擎仍在跑/锁仍被持），中止本轮
+                # 剩余命令，避免逐条重发逐条弹框。
+                _log.warning(
+                    "手动发送第 %d/%d 条未发送（原因已弹框告知），中止剩余命令",
+                    i + 1,
+                    len(commands),
+                )
+                break
 
     def send_command(self, command: str) -> None:
         """发送单条命令（命令库面板双击调用）：TX 上屏 + 调 send_manual。
@@ -541,7 +553,9 @@ class ManualDebugWidget(QWidget):
             # TX 立即上屏（串口助手语义：发送即记录）
             self._render_tx_command(command)
             if not send_manual(port, command, terminator=self._terminator):
-                self._append_line("RX", "[错误] 发送失败（端口未连接）", self._tokens["danger"])
+                # 2a 语义：False=未发送，原因已由 MainWindow.send_manual 弹框告知
+                # （引擎运行/端口忙/发送异常）——不再渲染误导性"端口未连接"文案
+                _log.warning("命令发送未完成: %s（原因已弹框告知）", command)
         except PortBusyError:
             # P1-3 撞锁快速失败（并发引擎/数据发送周期持锁时 write_command 抛出）。
             # 当前主窗口 send_manual 已特判 PortBusyError 并弹友好框，此分支为
@@ -632,7 +646,9 @@ class ManualDebugWidget(QWidget):
         # TX 原始数据流式上屏（复用 RX 渲染逻辑，方向 TX）
         self._render_tx_bytes(data)
         if not send_file(port, data):
-            self._append_line("RX", "[错误] 文件发送失败（端口未连接）", self._tokens["danger"])
+            # 2a 语义（同 send_manual）：False=未发送，原因已由 MainWindow.send_file
+            # 弹框告知——不再渲染误导性"端口未连接"文案
+            _log.warning("文件发送未完成（原因已弹框告知）")
 
     def _send_file_large(self, port: str, data: bytes) -> None:
         """大文件后台分块发送（worker 线程，进度可取消）。"""

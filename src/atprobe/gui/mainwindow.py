@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from atprobe.domain.report.models import ExecutionResult
 from atprobe.engine import Engine, EngineConfig
 from atprobe.engine.config import EngineState, StopMode
 from atprobe.gui.icons import make_icon
@@ -59,6 +60,19 @@ _LED_COLOR = {
     "FINISHED": "success",
     "ERROR": "danger",
 }
+
+
+def _startup_error_event(result: ExecutionResult) -> tuple[str, str] | None:
+    """启动级错误的消费侧事件判定（设计 §4.4②，纯函数供 _run 与测试共用）.
+
+    engine.start 正常返回但 ``result.error`` 非空（sender 解析失败/端口全部打开
+    失败，case_results 为空）时，应投递 engine_error 事件而非走 done 分支——
+    旧实现消费侧呈现为绿色 FINISHED + "通过 0 / 失败 0" 弹窗，失败原因不可见。
+    返回 ``("engine_error", "执行失败：{error}")``；无启动错误返回 None。
+    """
+    if result.error:
+        return ("engine_error", f"执行失败：{result.error}")
+    return None
 
 
 class MainWindow(QMainWindow):
@@ -663,7 +677,10 @@ class MainWindow(QMainWindow):
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
 
         响应须经 ``subscribe_rx`` 订阅后在视图侧自行接收渲染。
-        返回 True 表示写入成功；未连接返回 False。
+
+        返回值语义（2a）：True=已写入；False=未发送——引擎运行/端口忙/发送异常
+        分支已弹框告知原因（调用方不得据此再渲染误导文案）；未连接分支静默返回
+        False（调用方各自检查连接并提示，不重复弹框）。
 
         Args:
             terminator: 逐命令覆盖的结束符；None 时用连接级 PortConfig.terminator。
@@ -693,7 +710,8 @@ class MainWindow(QMainWindow):
     def send_file(self, port: str, data: bytes) -> bool:
         """手动调试：持锁分块写原始字节到端口（不加结束符），供文件/二进制数据发送.
 
-        返回 True 表示写入成功；未连接返回 False。
+        返回值语义（2a，同 send_manual）：True=已写入；False=未发送——引擎运行/
+        端口忙/发送异常分支已弹框告知原因；未连接分支静默返回 False。
         小文件（≤4KB）走本同步路径（默认 spec 单块写）；大文件由 worker 直接
         持连接调 write_data——两者均持端口命令锁，与引擎命令/数据周期互斥。
         """
@@ -942,6 +960,12 @@ class MainWindow(QMainWindow):
                 # 旧实现不置 None，导致 stop_engine_dialog 对已结束引擎误弹停止框、
                 # _toggle_theme 误把 FINISHED/IDLE 重设为 RUNNING 色。
                 self._engine = None
+            ev = _startup_error_event(result)
+            if ev is not None:
+                # §4.4②：启动级错误消费侧呈现——旧实现走 done 分支，绿色 FINISHED
+                # +"通过 0 / 失败 0" 弹窗。与 done/done_noreport 三分支互斥。
+                self.progress.emit(ev)
+                return
             if no_report:
                 _log.info("执行结束: %d通过/%d失败", result.summary.passed, result.summary.failed)
                 self.progress.emit(

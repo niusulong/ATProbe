@@ -115,6 +115,20 @@
     .hero-bar-fill.fail { background: linear-gradient(90deg, #f85149 0%, #ffa657 100%); }
     .hero-bar-fill.partial { background: linear-gradient(90deg, #d29922 0%, #ffa657 100%); }
 
+    {# 整体判定徽标（§4.4②：overall[0] 文案此前从未上屏，0/0 只能靠数字猜） #}
+    .hero-verdict {
+      font-size: 14px; font-weight: 700; letter-spacing: 0.5px;
+      padding: 4px 14px; border: 1px solid currentColor; border-radius: 8px;
+    }
+    .hero-verdict.pass { color: #3fb950; }
+    .hero-verdict.fail { color: #f85149; }
+    .hero-verdict.partial { color: #d29922; }
+    {# 启动级错误（ExecutionResult.error）：执行没开始的原因必须一眼可见 #}
+    .hero-error {
+      margin: -6px 0 16px 64px; font-size: 13px; color: #f85149;
+      white-space: pre-wrap; word-break: break-all;
+    }
+
     .hero-stats {
       padding-left: 64px;
       display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, auto));
@@ -343,10 +357,14 @@
 
     <div class="hero-progress">
       <div class="hero-pct {{ hero_class }}" title="通过率">{{ pass_rate_pct }}<span style="font-size:24px;">%</span></div>
+      <div class="hero-verdict {{ hero_class }}">{{ overall[0] }}</div>
       <div class="hero-bar" aria-hidden="true">
         <div class="hero-bar-fill {{ hero_class }}" style="width: {{ pass_rate_pct }}%;"></div>
       </div>
     </div>
+    {% if result.error %}
+    <div class="hero-error">⚠ {{ result.error }}</div>
+    {% endif %}
 
     <div class="hero-stats">
       <div class="hero-stat"><span class="n pass">{{ summary.passed }}</span><span>通过用例 PASS</span></div>
