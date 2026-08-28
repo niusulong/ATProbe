@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from atprobe.infra.config.appconfig import AppConfig
+from atprobe.infra.serial.exceptions import InvalidArgumentError
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 from atprobe.mcp.errors import McpError
 from atprobe.mcp.service import McpService
@@ -106,6 +108,92 @@ def test_list_cases_and_suites(tmp_path):
     assert s["file"].endswith("suite-demo.yaml")
 
 
+def test_list_cases_missing_path_invalid_input(tmp_path):
+    """显式路径不存在 → INVALID_INPUT（不再静默空列表）；strict 与否一致."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    missing = tmp_path / "nope"
+    with pytest.raises(McpError) as ei:
+        svc.list_cases(path=str(missing))  # 非严格（list 语义）也报——用户显式给错路径
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "路径不存在" in ei.value.message
+    with pytest.raises(McpError) as ei:
+        svc.validate_run(paths=[str(missing)], tags=[])
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "路径不存在" in ei.value.message
+
+
+def test_collect_default_cases_dir_missing(tmp_path):
+    """缺省 cases_dir 不存在：strict（validate/start）→ INVALID_INPUT；
+    非严格 list_cases → 空列表（发现式语义，tools 层文案足够）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)  # cases_dir 未创建
+    assert svc.list_cases() == []
+    with pytest.raises(McpError) as ei:
+        svc.validate_run(tags=[])
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "路径不存在" in ei.value.message
+
+
+def test_collect_strict_parse_error_vs_skip(tmp_path):
+    """同一坏文件：strict（validate_run）→ INVALID_INPUT；非 strict（list_cases）跳过."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    bad = _write_case(tmp_path / "bad", "bad", "name: [unclosed")
+    with pytest.raises(McpError) as ei:
+        svc.validate_run(paths=[str(bad)], tags=[])
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "用例解析失败" in ei.value.message
+    assert svc.list_cases(path=str(bad)) == []  # 跳过坏文件 → 空列表（不抛）
+
+
+def test_collect_suite_steps_through_cache(tmp_path):
+    """显式 suite 文件经统一收集：suite 前后置带出（缓存粒度为单文件 Collected 整体）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    d = tmp_path / "suite_dir"
+    _write_case(d, "mini", MINIMAL_CASE)
+    suite = d / "suite-all.yaml"
+    suite.write_text(
+        "name: 全\ncases:\n  - mini.yaml\n"
+        "suite_setup:\n  - command: AT+SU\n    port: VSIM0\n"
+        "suite_teardown:\n  - command: AT+TD\n    port: VSIM0\n",
+        encoding="utf-8",
+    )
+    _cases, setup, teardown = svc._collect_cases([str(suite)], strict=True)
+    assert [c.name for c in _cases] == ["mini"]
+    assert [s.command for s in setup] == ["AT+SU"]
+    assert [s.command for s in teardown] == ["AT+TD"]
+
+
+def test_collect_cache_reuse_and_mtime_invalidation(tmp_path, monkeypatch):
+    """缓存（§4.9/P3）：同文件二次收集（跨 list/validate 入口）不重复解析；
+    mtime 变化（文件编辑）→ 失效重解析."""
+    import atprobe.mcp.service as service_mod
+
+    case = _write_case(tmp_path / "cases", "mini", MINIMAL_CASE)
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    calls: list[Path] = []
+    real_load = service_mod.load_cases
+
+    def counting_load(paths):
+        calls.extend(paths)
+        return real_load(paths)
+
+    monkeypatch.setattr(service_mod, "load_cases", counting_load)
+    first = svc.list_cases(path=str(case))
+    assert [c["name"] for c in first] == ["mini"]
+    assert calls == [case]
+
+    # 二次收集换入口（validate_run，strict）——同一文件命中缓存，不再解析
+    svc.validate_run(paths=[str(case)], tags=[])
+    assert calls == [case]
+
+    # mtime 变化 → 缓存失效重解析（utime 显式 +5s，避开文件系统时间戳粒度）
+    old_mtime = case.stat().st_mtime
+    case.write_text(MINIMAL_CASE.replace("name: mini", "name: edited"), encoding="utf-8")
+    os.utime(case, (old_mtime + 5, old_mtime + 5))
+    second = svc.list_cases(path=str(case))
+    assert [c["name"] for c in second] == ["edited"]
+    assert calls == [case, case]
+
+
 # ---------------------------------------------------------------------------
 # 手动调试
 # ---------------------------------------------------------------------------
@@ -154,6 +242,58 @@ def test_send_at_timeout_kw(tmp_path):
     svc.open_port(VSIM_EXPR)
     resp = svc.send_at(VSIM_PORT, "AT", timeout=2.0)
     assert "OK" in resp["text"]
+
+
+def test_send_at_invalid_wait_urc(tmp_path):
+    """wait_urc 非法正则 → INVALID_INPUT（服务层预校验；vsim 不校验也被拦）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    with pytest.raises(McpError) as ei:
+        svc.send_at(VSIM_PORT, "AT", wait_urc="([unclosed")
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "wait_urc" in ei.value.message
+
+
+def test_send_at_invalid_argument_translated(tmp_path, monkeypatch):
+    """连接层 InvalidArgumentError（SerialError 子类）→ INVALID_INPUT 而非 DEVICE_ERROR."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+
+    def fake_send_command(port, command, **kwargs):
+        raise InvalidArgumentError(f"[{port}] wait_urc 正则无效：boom")
+
+    monkeypatch.setattr(svc.port_manager, "send_command", fake_send_command)
+    with pytest.raises(McpError) as ei:
+        svc.send_at(VSIM_PORT, "AT")
+    assert ei.value.kind == "INVALID_INPUT"
+    assert "参数错误" in ei.value.message
+
+
+def test_send_at_busy_recheck_inside_pre_check(tmp_path, monkeypatch):
+    """TOCTOU 收口（设计 §3.2）：BUSY 检查经 pre_check 在连接命令锁内执行.
+
+    锁外不再预查（检查与发送间作业可启动）；pre_check 抛的 McpError 非
+    SerialError/OSError 子类——穿透 PortManager（无兜底 except）与 send_at
+    的 except 链直达调用方。模拟：进入 send_at 时无 running、到达连接层
+    （pre_check）时作业已启动 → BUSY 且携带 job_id。
+    """
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    svc.open_port(VSIM_EXPR)
+    monkeypatch.setattr(svc.jobs, "running_job_id", lambda: "job_window")
+    seen: dict[str, object] = {}
+
+    def fake_send_command(port, command, **kwargs):
+        seen["pre_check"] = kwargs.get("pre_check")
+        assert callable(kwargs["pre_check"])
+        kwargs["pre_check"]()  # 连接层契约：命令锁内、发送前调用
+        raise AssertionError("pre_check 未拦截，不应走到发送")
+
+    monkeypatch.setattr(svc.port_manager, "send_command", fake_send_command)
+    with pytest.raises(McpError) as ei:
+        svc.send_at(VSIM_PORT, "AT")
+    assert ei.value.kind == "BUSY"
+    assert ei.value.detail.get("job_id") == "job_window"
+    assert callable(seen["pre_check"])  # 占用检查确实传到了连接层（锁内重检）
 
 
 def test_close_port_idempotent(tmp_path):

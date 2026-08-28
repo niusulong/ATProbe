@@ -106,6 +106,10 @@ def serve(
     except FileNotFoundError as exc:
         typer.secho(f"Token 文件不存在：{exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc
+    except ValueError as exc:
+        # config 路径工作区锚定后仍不可读（目录/权限等，F-18 呈现层）
+        typer.secho(f"Token 加载失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
     if not tok:
         typer.secho(
             f"serve 需要 Token（--token-file / --token / 环境变量 {ENV_TOKEN} / 配置 mcp.token_file）",

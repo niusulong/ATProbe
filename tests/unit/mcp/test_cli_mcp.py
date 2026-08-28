@@ -112,3 +112,45 @@ def test_serve_no_mcp_friendly_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res.exit_code == 2
     assert "uv sync --extra mcp" in res.output
     assert res.exception is None or isinstance(res.exception, SystemExit)
+
+
+def test_serve_config_token_file_is_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config mcp.token_file 指向目录 → exit 2 干净错误（无 traceback），文案含"目录"."""
+    monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)
+    d = tmp_path / "adir"
+    d.mkdir()
+    cfg = tmp_path / "mcp.yaml"
+    cfg.write_text(f"mcp:\n  token_file: {d.as_posix()}\n", encoding="utf-8")
+    res = runner.invoke(app, ["mcp", "serve", "--config", str(cfg)])
+    assert res.exit_code == 2
+    assert res.exception is None or isinstance(res.exception, SystemExit)
+    assert "目录" in res.output
+    assert "Token 加载失败" in res.output
+
+
+def test_serve_config_token_file_relative_anchored_to_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-18 接线：mcp.token_file 相对路径在工作区（exe 同级）下被找到——非 cwd.
+
+    配置与 cwd 在 elsewhere、token 在工作区 tmp_path——分置才能证明锚定；
+    run_serve 打桩返回 0（不起真实服务），断言走到启动行即证明 Token 层已过。
+    """
+    import atprobe.infra.resources as resources
+    from atprobe.mcp import server as mcp_server
+
+    monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)
+    (tmp_path / "token.txt").write_text("ws-token\n", encoding="utf-8")
+    monkeypatch.setattr(resources, "app_root", lambda: tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    cfg = elsewhere / "mcp.yaml"
+    cfg.write_text("mcp:\n  token_file: token.txt\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "run_serve", lambda *a, **k: 0)
+    res = runner.invoke(app, ["mcp", "serve", "--config", str(cfg)])
+    assert res.exit_code == 0
+    assert "atprobe mcp serve" in res.output
+    assert "Token 文件不存在" not in res.output

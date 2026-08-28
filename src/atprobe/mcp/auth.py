@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from atprobe.infra.resources import resolve_workspace_path
+
 ENV_TOKEN = "ATPROBE_MCP_TOKEN"
 
 
@@ -25,18 +27,43 @@ def load_token(
     """加载 Token（四级优先级）：token_file > token > 环境变量 > config_token_file.
 
     两个文件参数均 read_text().strip()，全空白 → None；
-    文件不存在抛 FileNotFoundError（CLI 转为 exit 2）。
+    文件不存在抛 FileNotFoundError（CLI 转为 exit 2）；路径是目录或读取失败
+    抛 ValueError（CLI 同样转干净错误，不裸 traceback）。
+
+    路径解析（F-18）：config_token_file（来自配置文件，写相对路径时意图是
+    工作区相对）经 resolve_workspace_path 锚定——打包态 CLI 从非 exe 目录
+    启动时不再落到随机 cwd；显式 --token-file 保持用户原值（用户对 CLI
+    参数的 cwd 语义有直觉）。
     """
     if token_file:
-        return Path(token_file).read_text(encoding="utf-8").strip() or None
+        return _read_token_file(Path(token_file))
     if token:
         return token
     env = os.environ.get(ENV_TOKEN, "").strip()
     if env:
         return env
     if config_token_file:
-        return Path(config_token_file).read_text(encoding="utf-8").strip() or None
+        return _read_token_file(Path(resolve_workspace_path(config_token_file)))
     return None
+
+
+def _read_token_file(p: Path) -> str | None:
+    """读 Token 文件并剥离首尾空白；全空白 → None.
+
+    失败分类（CLI 统一转干净错误）：目录 → ValueError（Windows 下 read_text
+    对目录抛 PermissionError、POSIX 抛 IsADirectoryError，故先判 is_dir 统一
+    文案）；文件不存在 → FileNotFoundError 原样上抛（CLI 有专门呈现）；
+    其余 OSError → ValueError。
+    """
+    if p.is_dir():
+        raise ValueError(f"Token 文件路径是目录：{p}")
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise  # 保持原异常类型：CLI 现有"Token 文件不存在"专门呈现依赖它
+        raise ValueError(f"Token 文件读取失败（{p}）：{exc}") from exc
+    return text.strip() or None
 
 
 def bearer_middleware(

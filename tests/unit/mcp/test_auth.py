@@ -51,6 +51,38 @@ def test_load_token_config_priority(tmp_path, monkeypatch):
     assert load_token(token_file=None, token=None, config_token_file=str(cws)) is None
 
 
+def test_load_token_config_relative_anchored_to_workspace(tmp_path, monkeypatch):
+    """F-18：config mcp.token_file 相对路径锚定到用户工作区（非 cwd）.
+
+    工作区（开发态=仓库根、打包态=exe 同级）与 cwd 分置——只有走
+    resolve_workspace_path 锚定才能找到文件；绝对路径原样。
+    """
+    import atprobe.infra.resources as resources
+
+    monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)
+    (tmp_path / "token.txt").write_text("ws-token\n", encoding="utf-8")
+    monkeypatch.setattr(resources, "app_root", lambda: tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # cwd 无 token.txt——证明锚定的是工作区而非 cwd
+    assert load_token(token_file=None, token=None, config_token_file="token.txt") == "ws-token"
+    # 绝对路径原样（resolve_workspace_path 语义），不受工作区影响
+    abs_tf = elsewhere / "other.txt"
+    abs_tf.write_text("abs-token\n", encoding="utf-8")
+    assert load_token(token_file=None, token=None, config_token_file=str(abs_tf)) == "abs-token"
+
+
+def test_load_token_path_is_directory(tmp_path):
+    """Token 文件路径是目录 → ValueError（文案含"目录"），不裸抛
+    IsADirectoryError/PermissionError（Windows 对目录 read_text 抛后者）."""
+    d = tmp_path / "adir"
+    d.mkdir()
+    with pytest.raises(ValueError, match="目录"):
+        load_token(token_file=str(d), token=None)
+    with pytest.raises(ValueError, match="目录"):
+        load_token(token_file=None, token=None, config_token_file=str(d))
+
+
 @pytest.mark.anyio
 async def test_middleware_401_and_pass():
     sent: list[dict] = []

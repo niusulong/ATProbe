@@ -16,6 +16,7 @@ send_at 与作业互斥：引擎持有端口期间手动发送一律 BUSY。
 
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 from dataclasses import replace
@@ -27,6 +28,7 @@ from atprobe.domain.case.models import Case, Step
 from atprobe.domain.case.parser import CaseParseError
 from atprobe.domain.suite import SuiteParseError
 from atprobe.domain.suite.collect import (
+    Collected,
     collect_case_paths,
     filter_by_tags,
     load_cases,
@@ -37,7 +39,7 @@ from atprobe.infra.config.appconfig import AppConfig, AppConfigError, parse_port
 from atprobe.infra.config.envconfig import EnvConfig, EnvConfigError, load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path, user_workspace
 from atprobe.infra.serial.config import PortConfig
-from atprobe.infra.serial.exceptions import SerialError
+from atprobe.infra.serial.exceptions import InvalidArgumentError, SerialError
 from atprobe.infra.serial.interfaces import ERROR_KIND_NONE
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.rawlog import RawLogger
@@ -51,6 +53,11 @@ from atprobe.mcp.urcbuffer import UrcRegistry
 def _display_name(c: Case) -> str:
     """用例展示名：参数化实例带 #N 后缀（与执行/报告一致）."""
     return c.name if c.param_index is None else f"{c.name}#{c.param_index}"
+
+
+# 用例收集缓存上限（§4.9/P3）：MCP 工具调用高频，同批文件二次 list/validate
+# 免重复 IO+解析；超限淘汰最旧条目（dict 迭代序 = 插入序）
+_CASE_CACHE_MAX = 512
 
 
 class McpService:
@@ -101,6 +108,8 @@ class McpService:
             f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
         )
         self._urc_handles_lock = threading.Lock()
+        # 用例收集缓存（§4.9/P3）：文件路径 → (mtime, Collected)，见 _load_cases_cached
+        self._case_cache: dict[Path, tuple[float, Collected]] = {}
 
     # ------------------------------------------------------------------
     # 资源发现
@@ -142,16 +151,11 @@ class McpService:
     ) -> list[dict[str, Any]]:
         """列出用例（参数化已展开，name 带 #N；解析失败的文件跳过——对齐 CLI list 语义）.
 
-        path 省略时用配置 cases_dir；tags 非空时按并集过滤。
+        path 省略时用配置 cases_dir；tags 非空时按并集过滤。显式 path 不存在 →
+        INVALID_INPUT（不再静默空列表）；base 存在但收集为空 → 空列表（tools 层
+        文案足够）。
         """
-        base = Path(path) if path else resolve_workspace_path(self._app_cfg.cases_dir)
-        case_files, _warnings = collect_case_paths(None, base)
-        cases: list[Case] = []
-        for f in case_files:
-            try:
-                cases.extend(load_cases([f]).cases)
-            except (CaseParseError, SuiteParseError):
-                continue
+        cases, _setup, _teardown = self._collect_cases([path] if path else None, strict=False)
         return [
             {
                 "name": _display_name(c),
@@ -160,6 +164,70 @@ class McpService:
             }
             for c in filter_by_tags(cases, tags or [], [])
         ]
+
+    def _collect_cases(
+        self, paths: list[str] | None, *, strict: bool
+    ) -> tuple[list[Case], tuple[Step, ...], tuple[Step, ...]]:
+        """统一用例收集（list_cases / _resolve_run_inputs 共用，§4.9）.
+
+        路径预检：显式 paths 中某项不存在 → INVALID_INPUT（strict 与否一致——
+        用户显式给错路径都该报，而非静默空列表）；缺省 cases_dir 不存在仅在
+        strict 时报（list_cases 的发现式语义允许空工作区返回空列表）。
+        解析失败：strict=True 抛 INVALID_INPUT，False 跳过该文件（CLI list 语义）。
+        逐文件经 ``_load_cases_cached``（mtime 缓存）；套件文件先于散用例处理，
+        与 ``collect.load_cases`` 整批处理的顺序语义一致（缓存按单文件粒度）。
+
+        Returns:
+            (cases, suite_setup, suite_teardown)——suite 前后置由 load_cases 的
+            suite 分支带出（显式指定 suite- 文件时才有）。
+        """
+        base = resolve_workspace_path(self._app_cfg.cases_dir)
+        explicit = [Path(p) for p in paths] if paths else None
+        if explicit:
+            for p in explicit:
+                if not p.exists():
+                    raise invalid_input(f"路径不存在：{p}")
+        elif strict and not base.exists():
+            raise invalid_input(f"路径不存在：{base}")
+        case_files, _warnings = collect_case_paths(explicit, base)
+        ordered = [f for f in case_files if f.name.startswith("suite-")]
+        ordered += [f for f in case_files if not f.name.startswith("suite-")]
+        cases: list[Case] = []
+        suite_setup: list[Step] = []
+        suite_teardown: list[Step] = []
+        for f in ordered:
+            try:
+                collected = self._load_cases_cached(f)
+            except (CaseParseError, SuiteParseError) as exc:
+                if strict:
+                    raise invalid_input(f"用例解析失败：{exc}") from exc
+                continue
+            cases.extend(collected.cases)
+            suite_setup.extend(collected.suite_setup)
+            suite_teardown.extend(collected.suite_teardown)
+        return cases, tuple(suite_setup), tuple(suite_teardown)
+
+    def _load_cases_cached(self, f: Path) -> Collected:
+        """单文件解析 + mtime 缓存（§4.9/P3）：同文件二次收集免重复 IO+解析.
+
+        缓存策略：``_case_cache`` 按文件路径 → (mtime, Collected)；stat 的
+        mtime 与缓存一致则复用，否则 load_cases([f]) 后写回。失效条件即
+        mtime 变化（文件被编辑后下次收集自动重解析）；解析抛错不缓存
+        （重试照常走真实解析）。上限 512 条，超出淘汰最旧（插入序首条）。
+        """
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            mtime = -1.0  # stat 失败（窗口期被删等）：不缓存，让解析自然抛错
+        cached = self._case_cache.get(f)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        collected = load_cases([f])
+        if mtime >= 0:
+            self._case_cache[f] = (mtime, collected)
+            if len(self._case_cache) > _CASE_CACHE_MAX:
+                self._case_cache.pop(next(iter(self._case_cache)), None)
+        return collected
 
     def list_suites(self, path: str | None = None) -> list[dict[str, Any]]:
         """列出套件（suite- 前缀文件，轻量元信息，不打开引用的用例文件）."""
@@ -261,17 +329,38 @@ class McpService:
     ) -> dict[str, Any]:
         """手动发送单条 AT 命令并等待完整响应.
 
+        wait_urc 先在本层预校验（非法正则 → INVALID_INPUT，不进连接层）；
+        作业占用检查经 pre_check 在连接命令锁**内**重检（设计 §3.2）——锁外
+        预查与实际发送之间存在作业启动窗口（check-then-act TOCTOU），锁内
+        重检后检查与发送原子。pre_check 抛的 McpError（BUSY）不是
+        SerialError/OSError 子类，穿透连接层与 PortManager（无兜底 except）
+        直达调用方，不被本方法 except 链吞掉。
+
         Raises:
-            McpError: INVALID_INPUT——端口未开（先 open_port）；BUSY——作业运行中
-                （detail.job_id 为占用中的作业）；DEVICE_ERROR——发送异常。
+            McpError: INVALID_INPUT——端口未开（先 open_port）或 wait_urc 正则
+                非法（含连接层参数校验 InvalidArgumentError 的转译）；BUSY——
+                作业运行中（detail.job_id 为占用中的作业）；DEVICE_ERROR——发送异常。
         """
         if not self.port_manager.is_connected(port):
             raise invalid_input(f"端口未打开：{port}（请先 open_port）", port=port)
-        running = self.jobs.running_job_id()
-        if running is not None:
-            raise busy(f"作业运行中不可手动发送：{running}", job_id=running)
+        if wait_urc is not None:
+            try:
+                re.compile(wait_urc.encode("utf-8"))
+            except re.error as exc:
+                raise invalid_input(f"wait_urc 正则无效：{exc}", port=port) from exc
+
+        def _reject_if_running() -> None:
+            # 连接命令锁内重检（设计 §3.2）：锁外预查与发送之间存在作业启动窗口
+            running = self.jobs.running_job_id()
+            if running is not None:
+                raise busy(f"作业运行中不可手动发送：{running}", job_id=running)
+
         try:
-            resp = self.port_manager.send_command(port, command, timeout=timeout, wait_urc=wait_urc)
+            resp = self.port_manager.send_command(
+                port, command, timeout=timeout, wait_urc=wait_urc, pre_check=_reject_if_running
+            )
+        except InvalidArgumentError as exc:  # SerialError 子类，先于宽 catch（参数错误≠设备错误）
+            raise invalid_input(f"参数错误：{exc}", port=port) from exc
         except (SerialError, OSError) as exc:
             raise device_error(f"发送失败：{exc}", port=port) from exc
         out: dict[str, Any] = {"text": resp.text, "status": resp.status.value}
@@ -342,22 +431,15 @@ class McpService:
         """校验并组装运行输入：端口配置 + 过滤后用例 + 套件前后置步骤.
 
         Raises:
-            McpError: INVALID_INPUT——无用例文件 / 用例解析失败 / 标签过滤后为空 /
-                端口表达式非法 / 未指定端口。
+            McpError: INVALID_INPUT——路径不存在 / 无用例文件 / 用例解析失败 /
+                标签过滤后为空 / 端口表达式非法 / 未指定端口。
         """
-        base_paths = [Path(p) for p in paths] if paths else None
-        case_files, _warnings = collect_case_paths(
-            base_paths, resolve_workspace_path(self._app_cfg.cases_dir)
-        )
-        if not case_files:
+        cases, suite_setup, suite_teardown = self._collect_cases(paths, strict=True)
+        if not cases:
             raise invalid_input(
                 "未找到任何用例文件（检查 paths 参数或配置 cases_dir）", paths=paths or []
             )
-        try:
-            collected = load_cases(case_files)
-        except (CaseParseError, SuiteParseError) as exc:
-            raise invalid_input(f"用例解析失败：{exc}") from exc
-        cases = filter_by_tags(list(collected.cases), tags or [], [])
+        cases = filter_by_tags(cases, tags or [], [])
         if not cases:
             raise invalid_input("标签过滤后无可用用例", tags=tags or [])
 
@@ -375,7 +457,7 @@ class McpService:
         # 噪声 URC 过滤注入所有端口（对齐 run.py：仅真实串口分支，vsim 不注入）
         if not self._vsim:
             port_configs = [replace(p, urc_filter=self._app_cfg.urc_filter) for p in port_configs]
-        return port_configs, cases, collected.suite_setup, collected.suite_teardown
+        return port_configs, cases, suite_setup, suite_teardown
 
     def validate_run(
         self,
