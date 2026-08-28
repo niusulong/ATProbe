@@ -156,7 +156,8 @@ def download(
             resp = opener.open(req, timeout=to)  # noqa: S310
         except urllib.error.HTTPError as exc:
             raise DownloadError(f"下载失败（HTTP {exc.code}）") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            # ValueError：非法端口等 malformed URL 经 http.client 抛 InvalidURL
             raise DownloadError(f"下载失败：网络中断（{exc}）") from exc
 
         total = _content_length(resp)
