@@ -57,12 +57,12 @@ class EngineConfig:
     data_allowed_roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        # F-9：ports 为空 = 无执行端口（default_port 恒空、步骤无处发送）——
+        # 旧实现静默接受，跑出全失败报告难以定位。CLI/MCP 均已前置校验端口
+        # 非空，此处为引擎入口的最后防线。
+        if not self.ports:
+            raise ValueError("EngineConfig.ports 不可为空（至少一个执行端口）")
         # P3 修复：step_timeout_default 无 gt=0 校验（Step.timeout 有）——配 0 时
         # send_command 立即超时，所有步骤必然失败且难以定位原因
         if self.step_timeout_default <= 0:
             raise ValueError(f"step_timeout_default 必须大于 0，实际为 {self.step_timeout_default}")
-
-
-# 默认端口选取（M3 §6.2：用例/步骤未指定 port 时用第一个端口）
-def default_port(config: EngineConfig) -> str | None:
-    return config.ports[0].name if config.ports else None

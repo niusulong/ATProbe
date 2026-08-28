@@ -59,7 +59,9 @@ def _case(
 
 
 def _cfg(cases: list[Case]) -> EngineConfig:
-    return EngineConfig(ports=(), cases=tuple(cases))
+    # F-9：EngineConfig.ports 不可为空——错误路径测试也带一个（虚拟）端口；
+    # sender 由 FakePortManager 替身提供，open 走 Fake 无真实副作用
+    return EngineConfig(ports=(PortConfig(name="V0"),), cases=tuple(cases))
 
 
 class TestEngineFallback:
