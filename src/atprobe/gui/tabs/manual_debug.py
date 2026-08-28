@@ -624,7 +624,7 @@ class ManualDebugWidget(QWidget):
             self._send_file_large(port, data)
 
     def _send_file_small(self, port: str, data: bytes) -> None:
-        """小文件同步发送（主线程单次 write_bytes）。"""
+        """小文件同步发送（主线程持锁 write_data，小文件单块）。"""
         send_file = getattr(self._main, "send_file", None)
         if not callable(send_file):
             self._append_line("RX", "[错误] 引擎未就绪", self._tokens["danger"])
@@ -702,8 +702,9 @@ class ManualDebugWidget(QWidget):
         # 互斥：禁用文本发送框与文本发送按钮（按钮不随输入框联动，须显式禁）
         self.send_edit.setEnabled(False)
         self.send_btn.setEnabled(False)
-        # P1-8：命令库侧栏禁用——文件发送期间双击命令会把 AT 字节交叉进文件数据流
-        # （write_bytes 不参与连接层命令锁，须在 UI 层拦截）
+        # P1-8：命令库侧栏禁用——连接层 write_data 已持端口命令锁（撞锁快速失败
+        # 拦截字节交叉），UI 禁用保留为体验守卫：避免大文件发送中误触后只收到
+        # "端口忙"弹窗，直接锁住入口更顺
         self._cmd_panel.setEnabled(False)
 
     def _exit_file_sending(self) -> None:

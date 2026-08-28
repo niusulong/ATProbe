@@ -1248,13 +1248,22 @@ class TestManualDebugFileSendLarge:
         f = tmp_path / "big.bin"
         f.write_bytes(b"x" * 5000)
 
-        # 让 _FakeMain.get_connection 返回一个记录写入的替身
+        # 让 _FakeMain.get_connection 返回一个记录写入的替身（write_data 契约）
         class _Conn:
             def __init__(self) -> None:
                 self.written: list[bytes] = []
 
-            def write_bytes(self, d: bytes) -> None:
-                self.written.append(d)
+            def write_data(self, spec, *, cancel=None, on_chunk=None) -> None:  # type: ignore[no-untyped-def]
+                from atprobe.infra.serial.datastream import send_chunks
+
+                # 复用真实分块算法（sleep 打桩为 no-op，避免真实等待）
+                send_chunks(
+                    lambda d: self.written.append(d),
+                    spec,
+                    sleep=lambda _s: None,
+                    cancel=cancel,
+                    on_chunk=on_chunk,
+                )
 
         binding = TabBinding(type_name="manual_debug", params={})
         main = _FakeMain()
@@ -1263,9 +1272,6 @@ class TestManualDebugFileSendLarge:
         widget = ManualDebugWidget(binding, main)  # type: ignore[arg-type]
         widget._file_path = str(f)  # noqa: SLF001
         widget._update_file_label()
-
-        # 桩掉 time.sleep 避免 worker 真实等待
-        monkeypatch.setattr("atprobe.gui.widgets.file_send.time.sleep", lambda _s: None)
 
         widget._send_file()  # noqa: SLF001
 

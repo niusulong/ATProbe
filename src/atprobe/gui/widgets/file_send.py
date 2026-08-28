@@ -1,19 +1,19 @@
 """文件发送后台 worker（QObject）—— 大文件分块发送、逐块信号、可取消.
 
-算法同 infra/serial/datastream.py 的 send_data_stream（while 偏移切块），
-但内联以获得逐块信号插桩点（chunk_sent / progress）—— send_data_stream 外壳
-无逐块回调，无法驱动 GUI 进度/TX 流式上屏。
+算法已收敛到 infra 的持锁 write_data（SerialConnection.write_data →
+send_chunks，发送周期持 _command_lock，撞锁快速失败 PortBusyError）——
+worker 不再内联分块循环，只经 on_chunk 回调获得逐块插桩点
+（chunk_sent / progress）驱动 GUI 进度与 TX 流式上屏。
 
 默认块大小 1024、阈值 4096、间隔 5ms（紧凑默认值，UI 不可调；设计 §2/§3）。
 """
 
 from __future__ import annotations
 
-import time
-
 from PySide6.QtCore import QObject, Signal
 
-from atprobe.infra.serial.exceptions import OperationCancelled, SendError
+from atprobe.infra.serial.config import DataStreamSpec
+from atprobe.infra.serial.exceptions import OperationCancelled, PortBusyError, SendError
 from atprobe.infra.serial.interfaces import CancelToken
 
 # 紧凑默认值（设计 §2/§3）：块 1024 字节、阈值 4096、间隔 5ms
@@ -31,7 +31,8 @@ class FileSendWorker(QObject):
         progress(int)       0-100，按已写字节占比（分块路径每块后发一次）
         finished(bool, str) ok=True 正常完成；ok=False 含已发字节数的失败/取消消息
 
-    connection 为 SerialConnection（或测试替身，需提供 write_bytes(bytes)）。
+    connection 为 SerialConnection（或测试替身，需提供
+    ``write_data(spec, *, cancel, on_chunk)``）。
     """
 
     chunk_sent = Signal(bytes)
@@ -57,44 +58,39 @@ class FileSendWorker(QObject):
         self._cancel = cancel_token
 
     def run(self) -> None:
-        """执行分块发送。在 worker 线程内调用。"""
-        data = self._data
-        n = len(data)
+        """执行持锁分块发送（conn.write_data）。在 worker 线程内调用。"""
+        spec = DataStreamSpec(
+            data=self._data,
+            chunk_threshold=self._chunk_threshold,
+            chunk_size=self._chunk_size,
+            chunk_interval_ms=self._interval_ms,
+        )
         sent = 0
+
+        def _on_chunk(chunk: bytes, s: int, total: int) -> None:
+            nonlocal sent
+            sent = s
+            self.chunk_sent.emit(chunk)
+            # total=0（空数据回调）时跳过占比计算，末尾统一 emit(100)
+            if total > 0:
+                self.progress.emit(int(s * 100 / total))
+
         try:
-            if self._cancel is not None and self._cancel.cancelled:
-                raise OperationCancelled("文件发送被取消")
-
-            if n <= self._chunk_threshold:
-                # 整体发送（小文件）
-                self._conn.write_bytes(data)  # type: ignore[attr-defined]
-                self.chunk_sent.emit(data)
-                sent = n
-            else:
-                # 分块发送（大文件）
-                offset = 0
-                while offset < n:
-                    if self._cancel is not None and self._cancel.cancelled:
-                        raise OperationCancelled(f"文件发送被取消（已发送 {offset}/{n} 字节）")
-                    end = min(offset + self._chunk_size, n)
-                    chunk = data[offset:end]
-                    self._conn.write_bytes(chunk)  # type: ignore[attr-defined]
-                    self.chunk_sent.emit(chunk)
-                    offset = end
-                    sent = offset
-                    if n > 0:
-                        self.progress.emit(int(sent * 100 / n))
-                    if offset < n:
-                        time.sleep(self._interval_ms / 1000.0)
-
+            # 持锁写（连接层 _command_lock 互斥，撞锁 PortBusyError）；
+            # 取消/分块推进均由 send_chunks 在锁内驱动，经 _on_chunk 上报
+            self._conn.write_data(spec, cancel=self._cancel, on_chunk=_on_chunk)  # type: ignore[attr-defined]
             self.progress.emit(100)
-            self.finished.emit(True, f"已发送 {n} 字节")
+            self.finished.emit(True, f"已发送 {len(self._data)} 字节")
         except OperationCancelled as exc:
-            self.finished.emit(False, f"已取消（已发 {sent}/{n} 字节）：{exc}")
+            self.finished.emit(False, f"已取消（已发 {sent}/{len(self._data)} 字节）：{exc}")
+        except PortBusyError as exc:
+            # PortBusyError 与 SendError 同为 SerialError 直接子类（互非父子，
+            # exceptions.py 继承树）——无本分支会落入兜底文案而非明确"端口忙"
+            self.finished.emit(False, f"端口忙：{exc}（已发 {sent}/{len(self._data)} 字节）")
         except SendError as exc:
-            self.finished.emit(False, f"发送中断：{exc}（已发 {sent}/{n} 字节）")
-        except Exception as exc:  # noqa: BLE001 - P1 修复：兜底
-            # 旧实现无 catch-all：write_bytes 抛出其它异常（连接对象被替换、
-            # 替身异常等）时 finished 永不发出 → UI 永久卡在"发送中"态
+            self.finished.emit(False, f"发送中断：{exc}（已发 {sent}/{len(self._data)} 字节）")
+        except Exception as exc:  # noqa: BLE001 - 兜底：UI 永久卡"发送中"防线，保留
+            # write_data 抛出其它异常（连接对象被替换、替身异常等）时若无
+            # catch-all，finished 永不发出 → UI 永久卡在"发送中"态
             # （按钮/发送框禁用不可恢复）+ worker/线程泄漏。
-            self.finished.emit(False, f"发送失败：{exc!r}（已发 {sent}/{n} 字节）")
+            self.finished.emit(False, f"发送失败：{exc!r}（已发 {sent}/{len(self._data)} 字节）")

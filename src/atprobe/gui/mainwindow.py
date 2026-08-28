@@ -36,7 +36,13 @@ from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
 from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
-from atprobe.infra.serial.config import FlowControl, FrameFormat, PortConfig, Terminator
+from atprobe.infra.serial.config import (
+    DataStreamSpec,
+    FlowControl,
+    FrameFormat,
+    PortConfig,
+    Terminator,
+)
 from atprobe.infra.serial.exceptions import PortBusyError, PortOpenError
 from atprobe.infra.serial.interfaces import CancelToken
 from atprobe.infra.serial.portmanager import PortManager
@@ -685,10 +691,11 @@ class MainWindow(QMainWindow):
             return False
 
     def send_file(self, port: str, data: bytes) -> bool:
-        """手动调试：写原始字节到端口（不加结束符），供文件/二进制数据发送.
+        """手动调试：持锁分块写原始字节到端口（不加结束符），供文件/二进制数据发送.
 
         返回 True 表示写入成功；未连接返回 False。
-        小文件（≤4KB）走本同步路径；大文件由 worker 直接持连接发送。
+        小文件（≤4KB）走本同步路径（默认 spec 单块写）；大文件由 worker 直接
+        持连接调 write_data——两者均持端口命令锁，与引擎命令/数据周期互斥。
         """
         # P1 修复：同 send_manual，引擎运行期间拒绝（避免污染引擎响应缓冲）
         if self._engine is not None and self._engine.state() is EngineState.RUNNING:
@@ -699,8 +706,14 @@ class MainWindow(QMainWindow):
         if not self._port_manager.is_connected(port):
             return False
         try:
-            self._port_manager.write_bytes(port, data)
+            spec = DataStreamSpec(data=data)
+            self._port_manager.write_data(port, spec)
             return True
+        except PortBusyError:
+            # P1-3/P1-8 撞锁快速失败（并发发送周期持端口命令锁时 write_data 抛出）
+            # ——与 send_manual 的 2a 分支同文案风格
+            QMessageBox.information(self, "端口忙", "另一发送周期进行中(如引擎命令),请稍候再发送")
+            return False
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "发送错误", f"文件发送失败：{exc}")
             return False
