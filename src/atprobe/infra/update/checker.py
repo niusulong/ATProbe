@@ -31,6 +31,10 @@ class ReleaseInfo(BaseModel):
     html_url: str  # GitHub Release 页面（备用）
     # B9：随包发布的 SHA256 摘要（来自 <zip>.sha256 asset）。可能为空（旧版未发布哈希文件）。
     sha256: str | None = None
+    # S-6：随包发布的 minisign 签名文件下载地址（来自 <zip>.minisig asset）。
+    # 旧版本无此资产 → None。此处只识别 URL 不下载；下载与验签由 UpdateSession
+    # （T5 接线）负责，过渡期策略见 docs/user/update-signing.md。
+    minisig_url: str | None = None
 
 
 def fetch_latest(
@@ -98,6 +102,14 @@ def _parse_release_inner(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo
         sha_url = str(sha_asset.get("browser_download_url", ""))
         if sha_url:
             sha256_digest = _fetch_sha256(sha_url, cfg)
+    # S-6：识别 <zip>.minisign 签名资产（同 sha256 资产模式，但只取 URL 不下载——
+    # 签名文件几十 KB，何时取、如何验（含过渡期策略）由 T5 的 UpdateSession 决定）
+    sig_name = f"{expected_name}.minisig"
+    sig_asset = next((a for a in body.get("assets", []) if a.get("name") == sig_name), None)
+    minisig_url: str | None = None
+    if sig_asset is not None:
+        url = str(sig_asset.get("browser_download_url", ""))
+        minisig_url = url or None
     return ReleaseInfo(
         version=version,
         tag=tag,
@@ -106,6 +118,7 @@ def _parse_release_inner(body: dict[str, Any], cfg: UpdateConfig) -> ReleaseInfo
         release_notes=str(body.get("body", "")),
         html_url=str(body.get("html_url", "")),
         sha256=sha256_digest,
+        minisig_url=minisig_url,
     )
 
 

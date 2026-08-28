@@ -52,11 +52,41 @@ jobs:
           path: dist/ATProbe-*-win64.zip
           if-no-files-found: error
 
-      - name: Create GitHub Release & upload zip + sha256
+      - name: Sign release zip (minisign)
+        # S-6：Release 必须带 minisign 签名。secret 未配置 → 显式失败（发布必须签名，
+        # 不允许静默跳过）。激活步骤见 docs/user/update-signing.md。
+        shell: pwsh
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+          # 可选：私钥设置了保护密码时配置（经 stdin 传给 minisign，官方二进制
+          # 不支持环境变量/命令行传密码——见 docs/user/update-signing.md）
+          MINISIGN_KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD }}
+        run: |
+          if (-not $env:MINISIGN_PRIVATE_KEY) { Write-Host "::error::未配置 MINISIGN_PRIVATE_KEY secret——发布必须签名（见 docs/user/update-signing.md）"; exit 1 }
+          $keyFile = New-TemporaryFile
+          Set-Content -Path $keyFile -Value $env:MINISIGN_PRIVATE_KEY
+          # 下载 minisign（官方 release 二进制）
+          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.23/minisign-0.23-win64.zip" -OutFile minisign.zip
+          Expand-Archive minisign.zip -DestinationPath minisign
+          $ms = (Get-ChildItem minisign -Recurse -Filter minisign.exe).FullName
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            if ($env:MINISIGN_KEY_PASSWORD) {
+              # 密码经 stdin 传入（无 tty 时 minisign 从 stdin 读密码）
+              $env:MINISIGN_KEY_PASSWORD | & $ms -S -m $_.FullName -s $keyFile
+            } else {
+              & $ms -S -m $_.FullName -s $keyFile
+            }
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::minisign 签名失败（$($_.Name)）"; exit 1 }
+          }
+          Remove-Item $keyFile -Force
+          Get-ChildItem dist/*.minisig | ForEach-Object { Write-Host "已生成签名：$($_.Name)" }
+
+      - name: Create GitHub Release & upload zip + sha256 + minisig
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/ATProbe-*-win64.zip
             dist/ATProbe-*-win64.zip.sha256
+            dist/ATProbe-*-win64.zip.minisig
           generate_release_notes: true   # 自动从 commit 生成 changelog
           fail_on_unmatched_files: true

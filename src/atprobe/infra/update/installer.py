@@ -139,6 +139,9 @@ def _validate_zip(zip_path: Path) -> None:
 
     exe 名校验大小写不敏感（容错：spec 改大小写时不致再次翻车），
     但排除 atprobe-cli.exe（CLI exe 不是原地替换目标）。
+    _internal/ 校验按路径段精确匹配（S-6 加固：旧实现的子串匹配
+    ``_INTERNAL_NAME in n`` 会被 ``_internal-evil/``、``my_internal/x``
+    等撞名成员骗过；改为归一小写后某一段必须恰为 ``_internal``）。
     """
     try:
         with zipfile.ZipFile(zip_path) as z:
@@ -152,7 +155,7 @@ def _validate_zip(zip_path: Path) -> None:
         for n in names
         if not n.lower().endswith("/" + cli_name)
     )
-    has_internal = any(_INTERNAL_NAME in n for n in names)
+    has_internal = any(_INTERNAL_NAME in n.lower().replace("\\", "/").split("/") for n in names)
     if not (has_exe and has_internal):
         raise UpdateError(f"安装包损坏：缺少 {_EXE_NAME} 或 {_INTERNAL_NAME}/")
 
@@ -215,7 +218,9 @@ def build_updater_script(
 ) -> str:
     """生成 updater.bat 内容（Windows 批处理）。
 
-    所有路径加引号，防含空格/中文。bat 逻辑：等待退出 → 备份 → 替换 → 重启 / 失败回滚。
+    所有路径加引号，防含空格/中文；路径文本经 _bat_escape 把 ``%`` 转义为
+    ``%%``（NTFS 允许 ``%`` 字符，而 cmd 在 bat 双引号内仍展开 ``%VAR%``
+    环境变量——含 ``%`` 的安装路径会把 ``%xxx%`` 片段展开成环境值/空）。
 
     Args:
         staging_exe_name: staging 目录里主 exe 的真实文件名（大小写与 zip 产物一致），
@@ -223,18 +228,18 @@ def build_updater_script(
         staging_cli_exe_name: M8 修复——staging 目录里 CLI exe 的真实文件名（如
             atprobe-cli.exe）。非空时 bat 同时替换 CLI exe，避免 GUI 升级后 CLI 仍是旧版。
     """
-    exe = _win(str(exe_path))
-    internal = _win(str(internal_path))
-    staging = _win(str(staging_dir))
-    backup = _win(str(internal_path) + ".bak")
-    exe_bak = _win(str(exe_path) + ".bak")
-    staging_exe = _win(str(staging_dir / staging_exe_name))
+    exe = _bat_escape(_win(str(exe_path)))
+    internal = _bat_escape(_win(str(internal_path)))
+    staging = _bat_escape(_win(str(staging_dir)))
+    backup = _bat_escape(_win(str(internal_path) + ".bak"))
+    exe_bak = _bat_escape(_win(str(exe_path) + ".bak"))
+    staging_exe = _bat_escape(_win(str(staging_dir / staging_exe_name)))
     restart_cmd = f'start "" "{exe}"' if restart else "exit /b 0"
     # M8：CLI exe 替换块（仅 staging 含 atprobe-cli.exe 时执行）
     cli_replace_block = ""
     if staging_cli_exe_name is not None:
-        staging_cli = _win(str(staging_dir / staging_cli_exe_name))
-        cli_dest = _win(str(exe_path.parent / staging_cli_exe_name))
+        staging_cli = _bat_escape(_win(str(staging_dir / staging_cli_exe_name)))
+        cli_dest = _bat_escape(_win(str(exe_path.parent / staging_cli_exe_name)))
         # P3 修复：CLI copy 加错误检查（旧实现失败静默 → GUI 已升级、CLI 仍旧版）
         cli_replace_block = (
             f'if exist "{staging_cli}" (\n'
@@ -313,6 +318,16 @@ if exist "%EXE_BAK%" move /y "%EXE_BAK%" "%EXE%" >nul
 mshta javascript:alert("ATProbe 升级失败，已恢复旧版本。请稍后重试。");close()
 exit /b 1
 """
+
+
+def _bat_escape(s: str) -> str:
+    """bat 字面量转义：% → %%。
+
+    NTFS 路径允许 ``%`` 字符，但 bat 里 ``%VAR%`` 形态会被 cmd 当环境变量展开
+    （双引号内也一样）——含 ``%`` 的安装路径会被静默改写。bat 语法中 ``%%``
+    表示字面 ``%``，故所有插值进 bat 的路径文本都须转义。
+    """
+    return s.replace("%", "%%")
 
 
 def _win(p: str) -> str:

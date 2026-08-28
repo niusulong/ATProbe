@@ -8,6 +8,8 @@
     - B9 修复：可选 expected_sha256 内容校验，边下边哈希，下载完比对。
       防传输损坏 / CDN 缓存污染 / 等大小恶意替换（expected_size 来自同一 Release JSON
       防不住攻击者构造等大小 zip）。
+    - S-5：入口 URL 校验（仅 https + 下载主机白名单）与重定向复检
+      （防 30x 降级到 http / 跳到白名单外主机）。
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from http.client import HTTPMessage
 from pathlib import Path
+from typing import IO
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -29,6 +33,63 @@ _CHUNK = 8192
 
 ProgressCb = Callable[[int, int], None]
 CancelToken = Callable[[], bool]
+
+
+def _validate_url(url: str, cfg: UpdateConfig) -> str:
+    """S-5：下载地址白名单校验。
+
+    - scheme 必须 https（拒 http 明文/ftp/file 等）
+    - 主机（``urlparse().hostname``，不含端口）必须在 ``cfg.effective_allowed_hosts()``
+      白名单内；端口不参与白名单判断（同主机任意端口放行，校验聚焦传输层与主机归属）
+
+    Raises:
+        DownloadError: scheme 非 https 或主机越界。
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+    except ValueError as exc:
+        raise DownloadError(f"下载地址非法：{url}") from exc
+    if parsed.scheme != "https":
+        raise DownloadError(f"仅允许 https 下载地址：{url}")
+    hosts = cfg.effective_allowed_hosts()
+    if not host or host not in hosts:
+        raise DownloadError(
+            f"下载主机不在白名单：{host}（允许：{hosts}；可在配置 update.allowed_hosts 追加）"
+        )
+    return url
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """S-5：重定向防降级/防越界——每个 30x 目标复检 https + 主机白名单。
+
+    urllib 默认 opener 跟随重定向且不做任何检查（https→http 降级、跳任意主机
+    均静默接受）。本 handler 在 redirect_request 里对 newurl 递归 _validate_url：
+    校验失败直接抛 DownloadError——异常沿 ``opener.open()`` 原样传播
+    （urllib 只对 HTTPError 有包装路径，普通异常不包装），download() 的调用方
+    拿到的仍是语义清晰的 DownloadError 而非被截断的 HTTPError。
+    """
+
+    def __init__(self, cfg: UpdateConfig) -> None:
+        super().__init__()
+        self._cfg = cfg
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _validate_url(newurl, self._cfg)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_opener(cfg: UpdateConfig) -> urllib.request.OpenerDirector:
+    """构造带重定向复检的 opener（替代裸 urlopen 的默认 opener）。"""
+    return urllib.request.build_opener(_SafeRedirectHandler(cfg))
 
 
 class DownloadResult(BaseModel):
@@ -69,9 +130,10 @@ def download(
 
     Raises:
         DownloadCancelled: 用户取消。
-        DownloadError: 网络/磁盘/大小不符/SHA256 不符。
+        DownloadError: 网络/磁盘/大小不符/SHA256 不符/URL 越界（S-5）。
     """
     cfg = config or DEFAULT_CONFIG
+    _validate_url(url, cfg)  # S-5：入口校验——非 https / 白名单外主机在触网前拒绝
     if filename is None:
         filename = Path(urlparse(url).path).name or "download.bin"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -83,12 +145,15 @@ def download(
 
     to = cfg.download_timeout if timeout is None else timeout
     req = urllib.request.Request(url, headers={"User-Agent": f"ATProbe/{cfg.repo}"})
+    # S-5：带重定向复检的 opener（scheme 已校验、host 已过白名单，
+    # S310 审计项由此收敛；重定向目标由 _SafeRedirectHandler 逐跳复检）
+    opener = _build_opener(cfg)
     # 标记成功路径：仅当成功时跳过 finally 的 .part 清理
     # （成功时 .part 已被 replace 为 final，但显式标记更清晰）
     succeeded = False
     try:
         try:
-            resp = urllib.request.urlopen(req, timeout=to)  # noqa: S310
+            resp = opener.open(req, timeout=to)  # noqa: S310
         except urllib.error.HTTPError as exc:
             raise DownloadError(f"下载失败（HTTP {exc.code}）") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:

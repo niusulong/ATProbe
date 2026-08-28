@@ -211,3 +211,82 @@ def test_validate_zip_accepts_real_ci_layout(tmp_path: Path) -> None:
     from atprobe.infra.update.installer import _validate_zip
 
     _validate_zip(zip_path)  # 通过即成功
+
+
+# ---------------------------------------------------------------------------
+# S-6 installer 加固：_internal 精确匹配 + bat % 转义
+# ---------------------------------------------------------------------------
+def test_validate_zip_rejects_internal_prefix_imposter(tmp_path: Path) -> None:
+    """`_internal-evil/x` 子串可撞过旧校验（`_INTERNAL_NAME in n`），精确匹配须拒绝。"""
+    from atprobe.infra.update.installer import _validate_zip
+
+    zip_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("ATProbe-0.3.0/ATProbe.exe", b"PE")
+        z.writestr("ATProbe-0.3.0/_internal-evil/payload.txt", b"evil")  # 撞名前缀
+    with pytest.raises(UpdateError, match="损坏"):
+        _validate_zip(zip_path)
+
+
+def test_validate_zip_rejects_embedded_internal_substring(tmp_path: Path) -> None:
+    """`docs_internal.txt` / `my_internal/` 等含 `_internal` 子串的成员不算数。"""
+    from atprobe.infra.update.installer import _validate_zip
+
+    zip_path = tmp_path / "sub.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("ATProbe-0.3.0/ATProbe.exe", b"PE")
+        z.writestr("ATProbe-0.3.0/docs_internal.txt", b"n")
+        z.writestr("ATProbe-0.3.0/my_internal/x.txt", b"n")
+    with pytest.raises(UpdateError, match="损坏"):
+        _validate_zip(zip_path)
+
+
+def test_validate_zip_accepts_uppercase_internal(tmp_path: Path) -> None:
+    """大小写归一：`_INTERNAL/`（大写）成员应通过（Windows 文件系统大小写不敏感）。"""
+    from atprobe.infra.update.installer import _validate_zip
+
+    zip_path = tmp_path / "upper.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("ATProbe-0.3.0/ATProbe.exe", b"PE")
+        z.writestr("ATProbe-0.3.0/_INTERNAL/python311.dll", b"dll")
+    _validate_zip(zip_path)  # 不抛即通过
+
+
+def test_validate_zip_accepts_top_level_internal(tmp_path: Path) -> None:
+    """顶层无版本目录的扁平布局（_internal 直接在根）也应通过（路径段精确匹配）。"""
+    from atprobe.infra.update.installer import _validate_zip
+
+    zip_path = tmp_path / "flat.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("ATProbe.exe", b"PE")
+        z.writestr("_internal/python311.dll", b"dll")
+    _validate_zip(zip_path)
+
+
+def test_bat_escape_doubles_percent() -> None:
+    """`%` → `%%`（bat 双引号内 %VAR% 仍展开，须转义）。"""
+    from atprobe.infra.update.installer import _bat_escape
+
+    assert _bat_escape("C:\\100%fun\\ATProbe") == "C:\\100%%fun\\ATProbe"
+    assert _bat_escape("%PROGRAMFILES%\\x") == "%%PROGRAMFILES%%\\x"
+    assert _bat_escape("D:\\plain\\path") == "D:\\plain\\path"  # 无 % 不变
+
+
+def test_updater_script_escapes_percent_in_paths(tmp_path: Path) -> None:
+    """安装路径含 % 时，bat 内所有路径插值点都必须转义为 %%（防 %VAR% 展开）。"""
+    exe = Path("D:/100%fun/ATProbe/ATProbe.exe")
+    script = build_updater_script(
+        exe_path=exe,
+        internal_path=exe.parent / "_internal",
+        staging_dir=exe.parent / "ATProbe-0.3.0",
+        pid=1,
+    )
+    # 转义形态必须出现（set 行 + copy 目标 + start 重启行）
+    assert "D:\\100%%fun\\ATProbe\\ATProbe.exe" in script
+    assert "D:\\100%%fun\\ATProbe\\_internal" in script
+    assert "D:\\100%%fun\\ATProbe\\ATProbe-0.3.0" in script
+    # 未转义形态（单个 % 后跟字面文本）不得出现
+    assert "D:\\100%fun" not in script
+    # 真正的 bat 变量引用（%~f0 / %PID% / %tries%）不被转义破坏
+    assert "%~f0" in script
+    assert "%PID%" in script

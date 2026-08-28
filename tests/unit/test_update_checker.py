@@ -153,6 +153,55 @@ def test_fetch_latest_sha256_download_failure_returns_none() -> None:
     assert info.sha256 is None  # 无效摘要降级为 None
 
 
+# ---------- S-6：minisig 签名资产识别 ----------
+
+
+def _github_response_with_minisig(tag: str = "v0.3.0", *, with_minisig: bool = True) -> bytes:
+    """构造含（或不含）<zip>.minisig asset 的 GitHub 响应。"""
+    ver = tag.lstrip("v")
+    zip_name = f"ATProbe-{ver}-win64.zip"
+    assets: list[dict[str, object]] = [
+        {
+            "name": zip_name,
+            "browser_download_url": f"https://example.com/{zip_name}",
+            "size": 83558400,
+        }
+    ]
+    if with_minisig:
+        assets.append(
+            {
+                "name": f"{zip_name}.minisig",
+                "browser_download_url": f"https://example.com/{zip_name}.minisig",
+                "size": 217,
+            }
+        )
+    body = {
+        "tag_name": tag,
+        "body": "## 更新内容",
+        "html_url": f"https://github.com/niusulong/ATProbe/releases/tag/{tag}",
+        "assets": assets,
+    }
+    return json.dumps(body).encode("utf-8")
+
+
+def test_fetch_latest_parses_minisig_url() -> None:
+    """Release 含 <zip>.minisig asset → ReleaseInfo.minisig_url 取其 URL（不下载）。"""
+    resp = _FakeResp(_github_response_with_minisig("v0.3.0", with_minisig=True))
+    with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+        info = fetch_latest()
+    assert info.minisig_url == "https://example.com/ATProbe-0.3.0-win64.zip.minisig"
+    # 只取 URL 不触网下载（整个检查流程仅 1 次 API 请求，无 sha256 asset 时无第二次）
+    assert mock_open.call_count == 1
+
+
+def test_fetch_latest_no_minisig_asset_returns_none() -> None:
+    """Release 无 .minisig asset（旧版本发布）→ minisig_url = None（过渡兼容）。"""
+    resp = _FakeResp(_github_response_with_minisig("v0.3.0", with_minisig=False))
+    with patch("urllib.request.urlopen", return_value=resp):
+        info = fetch_latest()
+    assert info.minisig_url is None
+
+
 # ---------- is_newer ----------
 
 

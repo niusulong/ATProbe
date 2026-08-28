@@ -43,3 +43,31 @@ def test_exception_hierarchy() -> None:
     assert issubclass(DownloadError, UpdateError)
     # DownloadCancelled 单独继承（非错误，是用户意图），但也是基类
     assert not issubclass(DownloadCancelled, UpdateError)
+
+
+# ---------------------------------------------------------------------------
+# S-5：下载主机白名单
+# ---------------------------------------------------------------------------
+def test_allowed_hosts_default_empty() -> None:
+    """默认不追加（仅内置 GitHub 白名单）。"""
+    assert DEFAULT_CONFIG.allowed_hosts == ()
+
+
+def test_effective_allowed_hosts_builtin_entries() -> None:
+    """内置白名单含 GitHub 发布链路四主机。"""
+    hosts = DEFAULT_CONFIG.effective_allowed_hosts()
+    for expected in (
+        "github.com",
+        "objects.githubusercontent.com",
+        "api.github.com",
+        "github-releases.githubusercontent.com",
+    ):
+        assert expected in hosts
+
+
+def test_effective_allowed_hosts_user_append_merges() -> None:
+    """用户追加与内置白名单合并（追加不收窄）。"""
+    c = UpdateConfig(allowed_hosts=("mirror.example.com",))
+    hosts = c.effective_allowed_hosts()
+    assert "mirror.example.com" in hosts
+    assert "github.com" in hosts  # 内置项仍在
