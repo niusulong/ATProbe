@@ -219,7 +219,8 @@ steps:
 
 ```yaml
 - command: 'AT+FSWF="test.txt",0,{{file_size("./fs_payload.bin")}},10000'
-  expect: '
+  expect: '
+
 >'
 - data: { file: ./fs_payload.bin }
 ```
