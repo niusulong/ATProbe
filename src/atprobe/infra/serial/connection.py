@@ -21,7 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from atprobe.infra.serial.config import PortConfig, Terminator
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig, Terminator
+from atprobe.infra.serial.datastream import send_chunks
 from atprobe.infra.serial.exceptions import (
     OperationCancelled,
     PortBusyError,
@@ -108,6 +109,7 @@ class SerialConnection:
         log_file: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         now_wall: Callable[[], datetime] = datetime.now,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config
         self._raw_logger = raw_logger
@@ -115,6 +117,9 @@ class SerialConnection:
         self._clock = clock
         # 时钟注入贯穿（P3）：限频与 URC 时间戳统一走注入时钟，假时钟可测
         self._now_wall = now_wall
+        # 休眠注入（批 2b Task 3）：send_data/write_data 分块写的块间隔经此，
+        # 测试可注入记录器（与时钟注入同款模式）
+        self._sleep = sleep
 
         self._serial = None  # type: ignore[assignment]
         self._read_thread: threading.Thread | None = None
@@ -180,9 +185,9 @@ class SerialConnection:
         self._last_reconnect_attempt = 0.0
 
         # 端口级命令互斥（P1-3/P1-8）：现状无写线程——write_command/write_bytes 在
-        # 调用方线程同步执行，本锁是并发写问题的唯一防线。三个发送入口
-        # （send_command/write_command/数据发送周期——后者批 2b 接线）try-acquire；
-        # 撞锁快速失败。
+        # 调用方线程同步执行，本锁是并发写问题的唯一防线。四个发送入口
+        # （send_command/write_command/send_data/write_data——后两个为数据发送
+        # 周期，批 2b Task 3 接线）try-acquire；撞锁快速失败。
         self._command_lock = threading.Lock()
 
     def add_rx_observer(self, observer: Callable[[bytes], None]) -> None:
@@ -375,6 +380,37 @@ class SerialConnection:
         finally:
             self._command_lock.release()
 
+    def _compile_cycle_params(
+        self, wait_urc: str | None, expect: str | None
+    ) -> tuple[re.Pattern[bytes] | None, re.Pattern[bytes] | None]:
+        """wait_urc/expect 的互斥校验与字节级编译（发送周期共用，批 2b Task 3 抽出）.
+
+        返回 (wait_urc_re, expect_re)；两者同传抛 SerialError，正则非法抛
+        SerialError（与 wait_urc 同款 utf-8 字节级编译：正则作用于原始 RX 字节，
+        不预先转码）。须在置等待态**之前**调用：抛 SerialError 时
+        _awaiting/_wait_urc_re/_expect_re 等通道状态零污染，锁由调用方
+        finally 释放（acquire→try→校验抛错→release 平衡）。send_command
+        与 send_data 两个发送周期入口共用（任务口径：两者均为自定义完成
+        语义，二选一）。
+        """
+        if expect is not None and wait_urc is not None:
+            raise SerialError(
+                f"[{self.config.name}] expect 与 wait_urc 互斥：均为自定义完成语义，二选一"
+            )
+        expect_re: re.Pattern[bytes] | None = None
+        if expect is not None:
+            try:
+                expect_re = re.compile(expect.encode("utf-8"))
+            except re.error as exc:
+                raise SerialError(f"[{self.config.name}] expect 正则无效：{exc}") from exc
+        wait_urc_re: re.Pattern[bytes] | None = None
+        if wait_urc is not None:
+            try:
+                wait_urc_re = re.compile(wait_urc.encode("utf-8"))
+            except re.error as exc:
+                raise SerialError(f"[{self.config.name}] wait_urc 正则无效：{exc}") from exc
+        return wait_urc_re, expect_re
+
     def _send_command_locked(
         self,
         command: str,
@@ -390,18 +426,10 @@ class SerialConnection:
         _awaiting/_expect_re 等通道状态零污染，锁由 send_command 的 finally 释放
         （acquire→try→校验抛错→release 平衡）。
         """
-        # 互斥校验 + 正则预编译（与 wait_urc 同款字节级：正则作用于原始 RX 字节，
-        # 不预先转码）。任务口径：两者均为自定义完成语义，二选一。
-        if expect is not None and wait_urc is not None:
-            raise SerialError(
-                f"[{self.config.name}] expect 与 wait_urc 互斥：均为自定义完成语义，二选一"
-            )
-        expect_re: re.Pattern[bytes] | None = None
-        if expect is not None:
-            try:
-                expect_re = re.compile(expect.encode("utf-8"))
-            except re.error as exc:
-                raise SerialError(f"[{self.config.name}] expect 正则无效：{exc}") from exc
+        # 互斥校验 + 双正则预编译（入口一次，批 2b Task 3 抽为 _compile_cycle_params
+        # 与 send_data 共用；wait_urc 编译上移至此——原在置等待态段二次编译，同一
+        # 字符串结果相同，行为等价）
+        wait_urc_re, expect_re = self._compile_cycle_params(wait_urc, expect)
 
         if not self._connected or self._serial is None:
             return Response(
@@ -418,8 +446,7 @@ class SerialConnection:
         with self._buffer_lock:
             self._reset_buffer_locked()
             self._echo_line = command.strip().encode("utf-8") if command.strip() else None
-            if wait_urc is not None:
-                self._wait_urc_re = re.compile(wait_urc.encode("utf-8"))
+            self._wait_urc_re = wait_urc_re
             self._expect_re = expect_re
         # 先 set awaiting 再排空队列（B3 修复：消除 set 与 drain 之间读线程恰好检测到断连
         # 却因 awaiting 未 set 而丢弃断连信号的竞态窗口。先 set 后，读线程的断连路径会
@@ -649,7 +676,12 @@ class SerialConnection:
                 break
 
     # ------------------------------------------------------------------
-    # §3.2 数据流发送（分块）—— 供 DataStreamSender 调用的底层写
+    # §3.2 数据流发送（分块，设计 §2.3 硬性条目 / 批 2b Task 3）
+    # write_bytes 是底层裸写原语；send_data（引擎数据路径，整个周期持锁）与
+    # write_data（GUI 手动路径，只写不等）经 datastream.send_chunks 纯分块
+    # 策略组合之——三个已识别交错窗口（文件发送期间引擎启动、GUI 文件发送
+    # 期间 MCP 发送、引擎 data 步骤与手动路径并存）自此从「静默字节交错」
+    # 变为快速失败「端口正忙」。
     # ------------------------------------------------------------------
     def write_bytes(self, data: bytes) -> None:
         """直接写字节（不分块、不加结束符，供数据流发送用）.
@@ -657,8 +689,9 @@ class SerialConnection:
         与 write_command 一样通知 TX 观察者：SerialConnection 是所有字节写入的
         唯一咽喉点，订阅 TX 流应能看到这条链路上的所有写入（含原始字节/文件发送）。
 
-        线程语义：裸字节接口，不参与命令互斥——仅供持锁周期内的分块写使用
-        （数据流发送，批 2b 接线；锁由外层发送周期持有，见 _command_lock 注释）。
+        线程语义：裸字节接口，不参与命令互斥——供持锁周期内的分块写使用
+        （send_data/write_data 的分块写经此；锁由外层发送周期持有，见
+        _command_lock 注释）。
         """
         if not self._connected or self._serial is None:
             raise SendError(self.config.name, "端口未连接")
@@ -669,6 +702,141 @@ class SerialConnection:
             self._serial.flush()  # type: ignore[union-attr]
         except (SerialException, OSError) as exc:
             raise SendError(self.config.name, str(exc)) from exc
+
+    def send_data(
+        self,
+        spec: DataStreamSpec,
+        *,
+        timeout: float | None = None,
+        wait_urc: str | None = None,
+        expect: str | None = None,
+        cancel: CancelToken | None = None,
+    ) -> Response:
+        """发送数据流（分块）并等待响应——引擎数据路径（设计 §2.3 硬性条目）.
+
+        与 send_command 同入口家族：整个周期（置等待态 → 分块写 → 等待响应）
+        持有 _command_lock，撞锁快速失败 PortBusyError——数据发送与命令发送/
+        另一数据发送在端口级互斥（三个交错窗口消解，见 write_bytes 上方节注）。
+
+        timeout 仅约束等待段：写段时长由 spec 的 chunk 参数控制（块大小/块间
+        隔），不计入 timeout 预算；None 时用 config.response_timeout。
+
+        数据流不重试不续传（§3.2）：send_chunks 抛 SendError（断连/IO 失败，
+        部分字节已上线）即返回 ERROR Response（error_kind=SEND）；等待期/分块
+        期间被取消抛 OperationCancelled（step_runner 判 INTERRUPTED，与
+        send_command 取消同语义）。
+
+        expect/wait_urc 语义同 send_command（互斥，同传或正则非法抛
+        SerialError，抛出时通道状态零污染、锁已释放）：expect 例——FSWF 阶段
+        二等待 ``\\+FSWF: Timeout!``；wait_urc 例——TCPSEND 阶段二等待
+        ``\\+TCPSEND: \\d+,\\d+``。
+        """
+        # P1-3/P1-8：数据发送周期纳入端口命令互斥——try-acquire 快速失败
+        # （排队反面论证同 send_command 入口注释）。
+        if not self._command_lock.acquire(blocking=False):
+            raise PortBusyError(self.config.name, "端口正忙：并发发送不支持")
+        try:
+            # 编译/校验在置等待态之前：抛 SerialError 时零状态污染（同
+            # _send_command_locked 口径），锁由外层 finally 释放
+            wait_urc_re, expect_re = self._compile_cycle_params(wait_urc, expect)
+            if not self._connected or self._serial is None:
+                return Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error="端口未连接",
+                    error_kind=ERROR_KIND_SEND,
+                )
+
+            to = self.config.response_timeout if timeout is None else timeout
+
+            # 置等待态：数据模式无回显排除（echo_line=None——排除的是与命令
+            # 逐字相等的回显行，原始数据无此概念）；周期参数注入同锁原子。
+            # 先 set awaiting 再排空队列（B3，同 send_command）；drain 须在
+            # 首块写入前完成——等待期超时帧可在分块期间到达，等待态须已生效，
+            # 阶段一残迹不泄入阶段二。
+            with self._buffer_lock:
+                self._reset_buffer_locked()
+                self._echo_line = None
+                self._wait_urc_re = wait_urc_re
+                self._expect_re = expect_re
+                self._awaiting.set()
+                self._sync_cycle_locked()
+            self._drain_response_q()
+
+            try:
+                send_chunks(
+                    self.write_bytes,
+                    spec,
+                    sleep=self._sleep,
+                    cancel=cancel,
+                    terminator=self.config.terminator.value.encode("ascii"),
+                )
+                return self._await_response(to, cancel)
+            except SendError as exc:
+                # 部分字节已上线，不重试不续传（§3.2）：清等待态后按 ERROR 交付
+                # （inner finally 确保 _reset_wait_urc 在本 return 前执行）。
+                with self._buffer_lock:
+                    self._awaiting.clear()
+                    self._sync_cycle_locked()
+                return Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error=f"发送失败：{exc}",
+                    error_kind=ERROR_KIND_SEND,
+                )
+            except OperationCancelled:
+                # 分块期间取消（等待期取消由 _await_response 自抛）：清等待态
+                # 后透传（与 send_command 取消同语义）
+                with self._buffer_lock:
+                    self._awaiting.clear()
+                    self._sync_cycle_locked()
+                raise
+            finally:
+                # 与 _send_command_locked 同款：正常/异常/取消全部复位周期等待态
+                self._reset_wait_urc()
+        finally:
+            self._command_lock.release()
+
+    def write_data(
+        self,
+        spec: DataStreamSpec,
+        *,
+        cancel: CancelToken | None = None,
+        on_chunk: Callable[[bytes, int, int], None] | None = None,
+    ) -> None:
+        """发送数据流（分块），只写不等——GUI 手动路径（M6 文件发送/串口助手）.
+
+        与 send_data 的区别：不置等待态、不动响应缓冲、不 drain——手动模式
+        现状下响应经 rx_observer 流式给控制台，空闲行由读线程按 URC 结构分类
+        派发给监控订阅。发送周期仍持 _command_lock（与 send_command/send_data
+        互斥，撞锁快速失败 PortBusyError）。
+
+        Args:
+            spec: 数据流规格（data + 分块参数 + append_terminator）。
+            cancel: 取消令牌；分块期间触发抛 OperationCancelled。
+            on_chunk: 每块写完回调 (块字节, 已发, 总量)——GUI 进度插桩点
+                （终结符不算块，不回调）。
+
+        Raises:
+            PortBusyError: 端口正被其它发送周期占用。
+            SendError: 端口未连接或写失败（GUI worker 已有捕获）。
+            OperationCancelled: 被取消。
+        """
+        if not self._command_lock.acquire(blocking=False):
+            raise PortBusyError(self.config.name, "端口正忙：并发发送不支持")
+        try:
+            if not self._connected or self._serial is None:
+                raise SendError(self.config.name, "端口未连接")
+            send_chunks(
+                self.write_bytes,
+                spec,
+                sleep=self._sleep,
+                cancel=cancel,
+                terminator=self.config.terminator.value.encode("ascii"),
+                on_chunk=on_chunk,
+            )
+        finally:
+            self._command_lock.release()
 
     # ------------------------------------------------------------------
     # §6 URC 订阅

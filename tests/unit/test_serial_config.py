@@ -33,7 +33,7 @@ class TestFrameFormat15Stopbits:
 
 
 class TestDataStreamSpecValidation:
-    """F-5：chunk 参数校验（chunk_size<=0 会致 send_data_stream 死循环）."""
+    """F-5：chunk 参数校验（chunk_size<=0 会致 send_chunks 死循环）."""
 
     def test_chunk_size_zero_rejected(self) -> None:
         with pytest.raises(ValueError, match="chunk_size"):

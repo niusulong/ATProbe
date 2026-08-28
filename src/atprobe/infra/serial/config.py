@@ -101,7 +101,7 @@ class DataStreamSpec:
     append_terminator: bool = False
 
     def __post_init__(self) -> None:
-        # F-5 修复：chunk 参数此前无校验——chunk_size<=0 使 send_data_stream
+        # F-5 修复：chunk 参数此前无校验——chunk_size<=0 使 send_chunks
         # 死循环（offset 不前进）、chunk_interval_ms<0 使 sleep 抛 ValueError。
         if self.chunk_size < 1:
             raise ValueError(f"chunk_size 须 ≥1，实际：{self.chunk_size}")
