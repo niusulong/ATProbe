@@ -123,9 +123,18 @@ class RawLogger:
 
         返回基础路径（stem，无后缀）；实际写入时派生 ``<stem>.text.log`` 和
         ``<stem>.hex.log`` 两个独立文件（§7.2 TEXT 与 HEX 分离）。
+
+        S-1：三个片段全部消毒——session/port 与 case_name 同为不可信输入
+        （port 来自用例 step.port），旧实现仅 case_name 过 ``_sanitize``，
+        session/port 直接拼接可实现跨目录任意写（如 session="../../evil"）。
         """
+        # S-1：port 先取 basename 消路径语义——Linux /dev/ttyUSB0 变 ttyUSB0
+        # （不再嵌套 dev/ttyUSB0 目录），Windows ..\..\evil 变 evil（遍历封死）；
+        # name 为空（如 port="" 或 "/"）时回退原串，交由 _sanitize 兜底占位。
+        safe_port = _sanitize(Path(port).name or port)
+        safe_session = _sanitize(session)
         safe_case = _sanitize(case_name)
-        case_dir = log_dir / session / port
+        case_dir = log_dir / safe_session / safe_port
         case_dir.mkdir(parents=True, exist_ok=True)
         return case_dir / safe_case
 
@@ -243,11 +252,18 @@ class RawLogger:
 
 
 def _sanitize(name: str) -> str:
-    """把用例名转为安全的文件名片段."""
+    """把用例名转为安全的文件名片段.
+
+    纯点号（"." / ".." / "..."）在字符白名单内但构成路径遍历成分（拼接时
+    即上级目录），整体替换为占位 "case"。其余输入按白名单逐字符过滤，
+    分隔符（/ 与 \\）必然被替换为 "_"，结果恒为单一片段。
+    """
     out: list[str] = []
     for ch in name:
         if ch.isalnum() or ch in ("-", "_", "."):
             out.append(ch)
         else:
             out.append("_")
-    return "".join(out) or "case"
+    if not out or set(out) <= {"."}:
+        return "case"
+    return "".join(out)

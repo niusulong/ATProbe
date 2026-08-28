@@ -86,6 +86,11 @@ except ImportError:  # pragma: no cover - 仅无 pyserial 时
 # 本命令迟到的响应（超时预算 < 设备实际时延时产生，如 poll 末次 0.05s 钳位预算），
 # 防止其被错投给下一条命令（见 send_command 超时路径注释）。
 _STALE_REAP_GRACE_S = 0.15
+# 收割窗口启用阈值（秒，T9 条件化）：窗口为「0.05s 钳位预算 + 设备典型时延」
+# 设计（见 _STALE_REAP_GRACE_S 注释）——超时预算 ≥ 此阈值的命令，其预算已含
+# 设备时延，迟到响应概率不构成；无条件固定 +150ms 会系统性拖慢轮询类用例
+# （P3：每条超时命令平添 150ms 开销）。仅 to < 阈值的小预算超时进入收割。
+_STALE_REAP_MIN_TIMEOUT_S = 0.2
 
 
 class SerialConnection:
@@ -148,9 +153,15 @@ class SerialConnection:
         # 噪声 URC 过滤（PortConfig.urc_filter 编译产物）：匹配行照常派发给
         # URC 订阅者（不丢失），但会从交付给断言的响应文本中整段剥离（含
         # 吸附紧邻空行，字节级还原"如同该 URC 从未到达"）。默认空 = 不剥离。
-        self._urc_filter_res: tuple[re.Pattern[str], ...] = tuple(
-            re.compile(p) for p in config.urc_filter
-        )
+        # 正则编译失败在构造期即抛 SerialError（解析期口径，与 send_command 的
+        # expect/wait_urc 同族）——不留到首条命令运行期才炸（T9）。
+        urc_res: list[re.Pattern[str]] = []
+        for p in config.urc_filter:
+            try:
+                urc_res.append(re.compile(p))
+            except re.error as exc:
+                raise SerialError(f"[{config.name}] urc_filter 正则无效：{p}（{exc}）") from exc
+        self._urc_filter_res: tuple[re.Pattern[str], ...] = tuple(urc_res)
 
         # URC 订阅
         self._urc_handlers: list[URCHandler] = []
@@ -507,12 +518,18 @@ class SerialConnection:
         # 对策：超时后保持等待态进入收割窗口，静默消费窗口内到达的迟到响应，
         # 通道干净后再返回 TIMEOUT。窗口取 150ms（覆盖 0.05s 钳位预算 + 设备
         # 典型时延）；期间到达的数据按正常分流（URC 派发/响应入队后丢弃）。
-        reap_deadline = self._clock() + _STALE_REAP_GRACE_S
-        with self._buffer_lock:
-            self._awaiting.set()
-            self._sync_cycle_locked()
+        # 条件化（T9/P3）：仅小预算超时（to < _STALE_REAP_MIN_TIMEOUT_S）进入
+        # 收割——大超时预算已含设备时延，固定 +150ms 系统性拖慢轮询类用例。
+        # 跳过时 finally 清理路径等价执行（awaiting 清/缓冲清/队列排空），
+        # 不提前 return（消 finally 绕过）。
+        reap = timeout < _STALE_REAP_MIN_TIMEOUT_S
+        if reap:
+            reap_deadline = self._clock() + _STALE_REAP_GRACE_S
+            with self._buffer_lock:
+                self._awaiting.set()
+                self._sync_cycle_locked()
         try:
-            while True:
+            while reap:
                 if cancel is not None and cancel.cancelled:
                     with self._buffer_lock:
                         self._awaiting.clear()

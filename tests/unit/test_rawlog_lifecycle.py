@@ -93,6 +93,53 @@ def test_start_drains_stale_records(tmp_path: Path) -> None:
     assert "fresh" in content
 
 
+class TestBeginCaseSanitization:
+    """S-1：session/port 片段消毒——不可信输入不可写任意目录.
+
+    begin_case 的三个片段中 case_name 一直过 _sanitize，但 session/port 此前
+    直接拼接（port 来自用例 step.port，不可信）：session="../../evil" 或
+    Windows 反斜杠变体可翻出 log_dir 任意写；Linux 绝对端口 /dev/ttyUSB0
+    嵌套出 dev/ttyUSB0 两级目录。修复：三者均消毒，port 先取 basename。
+    """
+
+    def test_traversal_session_port_sanitized(self, tmp_path: Path) -> None:
+        logger = RawLogger()
+        logger.start()
+        try:
+            for bad_session in ("../../evil", "..\\..\\evil"):
+                # port 同为 Windows 反斜杠遍历变体：Path(..\..\evil).name → evil
+                stem = logger.begin_case(tmp_path, bad_session, "..\\..\\evil", "case")
+                # 遍历被封：消毒后路径仍严格位于 log_dir 之下
+                assert stem.resolve().is_relative_to(tmp_path.resolve()), f"遍历未封：{stem}"
+                # session/port/case 各占一个安全片段（无 .. 路径成分、无嵌套翻出）
+                parts = stem.relative_to(tmp_path).parts
+                assert len(parts) == 3, f"片段数异常：{stem}"
+                assert all(p != ".." for p in parts)
+        finally:
+            logger.stop()
+
+    def test_linux_dev_port_no_nested_dirs(self, tmp_path: Path) -> None:
+        logger = RawLogger()
+        logger.start()
+        try:
+            stem = logger.begin_case(tmp_path, "s1", "/dev/ttyUSB0", "case")
+            # port 取 basename：ttyUSB0 是单一片段，不再嵌套 dev/ttyUSB0 目录
+            assert stem.relative_to(tmp_path).parts == ("s1", "ttyUSB0", "case")
+        finally:
+            logger.stop()
+
+    def test_pure_dots_rejected(self, tmp_path: Path) -> None:
+        logger = RawLogger()
+        logger.start()
+        try:
+            stem = logger.begin_case(tmp_path, "...", "COM3", "case")
+            # 纯点号（点在字符白名单内但构成遍历成分）→ 占位 case
+            assert stem.relative_to(tmp_path).parts == ("case", "COM3", "case")
+            assert ".." not in str(stem.relative_to(tmp_path))
+        finally:
+            logger.stop()
+
+
 def test_portmanager_clear_triggers_end_case(tmp_path: Path) -> None:
     """clear_case_log 弹出绑定时触发 raw_logger.end_case(stem)."""
     logger = _SpyRawLogger()
