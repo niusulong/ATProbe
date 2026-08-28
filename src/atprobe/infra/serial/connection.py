@@ -466,7 +466,8 @@ class SerialConnection:
             3. 已 ``_awaiting.set()`` 且已 ``_drain_response_q()``。
         调用后置：内部 finally 仅清 ``_awaiting``/清排队列/清缓冲；
         **不复位** ``_wait_urc_re``/``_echo_line``——调用方须在自己 finally 调
-        ``_reset_wait_urc()``（send_command :364-366 即此模式）。
+        ``_reset_wait_urc()``（send_command 外层 finally 调 _reset_wait_urc
+        即此模式）。
         """
         deadline = self._clock() + timeout
         while True:

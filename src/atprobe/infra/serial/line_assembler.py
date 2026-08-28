@@ -7,8 +7,8 @@
 语义来源 = 迁移前的 connection._process_incoming（行拆分 / URC 结构分类 /
 终结判定 / 偏移去重 / 孤儿续行逐条等价，见各方法注释的行号对照）。本模块
 新增两点能力（connection 接线见 Task 4/5）：
-  - expect 检测（设计 §2.3）：对新增字节命中即 COMPLETE，优先于终结行判定，
-    命中点之前的完整行按双交付派发（URC 永不丢失不变量）；
+  - expect 检测（设计 §2.3）：对周期全量缓冲（自发送起）命中即 COMPLETE，
+    优先于终结行判定，命中点之前的完整行按双交付派发（URC 永不丢失不变量）；
   - 错误码行任何**等待**模式下立即终结（设计 §2.1）：wait_urc 模式收到
     ERROR/+CME ERROR/+CMS ERROR 不再等目标 URC 到超时。
 """
@@ -85,7 +85,8 @@ class LineAssembler:
         echo_line：在途命令回显行（strip 后 bytes）——与其逐字相等的行
         结构上是回显，不派发 URC；wait_urc_re：异步指令目标 URC 正则
         （OK 仅受理不终结，目标行命中交付整段）；expect_re：本批新增的附加
-        完成条件（新增字节命中即 COMPLETE，优先于终结行判定）；waiting：
+        完成条件（对周期全量缓冲扫描，命中即 COMPLETE，优先于终结行判定——
+        全量扫描理由见 feed 内 expect 段注释）；waiting：
         是否处于等待响应态（False = 空闲态，所有完整非空行按 URC 派发）。
         expect 与 wait_urc 的互斥由调用方保证（connection 层校验），本类不检查。
         """
@@ -257,20 +258,27 @@ class LineAssembler:
             events.append(RxEvent(kind=RxEventKind.URC_LINE, text=_decode(stripped)))
 
         # ------------------------------------------------------------------
-        # expect 检测（批 2a 新增，设计 §2.3）：对**新增字节**（buffer[dispatched:]
-        # 起——历史行已处理不重扫，增量扫描）做 expect_re.search。命中即完成
-        # 且优先于终结行判定（命中点即响应终点，其后余量留 buffer 待下轮处理）。
-        # 仅等待态生效：expect 是发送周期的附加完成条件，空闲态无终结概念。
-        # 与 wait_urc 的互斥由调用方保证，此处不检查（都设置时 expect 先判）。
+        # expect 检测（批 2a 新增，设计 §2.3）：expect 激活时对**周期全量缓冲**
+        # （data——send_command 入口已 reset，buffer 即自本次发送起的原始字节）
+        # 做 expect_re.search。命中即完成且优先于终结行判定（命中点即响应终点，
+        # 其后余量留 buffer 待下轮处理）。仅等待态生效：expect 是发送周期的附加
+        # 完成条件，空闲态无终结概念。与 wait_urc 的互斥由调用方保证，此处不
+        # 检查（都设置时 expect 先判）。
+        # 扫描区域取全量而非 buffer[dispatched:]（放弃 expect 区间的 Pf-6 增量化）：
+        # 锚点字节可跨 chunk——如 "\r\n>" 的 "\r\n" 已在早先 chunk 构成完整空行、
+        # dispatched 推进过，增量区域将永久丢失锚前缀，匹配永不命中等到超时
+        # （2a 终审实证复现）。expect 等待周期短暂（提示符毫秒级到达，受 timeout
+        # 上界约束），全量扫描 O(缓冲长)/chunk 的成本有界；Pf-6 的增量目标由行
+        # 处理的 spans/偏移去重承担（已增量）。非 expect 周期零额外成本（分支不进）。
         # 命中点之前的完整行按双交付派发为 URC_LINE（"URC 永不丢失"不变量——
         # 与终结前双交付同款，连接层一贯原则：结构位置排除后的行必须派发；
-        # 行同时包含在 COMPLETE 的 data 内，urc_filter 剥离由连接层按配置处理）。
+        # 行同时包含在 COMPLETE 的 data 内，urc_filter 剥离由连接层按配置处理）；
+        # 已派发历史行不重复（le <= dispatched_offset 去重）。
         # ------------------------------------------------------------------
         if self._expect_re is not None and awaiting:
-            region = data[dispatched_offset:]
-            m = self._expect_re.search(region)
+            m = self._expect_re.search(data)
             if m is not None:
-                hit_end = dispatched_offset + m.end()
+                hit_end = m.end()
                 for line, (_ls, le) in zip(complete_lines, spans, strict=True):
                     if le <= dispatched_offset or le > hit_end:
                         continue  # 历史 chunk 已派发（去重）/ 命中点之后或跨越命中点的行

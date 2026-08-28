@@ -247,8 +247,21 @@ class TestExpectDetection:
         asm = _asm(echo=b"AT+X", expect=rb"\r\n>", waiting=True)
         assert asm.feed(b"AT+X\r\r\nOK\r\n> ") == [_complete(b"AT+X\r\r\nOK\r\n>")]
 
-    def test_search_region_starts_at_dispatched(self) -> None:
-        """只搜新增字节（buffer[dispatched:] 起）——历史行不重扫，命中点定位正确."""
+    def test_cross_chunk_anchor_hit(self) -> None:
+        """终审复现：锚前缀（\\r\\n）已在早先 chunk 构成完整行使 dispatched 推进——
+        扫描区域须为周期全量缓冲（自发送起），否则锚字节跨 chunk 永不命中等到超时."""
+        asm = _asm(echo=b"AT+TCPSEND=0,5", expect=rb"\r\n>", waiting=True)
+        assert asm.feed(b"AT+TCPSEND=0,5\r\r\n\r\n") == []
+        assert asm.feed(b">") == [_complete(b"AT+TCPSEND=0,5\r\r\n\r\n>")]
+
+    def test_cross_chunk_anchor_after_urc_line(self) -> None:
+        """变体：dispatched 推进源自 URC 行——URC 事件照常先派发，COMPLETE 含该行."""
+        asm = _asm(expect=rb"\r\n>", waiting=True)
+        assert asm.feed(b"\r\n+EVT: 1\r\n") == [_urc("+EVT: 1")]
+        assert asm.feed(b"\r\n>") == [_complete(b"\r\n+EVT: 1\r\n\r\n>")]
+
+    def test_scan_region_is_whole_cycle_buffer(self) -> None:
+        """expect 激活时扫描周期全量缓冲；已派发历史行不重复派发 URC."""
         asm = _asm(waiting=True)
         assert asm.feed(b"DATA1\r\n") == [_urc("DATA1")]  # 等待中未终结，偏移推进
         asm.set_cycle(
