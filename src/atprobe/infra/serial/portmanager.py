@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from atprobe.infra.serial.config import PortConfig, Terminator
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig, Terminator
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.exceptions import (
     PortOpenError,
@@ -88,7 +88,9 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
                     return
                 # 配置不同 → 抛错（无法在不中断现有连接的情况下切换配置）
                 raise PortOpenError(config.name, "端口已用不同配置打开")
-            conn = SerialConnection(config, raw_logger=self._raw_logger, clock=self._clock)
+            conn = SerialConnection(
+                config, raw_logger=self._raw_logger, clock=self._clock, sleep=self._sleep
+            )
             conn.open()
             self._connections[config.name] = conn
             self._configs[config.name] = config
@@ -254,6 +256,47 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         return resp
 
     # ------------------------------------------------------------------
+    # §3.2 数据流发送（引擎数据步骤通道，设计 §2.3）
+    # ------------------------------------------------------------------
+    def send_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        timeout: float | None = None,
+        wait_urc: str | None = None,
+        expect: str | None = None,
+        cancel: CancelToken | None = None,
+    ) -> Response:
+        """发送数据流（分块）并等待响应——前置与 send_command 一致，转发连接层.
+
+        前置：端口未开 → ERROR Response；断连 → _reconnect 一次，失败返回
+        ERROR（error_kind=DISCONNECT）。成功后 conn.send_data 整周期持端口
+        命令锁（置等待态 → 分块写 → 等待响应）。
+
+        与 send_command 的断连语义差异：**响应后 DISCONNECT 不自动重发**——
+        数据流不续传（§3.2），设备可能已收到部分字节，盲目重发会被设备当作
+        AT 命令解析、污染状态；断连 ERROR 直接交付，由上层（step_runner
+        断连安全阀）决策重试整个步骤。
+        """
+        conn = self._connections.get(port)
+        if conn is None:
+            return Response(text="", status=ResponseStatus.ERROR, error=f"端口 {port} 未打开")
+
+        if not conn.is_connected:
+            if not self._reconnect(port):
+                return Response(
+                    text="",
+                    status=ResponseStatus.ERROR,
+                    error=f"端口 {port} 重连失败",
+                    error_kind=ERROR_KIND_DISCONNECT,
+                )
+
+        return conn.send_data(
+            spec, timeout=timeout, wait_urc=wait_urc, expect=expect, cancel=cancel
+        )
+
+    # ------------------------------------------------------------------
     # §4.2 重连
     # ------------------------------------------------------------------
     def _reconnect(self, port: str, *, max_retries: int | None = None) -> bool:
@@ -355,6 +398,25 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
         if conn is None:
             raise KeyError(f"端口 {port} 未打开")
         conn.write_bytes(data)
+
+    def write_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        cancel: CancelToken | None = None,
+        on_chunk: Callable[[bytes, int, int], None] | None = None,
+    ) -> None:
+        """发送数据流（分块），只写不等响应——GUI 手动路径（M6 文件发送，设计 §2.3）.
+
+        前置与 write_command 同款：端口未开抛 KeyError。转发 conn.write_data
+        （发送周期持端口命令锁，撞锁 PortBusyError）；on_chunk 为 GUI 进度
+        回调（块字节, 已发, 总量），终结符不算块不回调。
+        """
+        conn = self._connections.get(port)
+        if conn is None:
+            raise KeyError(f"端口 {port} 未打开")
+        conn.write_data(spec, cancel=cancel, on_chunk=on_chunk)
 
     # ------------------------------------------------------------------
     # §6 URC 订阅

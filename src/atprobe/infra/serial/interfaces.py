@@ -8,10 +8,11 @@
     IConnectionManager 连接管理 / 端口枚举
     IURCSubscriber     URC 订阅（§6）
 
-注：数据流分块发送（§3.2）由 DataStreamSender 直接操作连接实现，未抽象为 Protocol。
-原始 RX/TX 字节流订阅（手动调试/实时监控，M6 §6.2）经 SerialConnection.add_rx_observer
-/ add_tx_observer 提供；write_command（只写不等响应，供手动调试）为 SerialConnection/
-PortManager 的具体方法。
+注：数据流分块发送（§3.2）经 ICommandSender.send_data 抽象（spec 携带数据与分块参数，
+引擎数据步骤通道）；GUI 只写不等路径（M6 文件发送/串口助手）用具体 PortManager.write_data
+（非 Protocol 成员）。原始 RX/TX 字节流订阅（手动调试/实时监控，M6 §6.2）经
+SerialConnection.add_rx_observer / add_tx_observer 提供；write_command（只写不等响应，
+供手动调试）为 SerialConnection/PortManager 的具体方法。
 
 所有阻塞操作接收 CancelToken（M1 §4.3 操作取消）；取消时统一抛 ``OperationCancelled``。
 """
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,24 @@ class ICommandSender(Protocol):
                 ``SerialError``。
             cancel: 取消令牌；触发后阻塞操作立即抛 ``OperationCancelled``（与 Fake/vsim 一致，
                 统一取消语义，上层据此判 INTERRUPTED 而非 FAIL）。
+        """
+        ...
+
+    def send_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        timeout: float | None = None,
+        wait_urc: str | None = None,
+        expect: str | None = None,
+        cancel: CancelToken | None = None,
+    ) -> Response:
+        """发送数据流（分块，持端口命令锁整个周期）并等待响应（设计 §2.3）.
+
+        Args 与返回语义同 send_command；spec 携带数据与分块参数。
+        断连语义差异：发送前重连尝试与 send_command 一致，但**无断连自动重发**
+        （数据流不续传——设备可能已收部分字节，重发会当 AT 命令解析）。
         """
         ...
 

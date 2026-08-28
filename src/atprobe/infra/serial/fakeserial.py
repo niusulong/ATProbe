@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from atprobe.infra.serial.config import PortConfig, Terminator
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig, Terminator
 from atprobe.infra.serial.exceptions import OperationCancelled
 from atprobe.infra.serial.interfaces import (
     CancelToken,
@@ -67,6 +67,9 @@ class FakePortManager:
         self._scripts: dict[str, list[_ScriptedResponse]] = {}
         # 记录所有发送过的命令（port, command）
         self.sent: list[tuple[str, str]] = []
+        # 记录所有发送过的数据流（port, data 原始字节）——数据路径专用，
+        # 不混入 sent（命令/数据口径分离，vsim 侧同样区分）
+        self.data_sent: list[tuple[str, bytes]] = []
         # 记录启用 wait_urc 的调用（port, urc_pattern），供测试断言
         self.wait_urc_calls: list[tuple[str, str]] = []
         # 记录启用 expect 的调用（port, expect_pattern），供测试断言（与 wait_urc_calls 同款）
@@ -188,6 +191,18 @@ class FakePortManager:
         if self._raw_logger is not None and lf is not None:
             self._raw_logger.log(lf, "RX", data)
 
+    def _emit_tx_bytes(self, port: str, data: bytes) -> None:
+        """模拟发送数据流：派发 TX observer 并按需写用例日志（原始字节）.
+
+        与 _emit_tx 同构（observer 派发 + 用例日志），但数据流不经命令编码与
+        结束符拼接——原始字节原样派发（真实 send_chunks/write_bytes 路径同构）。
+        """
+        for obs in list(self._tx_observers.get(port, [])):
+            obs(data)
+        lf = self._log_files.get(port)
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "TX", data)
+
     # ------------------------------------------------------------------
     # ICommandSender
     # ------------------------------------------------------------------
@@ -240,6 +255,74 @@ class FakePortManager:
         self._sleep(0.0)
         self._emit_rx(port, sr.response.text)  # 有响应才派发 RX（对齐真实超时语义）
         return sr.response
+
+    # ------------------------------------------------------------------
+    # §3.2 数据流发送（引擎数据步骤通道，设计 §2.3）
+    # ------------------------------------------------------------------
+    def send_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        timeout: float | None = None,
+        wait_urc: str | None = None,
+        expect: str | None = None,
+        cancel: CancelToken | None = None,
+    ) -> Response:
+        """发送数据流（消费预设脚本）——与 send_command 同构的通道行为.
+
+        与命令路径的脚本消费差异：**仅 match=None 的脚本对 data 生效**——
+        match 是命令子串语义（``sr.match in command``），不适用于字节流，
+        带 match 的脚本在数据路径被跳过。wait_urc/expect 与 send_command
+        同款仅记录（Fake 不做真实读线程/字节级匹配，由测试预设的
+        Response.text 直接体现）。
+        """
+        if cancel is not None and cancel.cancelled:
+            raise OperationCancelled("FakeSerial 被取消")
+        self.data_sent.append((port, spec.data))
+        if wait_urc is not None:
+            self.wait_urc_calls.append((port, wait_urc))
+        if expect is not None:
+            self.expect_calls.append((port, expect))
+        self._emit_tx_bytes(port, spec.data)
+        scripts = self._scripts.get(port, [])
+        # 找首个 match=None 的脚本（match 是命令子串语义，不适用字节流）
+        idx = None
+        for i, sr in enumerate(scripts):
+            if sr.match is None:
+                idx = i
+                break
+        if idx is None:
+            return Response(text="", status=ResponseStatus.ERROR, error="无预设响应")
+        sr = scripts[idx]
+        if sr.consume_after:
+            scripts.pop(idx)
+        # 模拟发送耗时（让 duration_ms 有意义）
+        self._sleep(0.0)
+        self._emit_rx(port, sr.response.text)  # 有响应才派发 RX（对齐真实超时语义）
+        return sr.response
+
+    def write_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        cancel: CancelToken | None = None,
+        on_chunk: Callable[[bytes, int, int], None] | None = None,
+    ) -> None:
+        """流式写数据流（不消费脚本、不触发 RX）——只写不等路径.
+
+        与 write_command 同口径记录（data_sent + _emit_tx_bytes）；on_chunk
+        单次回调 ``(spec.data, len, len)``——镜像小数据整体单块路径
+        （真实 send_chunks 对 n ≤ chunk_threshold 亦单块回调一次）。
+        cancel 语义同真实路径：写前轮询，触发抛 ``OperationCancelled``。
+        """
+        if cancel is not None and cancel.cancelled:
+            raise OperationCancelled("FakeSerial 被取消")
+        self.data_sent.append((port, spec.data))
+        self._emit_tx_bytes(port, spec.data)
+        if on_chunk is not None:
+            on_chunk(spec.data, len(spec.data), len(spec.data))
 
     # ------------------------------------------------------------------
     # IURCSubscriber

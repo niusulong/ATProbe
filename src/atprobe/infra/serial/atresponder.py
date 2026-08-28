@@ -24,9 +24,14 @@ def _line(text: str) -> bytes:
 class AtResponder:
     """虚拟模组状态机：根据指令生成应答帧."""
 
-    def __init__(self, *, rssi: int = 23, cereg: int = 1) -> None:
+    def __init__(
+        self, *, rssi: int = 23, cereg: int = 1, fs_timeout_s: float | None = None
+    ) -> None:
         self.rssi = max(0, min(31, rssi))
         self.cereg = max(0, min(5, cereg))
+        # 数据会话设备侧等数据超时（秒）：会话未收满时经此超时强制出帧
+        # （VsimPortManager.send_data 使用；批 2b Task 5 状态机读取）
+        self.fs_timeout_s = fs_timeout_s
         # AT+CMGF 等可变状态
         self.cmgf = 0
         self.cereg_n = 0  # CEREG 上报开关
@@ -148,3 +153,20 @@ class AtResponder:
             lines.append("OK")
         # 渲染：整帧以 \r\n 起始，每行以 \r\n 结尾（如 \r\n+CSQ: 23,99\r\nOK\r\n）
         return CRLF + CRLF.join(line.encode("utf-8") for line in lines) + CRLF
+
+    # -- 数据流两阶段会话（批 2b Task 5 完整实现，此处为最小占位） ---------
+    def receive_data(self, data: bytes) -> bytes:
+        """接收数据流块；会话收满时返回完整应答帧，未收满返回 b"".
+
+        批 2b Task 5 完整实现（两阶段状态机：FSWF 等提示符 → 收数据 → 出帧）；
+        当前为通道占位：恒返回 b""（会话未收满），使 VsimPortManager.send_data
+        走 fs_timeout_s/超时路径先行可测。
+        """
+        return b""
+
+    def expire_pending(self) -> bytes:
+        """强制结束未收满的数据会话，返回由已蓄积数据组成的应答帧.
+
+        批 2b Task 5 完整实现；当前为通道占位：恒返回 b""。
+        """
+        return b""

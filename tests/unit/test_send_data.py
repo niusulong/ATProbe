@@ -4,6 +4,11 @@
 连接级终结符）、取消与写失败的锁释放及错误语义、expect/wait_urc 端到端、
 write_data 不置等待态、超时。桩串口模式照抄 tests/unit/test_command_lock.py
 （_StubSerial + monkeypatch _serial/_connected，RX 经 _process_incoming 注入）。
+
+批 2b Task 4（追加，下方 TestPortManagerSendData* / TestFake* / TestVsim*）：
+ICommandSender.send_data 通道接线——PortManager 前置/转发/无断连重发/sleep 转发、
+FakePortManager 记录与脚本消费（match=None 限定）、VsimPortManager 占位 responder
+下的通道语义（TIMEOUT / 帧 COMPLETE / fs_timeout_s 出帧）。
 """
 
 from __future__ import annotations
@@ -23,12 +28,16 @@ from atprobe.infra.serial.exceptions import (
     SendError,
     SerialError,
 )
+from atprobe.infra.serial.fakeserial import FakePortManager
 from atprobe.infra.serial.interfaces import (
+    ERROR_KIND_DISCONNECT,
     ERROR_KIND_SEND,
     CancelToken,
     Response,
     ResponseStatus,
 )
+from atprobe.infra.serial.portmanager import PortManager
+from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 
 if TYPE_CHECKING:
     from pytest import MonkeyPatch
@@ -397,3 +406,257 @@ class TestTimeout:
         assert resp.error == "响应超时"
         assert not conn._awaiting.is_set()  # noqa: SLF001
         _assert_lock_free(conn)
+
+
+# ===========================================================================
+# 批 2b Task 4：ICommandSender.send_data 通道接线（PortManager / Fake / vsim）
+# ===========================================================================
+def _make_pm_with_conn(monkeypatch: MonkeyPatch) -> tuple[PortManager, SerialConnection]:
+    """构造持有桩连接的 PortManager（_make_conn 桩串口 + 注入 _connections）."""
+    conn = _make_conn(monkeypatch)
+    pm = PortManager()
+    monkeypatch.setattr(pm, "_connections", {"COM9": conn})
+    return pm, conn
+
+
+class TestPortManagerSendData:
+    """PortManager.send_data：前置（未开/断连重连失败）+ 参数转发 + 无断连重发."""
+
+    def test_port_not_open_returns_error_response(self) -> None:
+        pm = PortManager()
+        resp = pm.send_data("COM9", DataStreamSpec(data=b"x"))
+        assert resp.status is ResponseStatus.ERROR
+        assert resp.error == "端口 COM9 未打开"
+
+    def test_disconnected_reconnect_failure_returns_disconnect_error(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        pm, conn = _make_pm_with_conn(monkeypatch)
+        monkeypatch.setattr(conn, "_connected", False)
+        monkeypatch.setattr(pm, "_reconnect", lambda port, **kw: False)
+        resp = pm.send_data("COM9", DataStreamSpec(data=b"x"))
+        assert resp.status is ResponseStatus.ERROR
+        assert resp.error == "端口 COM9 重连失败"
+        assert resp.error_kind == ERROR_KIND_DISCONNECT
+
+    def test_forwards_spec_and_kwargs_to_connection(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        pm, conn = _make_pm_with_conn(monkeypatch)
+        captured: dict = {}
+
+        def _capture(spec, *, timeout=None, wait_urc=None, expect=None, cancel=None):  # type: ignore[no-untyped-def]
+            captured.update(
+                spec=spec, timeout=timeout, wait_urc=wait_urc, expect=expect, cancel=cancel
+            )
+            return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
+
+        monkeypatch.setattr(conn, "send_data", _capture)
+        spec = DataStreamSpec(data=b"\x01\x02\x03")
+        cancel = CancelToken()
+        resp = pm.send_data(
+            "COM9", spec, timeout=5.0, wait_urc=r"\+RECV: \d+", expect=None, cancel=cancel
+        )
+        assert captured["spec"] is spec
+        assert captured["timeout"] == 5.0
+        assert captured["wait_urc"] == r"\+RECV: \d+"
+        assert captured["expect"] is None
+        assert captured["cancel"] is cancel
+        assert resp.status is ResponseStatus.COMPLETE
+
+    def test_no_resend_after_disconnect_response(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """数据流不续传：响应后 DISCONNECT 不自动重发（与 send_command 的差异锁）."""
+        pm, conn = _make_pm_with_conn(monkeypatch)
+        calls: list[DataStreamSpec] = []
+
+        def _capture(spec, *, timeout=None, wait_urc=None, expect=None, cancel=None):  # type: ignore[no-untyped-def]
+            calls.append(spec)
+            return Response(
+                text="", status=ResponseStatus.ERROR, error="端口断连", error_kind="DISCONNECT"
+            )
+
+        monkeypatch.setattr(conn, "send_data", _capture)
+        monkeypatch.setattr(pm, "_reconnect", lambda port, **kw: True)  # 重连成功也不重发
+        resp = pm.send_data("COM9", DataStreamSpec(data=b"half"))
+        assert len(calls) == 1, "数据流断连后不得自动重发（设备可能已收部分字节）"
+        assert resp.status is ResponseStatus.ERROR
+        assert resp.error_kind == ERROR_KIND_DISCONNECT
+
+
+class TestPortManagerWriteData:
+    def test_port_not_open_raises_keyerror(self) -> None:
+        pm = PortManager()
+        with pytest.raises(KeyError, match="COM9 未打开"):
+            pm.write_data("COM9", DataStreamSpec(data=b"x"))
+
+    def test_forwards_spec_cancel_on_chunk(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        pm, conn = _make_pm_with_conn(monkeypatch)
+        captured: dict = {}
+
+        def _capture(spec, *, cancel=None, on_chunk=None):  # type: ignore[no-untyped-def]
+            captured.update(spec=spec, cancel=cancel, on_chunk=on_chunk)
+
+        monkeypatch.setattr(conn, "write_data", _capture)
+        spec = DataStreamSpec(data=b"123456")
+        cancel = CancelToken()
+
+        def _on_chunk(_chunk: bytes, _sent: int, _total: int) -> None:
+            pass
+
+        pm.write_data("COM9", spec, cancel=cancel, on_chunk=_on_chunk)
+        assert captured["spec"] is spec
+        assert captured["cancel"] is cancel
+        assert captured["on_chunk"] is _on_chunk
+
+
+class TestPortManagerSleepForwarding:
+    def test_open_forwards_sleep_to_connection(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """T3 审查待办：open 构造 SerialConnection 须转发 sleep（块间间隔可测）."""
+
+        sleeps: list[float] = []
+
+        def _record(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(SerialConnection, "open", lambda self: None)  # 不真开硬件
+        pm = PortManager(sleep=_record)
+        pm.open(PortConfig(name="COMX"))
+        conn = pm.get_connection("COMX")
+        assert conn is not None
+        assert conn._sleep is _record  # noqa: SLF001 - 身份断言：同一注入函数（bound method 每次访问新建，须用普通函数）
+
+
+class TestFakeSendData:
+    def test_records_and_consumes_wildcard_script_only(self) -> None:
+        """data_sent/wait_urc/expect 记录 + 仅 match=None 脚本生效（带 match 被跳过）."""
+        fake = FakePortManager()
+        fake.open(PortConfig(name="V0"))
+        fake.script("V0", Response(text="\r\nSHOULD_NOT_MATCH\r\n"), match="AT+CSQ")
+        fake.script("V0", Response(text="\r\n+RECV: 4\r\nOK\r\n"))
+        tx: list[bytes] = []
+        fake.subscribe_tx("V0", tx.append)
+
+        resp = fake.send_data("V0", DataStreamSpec(data=b"\x01\x02"), wait_urc=r"\+RECV: \d+")
+
+        assert resp.text == "\r\n+RECV: 4\r\nOK\r\n"
+        assert fake.data_sent == [("V0", b"\x01\x02")]
+        assert fake.sent == []  # 数据不混入命令记录（口径分离）
+        assert fake.wait_urc_calls == [("V0", r"\+RECV: \d+")]
+        assert tx == [b"\x01\x02"]  # 原始字节派发，无终结符拼接
+        # match=None 脚本已消费；剩 match 脚本被数据路径跳过 → ERROR（expect 仍记录）
+        resp2 = fake.send_data("V0", DataStreamSpec(data=b"x"), expect=r"\r\n>")
+        assert resp2.status is ResponseStatus.ERROR
+        assert resp2.error == "无预设响应"
+        assert fake.expect_calls == [("V0", r"\r\n>")]
+
+    def test_no_script_returns_error(self) -> None:
+        fake = FakePortManager()
+        fake.open(PortConfig(name="V0"))
+        resp = fake.send_data("V0", DataStreamSpec(data=b"x"))
+        assert resp.status is ResponseStatus.ERROR
+        assert resp.error == "无预设响应"
+
+    def test_cancelled_raises_before_any_record(self) -> None:
+        fake = FakePortManager()
+        fake.open(PortConfig(name="V0"))
+        cancel = CancelToken()
+        cancel.cancel()
+        with pytest.raises(OperationCancelled):
+            fake.send_data("V0", DataStreamSpec(data=b"x"), cancel=cancel)
+        assert fake.data_sent == []  # 取消先于记录（与 send_command 同款）
+
+    def test_write_data_records_emits_and_single_chunk_callback(self) -> None:
+        fake = FakePortManager()
+        fake.open(PortConfig(name="V0"))
+        tx: list[bytes] = []
+        fake.subscribe_tx("V0", tx.append)
+        chunks: list[tuple[bytes, int, int]] = []
+        spec = DataStreamSpec(data=b"1234")
+
+        fake.write_data("V0", spec, on_chunk=lambda c, sent, total: chunks.append((c, sent, total)))
+
+        assert fake.data_sent == [("V0", b"1234")]
+        assert tx == [b"1234"]  # 原始字节 emit（无终结符）
+        assert chunks == [(b"1234", 4, 4)]  # 整体一块单次回调（镜像小数据路径）
+
+    def test_write_data_cancelled_raises(self) -> None:
+        fake = FakePortManager()
+        fake.open(PortConfig(name="V0"))
+        cancel = CancelToken()
+        cancel.cancel()
+        with pytest.raises(OperationCancelled):
+            fake.write_data("V0", DataStreamSpec(data=b"x"), cancel=cancel)
+
+
+class _StubResponder:
+    """占位 responder 替身：通道语义测试用（不依赖 T5 状态机）."""
+
+    def __init__(
+        self,
+        *,
+        receive: bytes = b"",
+        expire: bytes = b"",
+        fs_timeout_s: float | None = None,
+    ) -> None:
+        self._receive = receive
+        self._expire = expire
+        self.fs_timeout_s = fs_timeout_s
+        self.received: list[bytes] = []
+        self.expired = False
+
+    def receive_data(self, data: bytes) -> bytes:
+        self.received.append(data)
+        return self._receive
+
+    def expire_pending(self) -> bytes:
+        self.expired = True
+        return self._expire
+
+
+class TestVsimSendData:
+    def test_placeholder_responder_yields_timeout(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """占位 responder（T5 前置）恒 b"" 且未配 fs_timeout_s → TIMEOUT 通道语义."""
+        vsim = VsimPortManager()
+        monkeypatch.setattr(vsim, "_responder", _StubResponder())
+        vsim.open(PortConfig(name=VSIM_PORT))
+        resp = vsim.send_data(VSIM_PORT, DataStreamSpec(data=b"\x00\x01"))
+        assert resp.status is ResponseStatus.TIMEOUT
+        assert resp.error == "等待数据超时"
+        assert vsim.data_sent == [(VSIM_PORT, b"\x00\x01")]
+        assert vsim.sent == []  # 数据不混入 sent
+
+    def test_frame_nonempty_completes(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        vsim = VsimPortManager()
+        stub = _StubResponder(receive=b"\r\n+RECV: 2\r\nOK\r\n")
+        monkeypatch.setattr(vsim, "_responder", stub)
+        vsim.open(PortConfig(name=VSIM_PORT))
+        resp = vsim.send_data(VSIM_PORT, DataStreamSpec(data=b"\x00\x01"))
+        assert resp.status is ResponseStatus.COMPLETE
+        assert resp.text == "\r\n+RECV: 2\r\nOK\r\n"
+        assert stub.received == [b"\x00\x01"]
+        assert not stub.expired
+
+    def test_fs_timeout_expires_pending(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """会话未收满 + fs_timeout_s：sleep 设备侧超时时长后 expire_pending 出帧."""
+        sleeps: list[float] = []
+        vsim = VsimPortManager(sleep=sleeps.append)
+        stub = _StubResponder(expire=b"\r\nERROR\r\n", fs_timeout_s=0.25)
+        monkeypatch.setattr(vsim, "_responder", stub)
+        vsim.open(PortConfig(name=VSIM_PORT))
+        resp = vsim.send_data(VSIM_PORT, DataStreamSpec(data=b"\x00"))
+        assert resp.status is ResponseStatus.COMPLETE
+        assert "ERROR" in resp.text
+        assert stub.expired
+        assert sleeps == [0.25]  # 设备侧等数据超时时长被模拟
+
+    def test_records_wait_urc_and_expect(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        vsim = VsimPortManager()
+        monkeypatch.setattr(vsim, "_responder", _StubResponder(receive=b"\r\nOK\r\n"))
+        vsim.open(PortConfig(name=VSIM_PORT))
+        vsim.send_data(VSIM_PORT, DataStreamSpec(data=b"d"), wait_urc=r"\+RECV: \d+", expect=None)
+        assert vsim.wait_urc_calls == [(VSIM_PORT, r"\+RECV: \d+")]
+        assert vsim.expect_calls == []
+
+    def test_cancelled_raises(self) -> None:
+        vsim = VsimPortManager()
+        vsim.open(PortConfig(name=VSIM_PORT))
+        cancel = CancelToken()
+        cancel.cancel()
+        with pytest.raises(OperationCancelled):
+            vsim.send_data(VSIM_PORT, DataStreamSpec(data=b"x"), cancel=cancel)

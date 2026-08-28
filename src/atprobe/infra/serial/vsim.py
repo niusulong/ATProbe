@@ -24,7 +24,7 @@ from pathlib import Path
 
 # 复用库级应答状态机（同一份事实源，src/ 自包含，不依赖 tools/）
 from atprobe.infra.serial.atresponder import AtResponder
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig
 from atprobe.infra.serial.fakeserial import FakePortManager
 from atprobe.infra.serial.interfaces import (
     CancelToken,
@@ -51,9 +51,10 @@ class VsimPortManager(FakePortManager):
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         raw_logger: RawLogger | None = None,
+        fs_timeout_s: float | None = None,
     ) -> None:
         super().__init__(clock=clock, sleep=sleep, raw_logger=raw_logger)
-        self._responder = AtResponder(rssi=rssi, cereg=cereg)
+        self._responder = AtResponder(rssi=rssi, cereg=cereg, fs_timeout_s=fs_timeout_s)
         self._echo = echo  # 是否在控制台打印每条收发（演示用）
 
     # ------------------------------------------------------------------
@@ -110,6 +111,51 @@ class VsimPortManager(FakePortManager):
                     sys.stderr.write(f"[vsim] < {line}\n")
             sys.stderr.flush()
         return Response(text=text, status=status)
+
+    # ------------------------------------------------------------------
+    # §3.2 数据流发送（委托 AtResponder 两阶段状态机，设计 §2.3）
+    # ------------------------------------------------------------------
+    def send_data(
+        self,
+        port: str,
+        spec: DataStreamSpec,
+        *,
+        timeout: float | None = None,
+        wait_urc: str | None = None,
+        expect: str | None = None,
+        cancel: CancelToken | None = None,
+    ) -> Response:
+        """发送数据流（委托 AtResponder 数据会话状态机）.
+
+        会话收满 → 完整帧 COMPLETE；未收满且 fs_timeout_s 已配置 → 模拟设备
+        侧等数据超时（sleep 后 expire_pending 强制出帧）；未收满且未配置 →
+        TIMEOUT（设备静默等数据，引擎步骤超时路径接管）。wait_urc/expect
+        继承 Fake 行为仅记录（由响应文本直接体现）。数据走 data_sent 记录，
+        不混入 sent（命令/数据口径分离）。
+        """
+        if cancel is not None and cancel.cancelled:
+            from atprobe.infra.serial.exceptions import OperationCancelled
+
+            raise OperationCancelled("Vsim 被取消")
+        self.data_sent.append((port, spec.data))
+        if wait_urc is not None:
+            self.wait_urc_calls.append((port, wait_urc))
+        if expect is not None:
+            self.expect_calls.append((port, expect))
+        self._emit_tx_bytes(port, spec.data)
+        frame = self._responder.receive_data(spec.data)
+        if frame:
+            text = frame.decode("utf-8", errors="replace")
+            self._emit_rx(port, text)  # 有响应才派发 RX（对齐真实超时语义）
+            return Response(text=text, status=ResponseStatus.COMPLETE)
+        # 会话未收满：设备侧等数据超时出帧，或静默交引擎超时路径
+        if self._responder.fs_timeout_s is not None:
+            self._sleep(self._responder.fs_timeout_s)
+            frame = self._responder.expire_pending()
+            text = frame.decode("utf-8", errors="replace")
+            self._emit_rx(port, text)
+            return Response(text=text, status=ResponseStatus.COMPLETE)
+        return Response(text="", status=ResponseStatus.TIMEOUT, error="等待数据超时")
 
     # ------------------------------------------------------------------
     # URC：演示模式默认不主动上报（如需可由调用方调用继承的 emit_urc）
