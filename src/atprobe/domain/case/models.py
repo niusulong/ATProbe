@@ -12,11 +12,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from enum import Enum
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# 模型层解析期告警通道（data×retry/poll 慎用提示等，不硬拒）
+_log = logging.getLogger("atprobe.case")
 
 
 class _Frozen(BaseModel):
@@ -161,11 +165,17 @@ Assert = list[AssertElement] | AssertElement | None
 class DataInput(_Frozen):
     """数据流输入（REQ-M2 §3.3，对应 M1 §3.2）.
 
-    file / inline 二选一。其余为分块参数。
+    file / inline / inline_hex 三选一：
+      - file 读原始字节；
+      - inline 渲染后按 UTF-8 编码发送；
+      - inline_hex 渲染后按十六进制解析发送。
+    渲染发生在引擎层（批 2b Task 6），模型只管声明。其余为分块参数。
     """
 
     file: str | None = None
     inline: str | None = None
+    # 十六进制数据源（如 "00FF10"、"41 42"）：适合携带不可打印字节（二进制协议头等）
+    inline_hex: str | None = None
     chunk_threshold: int = Field(gt=0, default=4096)
     chunk_size: int = Field(gt=0, default=1024)
     chunk_interval: int = Field(ge=0, default=50)
@@ -173,8 +183,19 @@ class DataInput(_Frozen):
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> DataInput:
-        if (self.file is None) == (self.inline is None):
-            raise ValueError("data 字段需二选一指定 file 或 inline")
+        # 三选一：file / inline / inline_hex 恰好一个非 None
+        sources = [k for k in ("file", "inline", "inline_hex") if getattr(self, k) is not None]
+        if len(sources) != 1:
+            raise ValueError("data 字段需三选一指定 file、inline 或 inline_hex")
+        # 空串拒绝：bytes.fromhex("") 会静默得到 0 字节数据，多为笔误
+        if self.inline_hex == "":
+            raise ValueError("inline_hex 不可为空字符串")
+        # 十六进制合法性解析期预校验（bytes.fromhex 自带容忍 ASCII 空白，如 "41 42"）
+        if self.inline_hex is not None:
+            try:
+                bytes.fromhex(self.inline_hex)
+            except ValueError as exc:
+                raise ValueError(f"inline_hex 不是合法十六进制串：{exc}") from exc
         # P3 修复：分块语义关系校验——chunk_size 大于 chunk_threshold 时
         # 「阈值内不分块、阈值上按 chunk_size 分块」的关系倒挂，多为笔误
         if self.chunk_size > self.chunk_threshold:
@@ -220,11 +241,16 @@ class Step(BaseModel):
     poll: PollConfig | None = None
     when: str | None = None
     timeout: float | None = Field(default=None, gt=0)
+    # 本步骤每次发送前的固定延迟（ms）。引擎接线在批 2b Task 6（此前为死字段的修复）；
+    # 场景见 ch06：AT+CIPSEND 收到 \r\n> 提示符后，延迟 50-100ms 再发数据。
     interval: int | None = Field(default=None, ge=0)
     port: str | None = None
     # 异步指令：OK 仅受理，须等待匹配此正则的 URC 上报才算真正终结。
     # 开启后串口层遇 OK 不返回，继续读到 URC 匹配立即返回（整段 text 含 OK+URC）。
     wait_urc: str | None = Field(default=None)
+    # 附加完成条件正则（批 2b Task 1 新增）：如 TCPSEND 提示符 \r\n>——命中即视为本
+    # 步骤完成。与 wait_urc 同属「自定义完成语义」，二者互斥；引擎接线在批 2b Task 6。
+    expect: str | None = Field(default=None)
 
     # 输出处理
     extract: dict[str, str] | None = None
@@ -250,6 +276,15 @@ class Step(BaseModel):
                 re.compile(self.wait_urc)
             except re.error as exc:
                 raise ValueError(f"wait_urc 正则无效：{exc}") from exc
+        # expect 与 wait_urc 互斥：均为「自定义完成语义」，叠加则完成判定歧义
+        if self.expect is not None and self.wait_urc is not None:
+            raise ValueError("expect 与 wait_urc 互斥，不可同时指定")
+        # expect 正则合法性预校验（与 wait_urc 同款口径）
+        if self.expect is not None:
+            try:
+                re.compile(self.expect)
+            except re.error as exc:
+                raise ValueError(f"expect 正则无效：{exc}") from exc
         # P1 修复：extract 与 assert.matches 正则同样在解析期预校验（与 wait_urc
         # 口径一致）。旧实现这两个正则编译失败在执行期抛裸 re.error，逃出引擎
         # 线程（无 CaseParseError 包装、无文件行号，用户直面 traceback）。
@@ -267,6 +302,16 @@ class Step(BaseModel):
                     raise ValueError(
                         f"断言 {a.name or '(未命名)'} 的 matches 正则无效：{exc}"
                     ) from exc
+        # data×retry / data×poll 组合不硬拒但告警：数据流不可重入（设计 §2.2）——
+        # 设备收满声明长度后，重试/轮询重发的字节会被设备当 AT 命令解析、污染后续命令。
+        # Step 无 name 字段，%s 以数据源声明值（file/inline/inline_hex）定位步骤。
+        if self.data is not None and (self.retry is not None or self.poll is not None):
+            src = self.data.file or self.data.inline or self.data.inline_hex or "?"
+            _log.warning(
+                "步骤 %s 含 data 输入与 retry/poll：数据流不可重入——设备收满声明长度后，"
+                "重试/轮询重发的字节会被设备当 AT 命令解析、污染后续命令(设计 §2.2)",
+                src,
+            )
         return self
 
     @property
