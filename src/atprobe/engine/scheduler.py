@@ -191,7 +191,11 @@ class Engine:
             suite_setup_failed = False
             suite_setup_results: list[StepResult] = []
             suite_setup_ctx = CaseContext(
-                env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+                env=config.env_config if isinstance(config.env_config, EnvConfig) else None,
+                # suite 前后置无 case 对象（case_dir=None）；此处用 data 步骤属边缘，
+                # 锚集有 data_allowed_roots 兜底（S-8，设计 §5）
+                case_dir=None,
+                data_allowed_roots=tuple(Path(p) for p in config.data_allowed_roots),
             )
             for i, step in enumerate(config.suite_setup, start=1):
                 if self._stop_mode is StopMode.ALL:
@@ -290,7 +294,10 @@ class Engine:
             # cancel=None（不响应取消）；StepResult 进 ExecutionResult 供报告诊断。
             suite_teardown_results: list[StepResult] = []
             suite_teardown_ctx = CaseContext(
-                env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+                env=config.env_config if isinstance(config.env_config, EnvConfig) else None,
+                # 同 suite_setup：无 case 对象，data 步骤属边缘，锚集靠 data_allowed_roots
+                case_dir=None,
+                data_allowed_roots=tuple(Path(p) for p in config.data_allowed_roots),
             )
             for i, step in enumerate(config.suite_teardown, start=1):
                 try:
@@ -408,7 +415,10 @@ class Engine:
     ) -> CaseResult:
         t0 = self._clock()
         ctx = CaseContext(
-            env=config.env_config if isinstance(config.env_config, EnvConfig) else None
+            env=config.env_config if isinstance(config.env_config, EnvConfig) else None,
+            # S-8：data.file 相对路径的默认锚根 = 用例文件所在目录
+            case_dir=Path(case.source_file).parent if case.source_file else None,
+            data_allowed_roots=tuple(Path(p) for p in config.data_allowed_roots),
         )
         # 参数化注入（M2 §10.2）：参数行注入用例级变量作用域（最高优先级）
         if case.parameters:

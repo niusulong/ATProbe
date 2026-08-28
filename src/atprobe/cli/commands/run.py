@@ -212,6 +212,9 @@ def run(
         env_config=env_cfg,
         session_id=session,
         log_dir=str(resolve_workspace_path(app_cfg.log_dir)),
+        # S-8 额外数据根：cases_dir 绝对路径（各用例自身目录由 case.source_file
+        # 派生，此根覆盖「数据文件统一放 cases_dir、用例从别处单文件跑」的布局）
+        data_allowed_roots=(str(resolve_workspace_path(app_cfg.cases_dir).resolve()),),
     )
 
     # --vsim：注入进程内虚拟模组作为 sender，引擎不连任何真实硬件

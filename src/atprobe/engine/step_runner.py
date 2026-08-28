@@ -25,8 +25,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from atprobe.domain.case.assessor import AssertionOutcome, assess_all
+from atprobe.domain.case.datasource import DataPathError, read_data_file
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.extractor import extract_all
 from atprobe.domain.case.models import FailureStrategy, Step
@@ -42,6 +44,7 @@ from atprobe.domain.report.models import (
     StepStatus,
 )
 from atprobe.infra.config.envconfig import EnvConfig
+from atprobe.infra.serial.config import DataStreamSpec
 from atprobe.infra.serial.exceptions import OperationCancelled
 from atprobe.infra.serial.interfaces import (
     ERROR_KIND_TIMEOUT,
@@ -62,6 +65,12 @@ class CaseContext:
     variables: dict[str, object] = field(default_factory=dict)
     env: EnvConfig | None = None
     disconnect_streak: int = 0
+    # S-8 数据路径信任边界（设计 §5）：data.file 渲染后路径须落在
+    # 「case_dir ∪ data_allowed_roots」内。case_dir 由 scheduler 从
+    # case.source_file 派生；额外根来自 EngineConfig.data_allowed_roots
+    # （批 4 并入 mcp.allowed_roots）。None/空 = 无对应锚根。
+    case_dir: Path | None = None
+    data_allowed_roots: tuple[Path, ...] = ()
 
 
 @dataclass
@@ -90,6 +99,20 @@ class _SingleAttempt:
     step_error: str  # 失败原因（成功时为空）
     duration_ms: float
     error_kind: str = "NONE"  # 结构化错误分类，从 Response 透传（M3）
+
+
+@dataclass
+class _DataPayload:
+    """data 步骤解析产物（批 2b Task 6，修 P0-1）.
+
+    spec     已装配的数据流规格（字节 + 分块参数，交 sender.send_data）。
+    display  人类可读摘要（"[data N字节] 前 60 字节解码预览"），作 StepResult.request
+             与报告 command 字段——data 步骤的「实际发送内容」无法用字符串完整
+             表达（可为二进制），摘要兼顾可读与二进制安全。
+    """
+
+    spec: DataStreamSpec
+    display: str
 
 
 def execute_step(
@@ -136,17 +159,30 @@ def execute_step(
             return _build_skipped(index, phase, port, step, "when 条件不满足")
 
     # ------------------------------------------------------------------
-    # 2. 模板替换
+    # 2. 输入解析：command 渲染 / data 载荷装配（P0-1：data 步骤在此真正
+    #    读出字节，S-8 锚定校验同步生效——渲染后路径须落在锚集内）
     # ------------------------------------------------------------------
+    payload: _DataPayload | None = None
     try:
-        request = _render_input(step, ctx)
+        if step.data is not None:
+            payload = _resolve_data(step, ctx)
+            request = payload.display  # 报告 request/中断分支统一用数据摘要
+        else:
+            request = _render_input(step, ctx)
     except (UndefinedReferenceError, TemplateRenderError) as exc:
         # P1 修复：同上，模板渲染失败走 on_failure 决策而非硬编码中止
         return _author_error_result(
             index, phase, port, step, f"模板渲染失败：{exc}", case_on_failure, is_teardown
         )
+    except DataPathError as exc:
+        # 数据源解析失败（S-8 越界/不可读、空数据、坏十六进制）：与模板失败
+        # 同口径的用例作者错误，走 on_failure 决策（错误信息自带路径与锚集）
+        return _author_error_result(
+            index, phase, port, step, f"数据输入解析失败：{exc}", case_on_failure, is_teardown
+        )
 
-    command_display = _truncate(request if step.command is not None else _cmd_display(step))
+    # command/data 统一：request 即展示内容（data 为摘要，command 为渲染文本）
+    command_display = _truncate(request)
 
     # ------------------------------------------------------------------
     # 3-6. 发送+判定（poll / retry / 单次）
@@ -154,12 +190,12 @@ def execute_step(
     try:
         if step.poll is not None and not is_teardown:
             attempt, poll_iters = _run_poll(
-                step, request, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
+                step, request, payload, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
             )
             retry_count = 0
         else:
             attempt, retry_count = _run_retry(
-                step, request, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
+                step, request, payload, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
             )
             poll_iters = 0
     except OperationCancelled:
@@ -236,6 +272,7 @@ def execute_step(
 def _run_retry(
     step: Step,
     request: str,
+    payload: _DataPayload | None,
     port: str,
     timeout: float,
     wait_urc: str | None,
@@ -259,7 +296,7 @@ def _run_retry(
             sleep(retry.interval / 1000.0)
             total_duration += (clock() - t_wait) * 1000.0
         attempt = _single_attempt(
-            step, request, port, timeout, wait_urc, ctx, sender, clock, cancel
+            step, request, payload, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
         )
         total_duration += attempt.duration_ms
         # 合并耗时到 attempt
@@ -277,6 +314,7 @@ def _run_retry(
 def _run_poll(
     step: Step,
     request: str,
+    payload: _DataPayload | None,
     port: str,
     timeout: float,
     wait_urc: str | None,
@@ -311,12 +349,14 @@ def _run_poll(
         attempt = _single_attempt(
             step,
             request,
+            payload,
             port,
             min(timeout, remaining_budget),
             wait_urc,
             ctx,
             sender,
             clock,
+            sleep,
             cancel,
         )
         total_duration += attempt.duration_ms
@@ -374,17 +414,39 @@ def _run_poll(
 def _single_attempt(
     step: Step,
     request: str,
+    payload: _DataPayload | None,
     port: str,
     timeout: float,
     wait_urc: str | None,
     ctx: CaseContext,
     sender: ICommandSender,
     clock: Callable[[], float],
+    sleep: Callable[[float], None],
     cancel: CancelToken | None,
 ) -> _SingleAttempt:
     t0 = clock()
+    # interval 接线（批 2b Task 6，此前为模型死字段）：每次 attempt 发送前的
+    # 固定延迟（ms→s），command/data 统一。ch06「收到 > 提示符后延迟 50-100ms
+    # 再发数据」即 data 步骤 interval 的典型场景；计入步骤耗时（t0 已起表）。
+    if step.interval:
+        sleep(step.interval / 1000.0)
     matched: dict[str, bool] = {}
-    resp = sender.send_command(port, request, timeout=timeout, wait_urc=wait_urc, cancel=cancel)
+    # 发送分叉（P0-1 核心）：data 步骤走 send_data 通道（分块/持锁由 spec 携带），
+    # command 步骤照旧 send_command。expect 从 step.expect 传入——「附加完成
+    # 条件」（如 TCPSEND 提示符 \r\n>）自此对引擎步骤生效（2a 协议已备好形参）。
+    if payload is not None:
+        resp = sender.send_data(
+            port,
+            payload.spec,
+            timeout=timeout,
+            wait_urc=wait_urc,
+            expect=step.expect,
+            cancel=cancel,
+        )
+    else:
+        resp = sender.send_command(
+            port, request, timeout=timeout, wait_urc=wait_urc, expect=step.expect, cancel=cancel
+        )
     dt = (clock() - t0) * 1000.0
 
     extracted: dict[str, str] = {}
@@ -471,13 +533,79 @@ def _single_attempt(
 # 辅助
 # ---------------------------------------------------------------------------
 def _render_input(step: Step, ctx: CaseContext) -> str:
-    if step.command is not None:
-        return render(step.command, ctx.variables, env=ctx.env)
+    """command 步骤的模板渲染（data 步骤走 _resolve_data，不经过此处）.
+
+    case_dir/data_allowed_roots 透传给 render：命令里可用 {{file_size("./x.bin")}}
+    （S-8 锚定同 data 路径），如 AT+FSWF 的长度参数。
+    """
+    assert step.command is not None
+    return render(
+        step.command,
+        ctx.variables,
+        env=ctx.env,
+        case_dir=ctx.case_dir,
+        data_allowed_roots=ctx.data_allowed_roots,
+    )
+
+
+def _resolve_data(step: Step, ctx: CaseContext) -> _DataPayload:
+    """data 步骤输入解析（P0-1）：模板渲染 → 字节装配 → DataStreamSpec.
+
+    - file：渲染路径 → datasource.read_data_file（S-8 锚定校验 + 读字节）；
+    - inline：渲染 → UTF-8 编码；
+    - inline_hex：渲染 → bytes.fromhex（渲染注入坏十六进制 → DataPathError）；
+    - 零字节拒绝：设备会等满声明长度，发空数据只会拖到超时（模型校验拦不住
+      渲染产物，如变量渲染出空串/纯空白十六进制）。
+
+    UndefinedReferenceError/TemplateRenderError/DataPathError 均由 execute_step
+    的 except 捕获走 _author_error_result（on_failure 决策）。
+    """
     assert step.data is not None
-    if step.data.inline is not None:
-        return render(step.data.inline, ctx.variables, env=ctx.env)
-    assert step.data.file is not None
-    return render(step.data.file, ctx.variables, env=ctx.env)
+    d = step.data
+    if d.file is not None:
+        raw_path = render(
+            d.file,
+            ctx.variables,
+            env=ctx.env,
+            case_dir=ctx.case_dir,
+            data_allowed_roots=ctx.data_allowed_roots,
+        )
+        data = read_data_file(raw_path, ctx.case_dir, ctx.data_allowed_roots)
+    elif d.inline is not None:
+        data = (
+            render(
+                d.inline,
+                ctx.variables,
+                env=ctx.env,
+                case_dir=ctx.case_dir,
+                data_allowed_roots=ctx.data_allowed_roots,
+            )
+        ).encode("utf-8")
+    else:
+        assert d.inline_hex is not None
+        rendered = render(
+            d.inline_hex,
+            ctx.variables,
+            env=ctx.env,
+            case_dir=ctx.case_dir,
+            data_allowed_roots=ctx.data_allowed_roots,
+        )
+        try:
+            data = bytes.fromhex(rendered)
+        except ValueError as exc:
+            raise DataPathError(f"inline_hex 解析失败：{exc}") from exc
+    if not data:
+        raise DataPathError("data 步骤解析得到 0 字节数据（空文件/空内联/空十六进制）")
+    spec = DataStreamSpec(
+        data=data,
+        chunk_threshold=d.chunk_threshold,
+        chunk_size=d.chunk_size,
+        chunk_interval_ms=d.chunk_interval,
+        append_terminator=d.append_terminator,
+    )
+    # 二进制安全摘要：前 60 字节按 UTF-8 容错解码（与 _truncate 截断风格协调）
+    display = f"[data {len(data)}字节] " + data[:60].decode("utf-8", errors="replace")
+    return _DataPayload(spec=spec, display=display)
 
 
 def _cmd_display(step: Step) -> str:

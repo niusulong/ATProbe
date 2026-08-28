@@ -44,8 +44,11 @@ class FakeSender(ICommandSender):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
+        # expect：step_runner 无条件透传（批 2b Task 6），替身只接受不消费
+        _ = expect
         self.calls += 1
         return self._responses.pop(0) if self._responses else Response(text="\r\nOK\r\n")
 

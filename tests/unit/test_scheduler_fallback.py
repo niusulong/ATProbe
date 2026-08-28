@@ -41,8 +41,11 @@ class _ExplodingFake(FakePortManager):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
+        # expect：step_runner 无条件透传（批 2b Task 6），替身只接受不消费
+        _ = expect
         self.calls += 1
         if self.calls >= self._explode_on:
             raise self._exc

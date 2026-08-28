@@ -190,8 +190,12 @@ class DataInput(_Frozen):
         # 空串拒绝：bytes.fromhex("") 会静默得到 0 字节数据，多为笔误
         if self.inline_hex == "":
             raise ValueError("inline_hex 不可为空字符串")
-        # 十六进制合法性解析期预校验（bytes.fromhex 自带容忍 ASCII 空白，如 "41 42"）
-        if self.inline_hex is not None:
+        # 十六进制合法性解析期预校验（bytes.fromhex 自带容忍 ASCII 空白，如 "41 42"）。
+        # 含模板占位符（{{var}}，渲染在引擎层）时跳过——字面量含 "{" 必非合法
+        # 十六进制，但渲染产物无法在解析期判定；渲染后的合法性由 step_runner 的
+        # bytes.fromhex 复核（坏十六进制 → DataPathError 走 on_failure 决策），
+        # 渲染出空串则被引擎零字节拒绝拦截。
+        if self.inline_hex is not None and "{{" not in self.inline_hex:
             try:
                 bytes.fromhex(self.inline_hex)
             except ValueError as exc:

@@ -427,6 +427,9 @@ class McpService:
             env_config=env_cfg,
             session_id="",  # JobManager 工厂按 job_id 注入
             log_dir=str(resolve_workspace_path(self._app_cfg.log_dir)),
+            # S-8 额外数据根本批传空：锚集仍含各用例目录（scheduler 按 case.source_file
+            # 派生 case_dir）；批 4 将 mcp.allowed_roots 并入此字段
+            data_allowed_roots=(),
         )
         job_id = self.jobs.start(
             build_engine_cfg=lambda jid: replace(cfg, session_id=jid),

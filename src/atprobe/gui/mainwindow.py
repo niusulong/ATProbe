@@ -901,6 +901,8 @@ class MainWindow(QMainWindow):
             env_config=env,
             session_id=session,
             log_dir=str(resolve_workspace_path(self._app_config.log_dir)),
+            # S-8 额外数据根：GUI 用例可来自任意文件，cases_dir 作统一数据目录兜底
+            data_allowed_roots=(str(self.cases_dir().resolve()),),
         )
 
         _log.info("开始执行: %d 个用例, 端口 %s, 阈值 %d%%", len(cases), port, threshold)

@@ -42,8 +42,11 @@ class ScriptedSender(ICommandSender):
         *,
         timeout: float | None = None,
         wait_urc: str | None = None,
+        expect: str | None = None,
         cancel: CancelToken | None = None,
     ) -> Response:
+        # expect：step_runner 无条件透传（批 2b Task 6），替身只接受不消费
+        _ = expect
         item = self._script.pop(0) if self._script else _ok()
         if isinstance(item, BaseException):
             raise item

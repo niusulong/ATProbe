@@ -34,6 +34,9 @@ class EngineConfig:
         env_config: 环境配置（M7，None 表示无环境配置层）。
         session_id: 会话标识（时间戳，用于日志/报告目录，M5 §7.2）。
         log_dir: 原始日志根目录。
+        data_allowed_roots: S-8 额外数据根（设计 §5）——data.file 渲染后路径的
+            信任边界 = 「用例目录（case.source_file 派生）∪ 本字段」。CLI/GUI
+            填 cases_dir；MCP 本批传空（批 4 并入 mcp.allowed_roots）。
     """
 
     ports: tuple[PortConfig, ...]  # type: ignore[name-defined]  # noqa: F821
@@ -49,6 +52,9 @@ class EngineConfig:
     # from __future__ import annotations，运行期注解为字符串，无循环 import 风险）。
     suite_setup: tuple[Step, ...] = ()  # type: ignore[name-defined]  # noqa: F821
     suite_teardown: tuple[Step, ...] = ()  # type: ignore[name-defined]  # noqa: F821
+    # S-8 额外数据根（设计 §5）：字符串路径（构造点解析为绝对路径），scheduler
+    # 转 Path 填入 CaseContext.data_allowed_roots；与各用例自身目录取并集。
+    data_allowed_roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # P3 修复：step_timeout_default 无 gt=0 校验（Step.timeout 有）——配 0 时
