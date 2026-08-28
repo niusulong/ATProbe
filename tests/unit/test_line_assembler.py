@@ -5,7 +5,8 @@
 接线时以本文件 + 既有 test_connection_* 行为锁共同验收。
 
 新增能力（设计 §2.1/§2.3，connection 接线见 Task 4/5）单独成组：
-  - expect 检测：新增字节区间命中即 COMPLETE，优先于终结行判定；
+  - expect 检测：新增字节区间命中即 COMPLETE（命中点前完整行双交付），
+    优先于终结行判定；
   - 错误码行（ERROR/+CME ERROR/+CMS ERROR）在任何**等待**模式（含 wait_urc）
     下立即终结。空闲态无终结概念（无在途命令），错误行仍按主动上报派发。
 """
@@ -77,6 +78,27 @@ class TestIdleMode:
     def test_empty_lines_skipped(self) -> None:
         asm = _asm()
         assert asm.feed(b"\r\n\r\n") == [_truncate()]
+
+    def test_idle_truncation_no_redispatch_across_chunks(self) -> None:
+        """空闲截断（防 OOM）：已派发行移出 buffer，下个 chunk 不重复派发."""
+        asm = _asm()
+        assert asm.feed(b"+A\r\n") == [_urc("+A"), _truncate()]
+        assert asm.feed(b"+B\r\n") == [_urc("+B"), _truncate()]
+
+    def test_empty_chunk_idempotent(self) -> None:
+        """空 chunk：无事件、无状态变化（代次/半行标记/缓冲内容均不变）."""
+        asm = _asm()
+        asm.feed(b"+A\r\n")
+        gen = asm.generation
+        assert asm.feed(b"") == []
+        assert asm.generation == gen
+        half = _asm()
+        half.feed(b"+HALF")
+        gen_half = half.generation
+        assert half.feed(b"") == []
+        assert half.generation == gen_half
+        assert half.has_pending_half_line is True
+        assert half.snapshot_and_reset() == b"+HALF"
 
     def test_terminator_line_still_urc_when_idle(self) -> None:
         """空闲态终结行（OK）也是完整非空行——照常派发（无在途命令无终结概念）."""
@@ -188,6 +210,18 @@ class TestExpectDetection:
         asm = _asm(expect=rb"\r\n>", waiting=True)
         asm.feed(b"\r\n> \r\nOK\r\n")
         assert asm.snapshot_and_reset() == b" \r\nOK\r\n"
+
+    def test_lines_before_hit_dual_delivered(self) -> None:
+        """命中点之前的完整行按双交付派发（URC 永不丢失），并同时含于 data 内."""
+        asm = _asm(expect=rb"\r\n>", waiting=True)
+        events = asm.feed(b"\r\n+CREG: 2\r\n> ")
+        assert events == [_urc("+CREG: 2"), _complete(b"\r\n+CREG: 2\r\n>")]
+        assert asm.snapshot_and_reset() == b" "
+
+    def test_dual_delivery_before_hit_excludes_echo_and_terminator(self) -> None:
+        """双交付与终结前同款结构性排除：回显行/终结行不派发为 URC."""
+        asm = _asm(echo=b"AT+X", expect=rb"\r\n>", waiting=True)
+        assert asm.feed(b"AT+X\r\r\nOK\r\n> ") == [_complete(b"AT+X\r\r\nOK\r\n>")]
 
     def test_search_region_starts_at_dispatched(self) -> None:
         """只搜新增字节（buffer[dispatched:] 起）——历史行不重扫，命中点定位正确."""

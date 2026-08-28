@@ -7,7 +7,8 @@
 语义来源 = 迁移前的 connection._process_incoming（行拆分 / URC 结构分类 /
 终结判定 / 偏移去重 / 孤儿续行逐条等价，见各方法注释的行号对照）。本模块
 新增两点能力（connection 接线见 Task 4/5）：
-  - expect 检测（设计 §2.3）：对新增字节命中即 COMPLETE，优先于终结行判定；
+  - expect 检测（设计 §2.3）：对新增字节命中即 COMPLETE，优先于终结行判定，
+    命中点之前的完整行按双交付派发（URC 永不丢失不变量）；
   - 错误码行任何**等待**模式下立即终结（设计 §2.1）：wait_urc 模式收到
     ERROR/+CME ERROR/+CMS ERROR 不再等目标 URC 到超时。
 """
@@ -127,6 +128,21 @@ class LineAssembler:
         return bool(self._buffer) and not self._buffer.endswith(b"\n")
 
     # ------------------------------------------------------------------
+    # 内部：完成尾声（状态转换不变量单点）
+    # ------------------------------------------------------------------
+    def _complete_through(self, end: int, data: bytes) -> None:
+        """完成/截断尾声：buffer 替换为 data[end:] 余量、已派发偏移归零、代次+1.
+
+        五处完成路径共用（expect 命中 / wait_urc 目标行 / 错误码终结 / 常规
+        终结 / 空闲截断）：buffer 每次被清/换必须同步归零偏移并自增代次——
+        漏任一步即陈旧交付/假超时（P1-1 教训），收敛单点防未来路径漏步。
+        data 为 feed 入口快照（feed 内除本方法外不修改 buffer 内容）。
+        """
+        self._buffer = bytearray(data[end:])
+        self._dispatched = 0
+        self._generation += 1
+
+    # ------------------------------------------------------------------
     # 核心：字节增量 → 事件序列
     # ------------------------------------------------------------------
     def feed(self, chunk: bytes) -> list[RxEvent]:
@@ -138,6 +154,11 @@ class LineAssembler:
         （P1-1）在此结构性消除。
         """
         events: list[RxEvent] = []
+
+        # 空 chunk：无事件、无状态变化（幂等；连接层读循环本就跳过空读，
+        # 此处防御性短路——否则空闲分支会对空缓冲空转推进代次）。
+        if not chunk:
+            return events
 
         # 孤儿续行丢弃（原 :637-644）：入口清缓冲截断的在途半行，其续行
         # （至下一个 \n 含）属命令前数据——字节级静默丢弃，不派发、不累积
@@ -156,27 +177,9 @@ class LineAssembler:
         dispatched_offset = self._dispatched
         awaiting = self._waiting
 
-        # ------------------------------------------------------------------
-        # expect 检测（批 2a 新增，设计 §2.3）：对**新增字节**（buffer[dispatched:]
-        # 起——历史行已处理不重扫，增量扫描）做 expect_re.search。命中即完成
-        # 且优先于终结行判定（命中点即响应终点，其后余量留 buffer 待下轮处理）。
-        # 仅等待态生效：expect 是发送周期的附加完成条件，空闲态无终结概念。
-        # 与 wait_urc 的互斥由调用方保证，此处不检查（都设置时 expect 先判）。
-        # ------------------------------------------------------------------
-        if self._expect_re is not None and awaiting:
-            region = data[dispatched_offset:]
-            m = self._expect_re.search(region)
-            if m is not None:
-                hit_end = dispatched_offset + m.end()
-                events.append(RxEvent(kind=RxEventKind.RESPONSE_COMPLETE, data=data[:hit_end]))
-                self._buffer = bytearray(data[hit_end:])  # 命中点后余量留 buffer
-                self._dispatched = 0
-                self._generation += 1
-                return events
-
         lines = data.split(b"\n")
-        # 最后一行可能不完整
-        *complete_lines, tail = lines
+        # 最后一行可能不完整（tail = data[tail_start:]，见下方 tail_start）
+        complete_lines = lines[:-1]
 
         # 预计算每个完整行的字节跨度 [start, end)（end 含换行符），
         # end <= dispatched_offset 的行是历史 chunk 已处理过的，跳过派发。
@@ -185,6 +188,9 @@ class LineAssembler:
         for _line in complete_lines:
             spans.append((_pos, _pos + len(_line) + 1))
             _pos += len(_line) + 1
+        # 尾部不完整行（tail）的起始偏移：无完整行时为 0（tail 即整个 data）——
+        # 五处完成路径经 _complete_through 用它把 buffer 收缩到 tail
+        tail_start = spans[-1][1] if spans else 0
 
         def _urc_candidate(stripped: bytes) -> bool:
             """结构位置排除后的 URC 候选行（无前缀判断）."""
@@ -200,6 +206,31 @@ class LineAssembler:
 
         def _emit_urc(stripped: bytes) -> None:
             events.append(RxEvent(kind=RxEventKind.URC_LINE, text=_decode(stripped)))
+
+        # ------------------------------------------------------------------
+        # expect 检测（批 2a 新增，设计 §2.3）：对**新增字节**（buffer[dispatched:]
+        # 起——历史行已处理不重扫，增量扫描）做 expect_re.search。命中即完成
+        # 且优先于终结行判定（命中点即响应终点，其后余量留 buffer 待下轮处理）。
+        # 仅等待态生效：expect 是发送周期的附加完成条件，空闲态无终结概念。
+        # 与 wait_urc 的互斥由调用方保证，此处不检查（都设置时 expect 先判）。
+        # 命中点之前的完整行按双交付派发为 URC_LINE（"URC 永不丢失"不变量——
+        # 与终结前双交付同款，连接层一贯原则：结构位置排除后的行必须派发；
+        # 行同时包含在 COMPLETE 的 data 内，urc_filter 剥离由连接层按配置处理）。
+        # ------------------------------------------------------------------
+        if self._expect_re is not None and awaiting:
+            region = data[dispatched_offset:]
+            m = self._expect_re.search(region)
+            if m is not None:
+                hit_end = dispatched_offset + m.end()
+                for line, (_ls, le) in zip(complete_lines, spans, strict=True):
+                    if le <= dispatched_offset or le > hit_end:
+                        continue  # 历史 chunk 已派发（去重）/ 命中点之后或跨越命中点的行
+                    stripped = line.strip()
+                    if _urc_candidate(stripped):
+                        _emit_urc(stripped)
+                events.append(RxEvent(kind=RxEventKind.RESPONSE_COMPLETE, data=data[:hit_end]))
+                self._complete_through(hit_end, data)  # 命中点后余量留 buffer
+                return events
 
         # ------------------------------------------------------------------
         # wait_urc 模式（异步指令，原 :682-726）：OK 仅受理不终结，须等匹配
@@ -220,9 +251,7 @@ class LineAssembler:
                     _emit_urc(stripped)  # 目标行也按常规分流（§6.4）
                     # 交付 = 全量缓冲快照（发送起至目标行含，含其间 OK 段）
                     events.append(RxEvent(kind=RxEventKind.RESPONSE_URC_TERMINATED, data=data))
-                    self._buffer = bytearray(tail)
-                    self._dispatched = 0  # buffer 已替换，偏移归零
-                    self._generation += 1
+                    self._complete_through(tail_start, data)
                     # 匹配行之后的完整行不丢弃（buffer 重置为 tail 后它们既不在
                     # 缓冲也未被派发）——按 URC 分流补派发一次。
                     for rest in complete_lines[mi + 1 :]:
@@ -234,9 +263,7 @@ class LineAssembler:
                 # （§2.1 行为变更——修前 wait_urc 模式仅受理，等目标 URC 到超时）。
                 if _ERROR_RE.match(stripped):
                     events.append(RxEvent(kind=RxEventKind.RESPONSE_COMPLETE, data=data[:le]))
-                    self._buffer = bytearray(tail)
-                    self._dispatched = 0
-                    self._generation += 1
+                    self._complete_through(tail_start, data)
                     # 错误终结与常规终结同口径：其后完整行按主动上报补派发
                     for rest, (_rls, rle) in zip(complete_lines, spans, strict=True):
                         if rle <= le:
@@ -276,9 +303,8 @@ class LineAssembler:
                 # 响应完整：交付 = 缓冲头至该终结行（含）——与终结行同 chunk
                 # 到达的后续行是主动上报，立即派发（不丢失、不污染交付文本）。
                 events.append(RxEvent(kind=RxEventKind.RESPONSE_COMPLETE, data=data[:le]))
-                self._buffer = bytearray(tail)  # 保留终结行之后的数据作下一轮缓冲
-                self._dispatched = 0  # buffer 已替换，偏移归零
-                self._generation += 1
+                # 保留终结行之后的数据（tail）作为下一轮缓冲
+                self._complete_through(tail_start, data)
                 found_terminator = True
                 # 终结行之后的完整行：结构位置 = 命令应答已结束 → 非空即派发
                 for rest, (_rls, rle) in zip(complete_lines, spans, strict=True):
@@ -300,9 +326,7 @@ class LineAssembler:
                         _emit_urc(stripped)
                 # 已处理的完整行从 buffer 截断，只保留最后一个不完整行（tail）
                 # ——否则设备持续发 URC 而无人发送命令时 buffer 无限增长。
-                self._buffer = bytearray(tail)
-                self._dispatched = 0
-                self._generation += 1
+                self._complete_through(tail_start, data)
                 if complete_lines:
                     events.append(RxEvent(kind=RxEventKind.TRUNCATED_IDLE))
             else:
