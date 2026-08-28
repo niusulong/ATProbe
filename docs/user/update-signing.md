@@ -16,7 +16,7 @@
 
 ## 格式与验证机制
 
-- 算法：Ed25519（minisign 默认 `Ed` 模式，对**文件原始字节**签名，非 prehash 摘要）。
+- 算法：Ed25519。minisign 默认 `ED` 模式（prehash——对文件内容的 BLAKE2b-512 摘要签名）；`minisign -S -l` 产生 `Ed` 模式（对文件原始字节直接签名）。**客户端两种均支持验证**，发布侧无需关心用哪种。
 - 公钥文件 `atprobe-update.pub`：首行注释 + 次行 base64（解码 42 字节 =
   `alg(2) || key_id(8) || pk(32)`），放置于 `src/atprobe/resources/`（与
   `app_icon.png` 同目录，经 `atprobe.resources` 包随包分发）。

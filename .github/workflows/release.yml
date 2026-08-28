@@ -66,7 +66,7 @@ jobs:
           $keyFile = New-TemporaryFile
           Set-Content -Path $keyFile -Value $env:MINISIGN_PRIVATE_KEY
           # 下载 minisign（官方 release 二进制）
-          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.23/minisign-0.23-win64.zip" -OutFile minisign.zip
+          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile minisign.zip
           Expand-Archive minisign.zip -DestinationPath minisign
           $ms = (Get-ChildItem minisign -Recurse -Filter minisign.exe).FullName
           Get-ChildItem dist/*.zip | ForEach-Object {

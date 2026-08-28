@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import email.message
+import hashlib
 import io
 import urllib.error
 import urllib.request
@@ -200,16 +201,21 @@ def _b64(raw: bytes) -> str:
 def _write_minisign_files(
     tmp_path: Path,
     content: bytes = b"fake zip payload" * 8,
+    *,
+    prehash: bool = False,
 ) -> tuple[Path, Path, Path]:
     """用 pynacl 测试密钥对手拼出 minisign 三件套（zip / .minisig / .pub）。
 
-    格式对齐 minisign 0.23：公钥 42 字节（Ed||key_id||pk），签名 74 字节
-    （Ed||key_id||sig），签名文件 4 行（untrusted/sig/trusted/注释签名）。
+    格式对齐 minisign 0.12：公钥 42 字节（Ed||key_id||pk，恒 Ed），签名 74 字节
+    （alg||key_id||sig，alg=Ed 为 legacy、ED 为默认 prehash——签文件内容的
+    BLAKE2b-512 无键摘要），签名文件 4 行（untrusted/sig/trusted/注释签名）。
     """
     sk = SigningKey.generate()
     key_id = bytes(range(8))
+    alg = b"ED" if prehash else _ED
+    payload = hashlib.blake2b(content, digest_size=64).digest() if prehash else content
     pub_blob = _ED + key_id + bytes(sk.verify_key)
-    sig_blob = _ED + key_id + sk.sign(content).signature
+    sig_blob = alg + key_id + sk.sign(payload).signature
 
     zip_path = tmp_path / "ATProbe-9.9.9-win64.zip"
     zip_path.write_bytes(content)
@@ -256,9 +262,22 @@ def test_parse_minisign_key_wrong_algorithm() -> None:
 def test_parse_minisign_sig_ok() -> None:
     sk = SigningKey.generate()
     sig64 = sk.sign(b"m").signature
-    key_id, sig = parse_minisign_sig(_b64(_ED + bytes(8) + sig64))
+    key_id, sig, alg = parse_minisign_sig(_b64(_ED + bytes(8) + sig64))
     assert key_id == bytes(8)
     assert sig == sig64
+    assert alg == b"Ed"
+
+
+def test_parse_minisign_sig_prehash_alg_accepted() -> None:
+    sk = SigningKey.generate()
+    sig64 = sk.sign(b"m").signature
+    key_id, sig, alg = parse_minisign_sig(_b64(b"ED" + bytes(8) + sig64))
+    assert (key_id, sig, alg) == (bytes(8), sig64, b"ED")
+
+
+def test_parse_minisign_sig_unknown_alg_rejected() -> None:
+    with pytest.raises(ValueError, match="算法"):
+        parse_minisign_sig(_b64(b"XX" + bytes(8) + bytes(64)))
 
 
 def test_parse_minisign_sig_wrong_length() -> None:
@@ -272,6 +291,18 @@ def test_parse_minisign_sig_wrong_length() -> None:
 def test_verify_minisign_accepts_valid_signature(tmp_path: Path) -> None:
     zip_path, sig_path, pub_path = _write_minisign_files(tmp_path)
     assert verify_minisign(zip_path, sig_path, pub_path) is True
+
+
+def test_verify_minisign_accepts_prehash_signature(tmp_path: Path) -> None:
+    """ED（minisign 默认 prehash）签名：对 blake2b-512 摘要验签通过（审查 M2 修复）."""
+    zip_path, sig_path, pub_path = _write_minisign_files(tmp_path, prehash=True)
+    assert verify_minisign(zip_path, sig_path, pub_path) is True
+
+
+def test_verify_prehash_tampered_content_fails(tmp_path: Path) -> None:
+    zip_path, sig_path, pub_path = _write_minisign_files(tmp_path, prehash=True)
+    zip_path.write_bytes(b"tampered payload")
+    assert verify_minisign(zip_path, sig_path, pub_path) is False
 
 
 def test_verify_minisign_rejects_tampered_zip(tmp_path: Path) -> None:

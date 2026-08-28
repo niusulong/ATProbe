@@ -1,6 +1,8 @@
 """minisign 签名验证（S-6 验签框架，过渡兼容）。
 
-minisign 文件格式（Ed25519，算法标识 ``Ed`` = 对文件内容直接签名，非 prehash）：
+minisign 文件格式（Ed25519；签名算法两种：``Ed`` = legacy 对文件原始字节直接
+签名（``minisign -S -l``），``ED`` = **默认** prehash——对文件内容的 BLAKE2b-512
+摘要签名（裸 ``minisign -S``）。两种均支持验证）：
 
 - 公钥文件两行：untrusted comment / base64。base64 解码 42 字节：
   ``sig_alg(2) || key_id(8) || pk(32)``
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import sys
 from importlib import resources
 from pathlib import Path
@@ -32,9 +35,10 @@ from atprobe.infra.runtime import app_root, is_frozen
 
 PUBLIC_KEY_FILENAME = "atprobe-update.pub"
 
-# 算法标识：``Ed``（0x45 0x64）——minisign 默认的非 prehash Ed25519，
-# 对文件原始字节签名。``ED``（prehash，签 blake2 摘要）不在本验证范围，拒绝。
+# 算法标识：``Ed``（legacy，对文件原始字节签名）/ ``ED``（默认，prehash——
+# 签文件内容的 BLAKE2b-512 无键摘要）。公钥文件的算法标识恒为 ``Ed``。
 _ALG_ED = b"Ed"
+_ALG_ED_PREHASH = b"ED"
 _PK_BLOB_LEN = 2 + 8 + 32  # sig_alg || key_id || pk
 _SIG_BLOB_LEN = 2 + 8 + 64  # sig_alg || key_id || sig
 
@@ -104,34 +108,37 @@ def parse_minisign_key(b64: str) -> bytes:
     return raw[10:]
 
 
-def parse_minisign_sig(b64: str) -> tuple[bytes, bytes]:
-    """解析 minisign 签名行 → (key_id 8 字节, 签名 64 字节)。
+def parse_minisign_sig(b64: str) -> tuple[bytes, bytes, bytes]:
+    """解析 minisign 签名行 → (key_id 8 字节, 签名 64 字节, 算法标识 2 字节)。
 
     Args:
         b64: 签名文件的次行（base64；解码后应为 74 字节
             ``sig_alg(2) || key_id(8) || sig(64)``）。
 
     Raises:
-        ValueError: base64 非法 / 长度不符 / 算法标识非 ``Ed``。
+        ValueError: base64 非法 / 长度不符 / 算法标识既非 ``Ed``（legacy）也非
+            ``ED``（默认 prehash）。
     """
     raw = _b64decode(b64, what="签名")
     if len(raw) != _SIG_BLOB_LEN:
         raise ValueError(
             f"minisign 签名长度错误：应为 {_SIG_BLOB_LEN} 字节（alg+key_id+sig），实际 {len(raw)}"
         )
-    if raw[:2] != _ALG_ED:
+    alg = raw[:2]
+    if alg not in (_ALG_ED, _ALG_ED_PREHASH):
         raise ValueError(
-            f"minisign 签名算法标识错误：期望 {_ALG_ED!r}（Ed，对文件内容直接签名），"
-            f"实际 {raw[:2]!r}"
+            f"minisign 签名算法标识错误：期望 {_ALG_ED!r}（legacy）或 "
+            f"{_ALG_ED_PREHASH!r}（默认 prehash），实际 {alg!r}"
         )
-    return raw[2:10], raw[10:]
+    return raw[2:10], raw[10:], alg
 
 
 def verify_minisign(zip_path: Path, sig_path: Path, pubkey_path: Path) -> bool:
-    """验证 zip 的 minisign 签名。
+    """验证 zip 的 minisign 签名（Ed legacy 与 ED prehash 双算法）。
 
-    minisign 对**文件内容**签名（Ed 算法，签原始字节，非 prehash 摘要），
-    故直接对 zip 字节做 Ed25519 验签（nacl VerifyKey）。
+    - ``Ed``（legacy，``-l``）：对 zip 原始字节直接做 Ed25519 验签；
+    - ``ED``（默认）：对 zip 内容的 BLAKE2b-512 无键摘要做 Ed25519 验签
+      （minisign 的 crypto_generichash 构造：unkeyed、64 字节输出）。
 
     Args:
         zip_path: 被签名的安装包。
@@ -144,9 +151,10 @@ def verify_minisign(zip_path: Path, sig_path: Path, pubkey_path: Path) -> bool:
     """
     try:
         pk = parse_minisign_key(_payload_line(pubkey_path))
-        _key_id, sig = parse_minisign_sig(_payload_line(sig_path))
+        _key_id, sig, alg = parse_minisign_sig(_payload_line(sig_path))
         data = zip_path.read_bytes()
-        VerifyKey(pk).verify(data, sig)
+        payload = data if alg == _ALG_ED else hashlib.blake2b(data, digest_size=64).digest()
+        VerifyKey(pk).verify(payload, sig)
         return True
     except (ValueError, BadSignatureError, OSError):
         return False
