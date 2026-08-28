@@ -55,6 +55,7 @@ from atprobe.infra.serial.interfaces import (
     Response,
     ResponseStatus,
 )
+from atprobe.infra.serial.sleep import cancellable_sleep
 
 _log = logging.getLogger(__name__)
 
@@ -327,9 +328,12 @@ def _run_retry(
         if cancel is not None and cancel.cancelled:
             raise OperationCancelled("步骤被取消")
         if attempt_no > 0 and retry is not None:
-            # P2 修复（耗时口径）：重试间隔计入步骤总耗时（旧实现低估实际耗时）
+            # P2 修复（耗时口径）：重试间隔计入步骤总耗时（旧实现低估实际耗时）。
+            # F-14：间隔经 cancellable_sleep（设计 §4.5"retry/poll/重连/压测 interval
+            # 全部换用"）——取消时不再睡满整个 interval，立即按取消退出。
             t_wait = clock()
-            sleep(retry.interval / 1000.0)
+            if not cancellable_sleep(retry.interval / 1000.0, cancel, sleep=sleep):
+                raise OperationCancelled("步骤被取消")
             total_duration += (clock() - t_wait) * 1000.0
         attempt = _single_attempt(
             step, request, payload, port, timeout, wait_urc, ctx, sender, clock, sleep, cancel
@@ -448,8 +452,11 @@ def _run_poll(
         # 时长，报告与压测 avg 系统性低估（retry.count=3、interval=1s 时差 ~3s）。
         # 复审补充：sleep 按剩余预算截断——贴 deadline 到达的响应通过检查后仍
         # sleep 满 interval 会残余溢出约 interval+0.05s（复审实测 11.04s/预算 10s）。
+        # F-14：经 cancellable_sleep——取消时不再睡满剩余预算，立即按取消退出
+        # （与循环头取消检查同语义）。
         t_wait = clock()
-        sleep(min(interval, max(deadline - clock(), 0.0)))
+        if not cancellable_sleep(min(interval, max(deadline - clock(), 0.0)), cancel, sleep=sleep):
+            raise OperationCancelled("poll 被取消")
         total_duration += (clock() - t_wait) * 1000.0
         attempt.duration_ms = total_duration
 

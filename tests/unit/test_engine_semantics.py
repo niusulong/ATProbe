@@ -122,6 +122,7 @@ def _run(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = _no_sleep,
     is_teardown: bool = False,
+    cancel: CancelToken | None = None,
 ) -> StepExecResult:
     return execute_step(
         step,
@@ -131,6 +132,7 @@ def _run(
         sender=sender,
         default_port=PORT,
         step_timeout_default=5.0,
+        cancel=cancel,
         case_on_failure=case_on_failure,
         clock=clock,
         sleep=sleep,
@@ -364,3 +366,54 @@ class TestPortBusyErrorStepLevel:
         assert r.abort_case is False
         assert "端口正忙" in (r.step_result.error_msg or "")
         assert fake.data_sent == []  # 撞锁发生在写入前，字节未发出
+
+
+# ---------------------------------------------------------------------------
+# 7. retry/poll 间隔可取消（F-14 收口，批 3 终审 Important 修复）：间隔睡眠经
+#    cancellable_sleep——取消不再睡满整个 interval，立即按取消退出。
+# ---------------------------------------------------------------------------
+class TestIntervalSleepCancellable:
+    def test_retry_interval_cancel_mid_sleep_interrupts(self) -> None:
+        """retry 间隔睡眠中取消 → 立即 INTERRUPTED（不再睡满 5s、不再发第二次）."""
+        clock = MutableClock()
+        sleeps: list[float] = []
+        token = CancelToken()
+
+        def cancel_during_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.now += seconds
+            token.cancel()  # 首片睡眠期间触发取消
+
+        fake = FakePortManager(sleep=_no_sleep)
+        fake.script_text(PORT, "\r\nERROR\r\n", persistent=True)  # 断言失败触发重试
+        step = Step(command="AT", retry={"count": 3, "interval": 5000}, assert_={"equals": "OK"})
+        r = _run(step, CaseContext(), fake, clock=clock, sleep=cancel_during_sleep, cancel=token)
+        assert r.status is StepStatus.INTERRUPTED
+        assert len(fake.sent) == 1  # 第二次尝试未发出
+        # 只睡了一个分片（0.1s）即感知取消，未睡满 5.0
+        assert sleeps and all(s <= 0.1 + 1e-9 for s in sleeps)
+        assert 5.0 not in sleeps
+
+    def test_poll_tail_interval_cancel_mid_sleep_interrupts(self) -> None:
+        """poll 尾部间隔睡眠中取消 → 立即 INTERRUPTED（与循环头取消同语义）."""
+        clock = MutableClock()
+        sleeps: list[float] = []
+        token = CancelToken()
+
+        def cancel_during_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.now += seconds
+            token.cancel()
+
+        fake = FakePortManager(sleep=_no_sleep)
+        fake.script_text(PORT, "\r\n+CREG: 0,2\r\n\r\nOK\r\n", persistent=True)
+        step = Step(
+            command="AT+CREG?",
+            extract={"stat": r"\+CREG: \d,(\d)"},
+            poll=PollConfig(until='stat == "5"', timeout=10.0, interval=5000),
+        )
+        r = _run(step, CaseContext(), fake, clock=clock, sleep=cancel_during_sleep, cancel=token)
+        assert r.status is StepStatus.INTERRUPTED
+        assert len(fake.sent) == 1  # 第二轮查询未发出
+        assert sleeps and all(s <= 0.1 + 1e-9 for s in sleeps)
+        assert 5.0 not in sleeps
