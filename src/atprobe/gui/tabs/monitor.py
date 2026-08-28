@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import codecs
 from collections.abc import Sequence
+from typing import Any
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QTextCursor
@@ -325,16 +326,27 @@ class MonitorWidget(QWidget):
                 QMessageBox.warning(self, "提示", "请先勾选至少一个监控端口")
                 self.subscribe_btn.setChecked(False)
                 return
-            # 未连接的端口自动打开
+            # 未连接的端口自动打开。P3 聚合：打开失败（quiet 经主窗口不弹窗）
+            # 的端口循环结束后单弹窗列出——旧实现逐端口经 MainWindow.open_port
+            # 连环弹 critical 框，多口失败时用户要点 N 次
             is_conn = getattr(self._main, "is_port_connected", None)
             open_port = getattr(self._main, "open_port", None)
+            failed: list[str] = []
             for p in ports:
                 if callable(is_conn) and not is_conn(p) and callable(open_port):
-                    if not open_port(p):
-                        # 打开失败则跳过该端口
+                    if not self._open_quietly(open_port, p):
+                        failed.append(p)
                         continue
                 # 预创建子页（即使暂无数据也先显示空页）
                 self._ensure_sub_view(p)
+            if failed:
+                from PySide6.QtWidgets import QMessageBox
+
+                QMessageBox.warning(
+                    self,
+                    "端口打开失败",
+                    "以下端口打开失败，本次监控已跳过：\n  " + "\n  ".join(failed),
+                )
             self.subscribe_btn.setText("停止监控")
             if hasattr(self._main, "subscribe_monitor"):
                 # P0 修复：sink 用信号 emit（线程安全），观察者回调→GUI 线程槽
@@ -348,6 +360,18 @@ class MonitorWidget(QWidget):
             # 停止监控：冲刷残余 buffer（保留已捕获数据供回看/导出），再停定时器避免空转
             self._flush_all()
             self._timer.stop()
+
+    @staticmethod
+    def _open_quietly(open_port: Any, port: str) -> bool:
+        """调主窗口 open_port 打开端口，失败不弹窗（P3 聚合前置）.
+
+        优先传 ``quiet=True``（MainWindow.open_port 支持时失败静默，由本页聚合
+        弹窗）；替身/旧签名不收该参数则退回普通调用（TypeError 兜底）。
+        """
+        try:
+            return bool(open_port(port, quiet=True))
+        except TypeError:
+            return bool(open_port(port))
 
     def cleanup(self) -> None:
         """统一资源清理钩子（B6：tab 关闭/窗口关闭时调用）.
@@ -370,6 +394,11 @@ class MonitorWidget(QWidget):
 
         P1 修复：同步更新已存在子页的 tokens 引用——旧实现只换 MonitorWidget
         自己的 dict 引用，已创建的子页仍指旧主题色（仅新建子页生效）。
+
+        有意设计（P3 文档化）：**已渲染的历史行不重染**——子页 QTextEdit 按
+        渲染快照语义追加（append-only），旧行保留渲染时的配色，本方法只换
+        tokens 供后续新行使用。逐行重染成本高且扰动滚动位置；清空/重开监控
+        自然用新主题。
         """
         self._tokens = get_tokens()
         for sv in self._sub_views.values():

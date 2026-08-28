@@ -30,9 +30,10 @@ from PySide6.QtWidgets import (
 from atprobe.domain.report.models import ExecutionResult
 from atprobe.engine import Engine, EngineConfig
 from atprobe.engine.config import EngineState, StopMode
+from atprobe.gui.controllers import UpdateController
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import TabBinding, TabTypeRegistry, default_registry
-from atprobe.gui.theme import get_tokens
+from atprobe.gui.theme import get_tokens, read_theme_pref, write_theme_pref
 from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
 from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
@@ -125,10 +126,6 @@ class MainWindow(QMainWindow):
 
     # 跨线程事件投递信号（引擎线程 → 主线程）
     progress = Signal(object)
-    # 升级检查/下载结果投递信号（工作线程 → 主线程）
-    update_check_result = Signal(object)  # ReleaseInfo | None(无新版/失败) | Exception
-    update_download_progress = Signal(int, int)  # (done, total)
-    update_download_done = Signal(object)  # Path | Exception
     # 后台打开端口结果（工作线程 → 主线程，Pf-3）：(port, ok, 错误消息)
     port_open_result = Signal(str, bool, str)
 
@@ -146,16 +143,12 @@ class MainWindow(QMainWindow):
         # 主题状态：优先读持久化偏好（QSettings），无记录时回退全局状态。
         # P2 修复（单一真相源）：旧实现只读全局 _THEME_DARK（app.py 启动时桥接），
         # 单独构造 MainWindow（测试/嵌入复用）会忽略已持久化的主题偏好。
-        from PySide6.QtCore import QSettings
-
+        # P3 收敛：读取经 theme.read_theme_pref 单点（与 app.py 启动共用，
+        # type=bool 归一在单点内完成）。
         from atprobe.gui.theme import current_theme_is_dark
 
-        _settings = QSettings("ATProbe", "ATProbe")
-        if _settings.contains("theme/dark"):
-            # type=bool：注册表/INI 存的是 "true"/"false" 字符串，需经 QVariant 归一
-            self._dark = bool(_settings.value("theme/dark", False, type=bool))
-        else:
-            self._dark = current_theme_is_dark()
+        _pref = read_theme_pref()
+        self._dark = current_theme_is_dark() if _pref is None else _pref
         self._tokens = get_tokens(dark=self._dark)
         self._registry: TabTypeRegistry = default_registry()
         # M8 修复：常驻 RawLogger 注入共享 PortManager 与 Engine——GUI 引擎执行
@@ -184,13 +177,14 @@ class MainWindow(QMainWindow):
         self._init_sidebar()
         self._init_tabs()
         self._init_statusbar()
+        # D-1 拆分：更新流程（检查/下载/安装确认）收敛 UpdateController——
+        # 本类只保留实例化与菜单入口，弹窗呈现随迁控制器（以本窗口为弹窗父级）
+        self._update_controller = UpdateController(parent=self)
         self._init_menubar()
         self.progress.connect(self._on_progress)
-        self.update_check_result.connect(self._on_check_result)
-        self.update_download_progress.connect(self._on_download_progress)
-        self.update_download_done.connect(self._on_download_done)
         self.port_open_result.connect(self._on_port_open_result)
-        self._update_in_progress = False
+        # F-17：closeEvent 重入防护——等待循环期间用户再点 X 会二次进入
+        self._closing = False
         # LED 信号灯呼吸动效（仅 RUNNING 状态闪烁，体现「引擎在跑」的活力）
         self._led_state = "IDLE"
         self._led_color = self._tokens["neutral"]
@@ -327,7 +321,7 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("帮助(&H)")
         check_action = QAction("检查更新...", self)
-        check_action.triggered.connect(lambda: self._on_check_update(manual=True))
+        check_action.triggered.connect(lambda: self._update_controller.check(manual=True))
         help_menu.addAction(check_action)
         log_action = QAction("打开日志目录", self)
         log_action.triggered.connect(self._open_log_dir)
@@ -338,8 +332,13 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
 
     def _toggle_theme(self, dark: bool) -> None:
-        """切换浅/深主题：重应用 QSS + 记忆偏好（§2.2）."""
-        from PySide6.QtCore import QSettings
+        """切换浅/深主题：重应用 QSS + 记忆偏好（§2.2）.
+
+        注意（有意设计）：主题切换不重渲染监控/执行进度等视图的**历史行**——
+        这些视图按渲染快照语义工作（append-only 文档），旧行保留渲染时的配色；
+        refresh_theme 只换令牌供后续新行使用。逐行重染成本高且可能扰动滚动位置，
+        新会话（清空/重开）自然用新主题。
+        """
         from PySide6.QtWidgets import QApplication
 
         from atprobe.gui.theme import apply_theme
@@ -366,9 +365,8 @@ class MainWindow(QMainWindow):
                     _log.debug("refresh_theme 抛异常", exc_info=True)
         # P1/P2 修复（写入持久化）：显式 sync（旧实现靠临时 QSettings 对象析构
         # 触发落盘，进程异常退出时 5 秒自动 sync 定时器可能未跑到 → 偏好丢失）。
-        settings = QSettings("ATProbe", "ATProbe")
-        settings.setValue("theme/dark", dark)
-        settings.sync()
+        # P3 收敛：写入经 theme.write_theme_pref 单点。
+        write_theme_pref(dark)
 
     def _on_about(self) -> None:
         """关于对话框：显示版本号与项目地址."""
@@ -405,179 +403,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法打开", f"日志目录不可访问：{exc}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir.resolve())))
-
-    def _on_check_update(self, manual: bool = True) -> None:
-        """检查更新（菜单手动触发）。完整实现见 _check_update。"""
-        self._check_update(manual=manual)
-
-    def _check_update(self, manual: bool = True) -> None:
-        """后台检查更新（工作线程做 HTTP，结果经信号回主线程）。
-
-        manual=False（启动自动）：失败/无新版静默；manual=True（手动）：弹提示。
-        """
-        if self._update_in_progress:
-            return
-        self._check_manual = manual
-        threading.Thread(target=self._check_update_worker, daemon=True).start()
-
-    def _check_update_worker(self) -> None:
-        from atprobe.infra.update import UpdateCheckError
-        from atprobe.infra.update.checker import fetch_latest, is_newer
-        from atprobe.infra.version import current_version
-
-        try:
-            info = fetch_latest()
-            result = info if is_newer(info.version, current_version()) else None
-            self.update_check_result.emit(result)
-        except (UpdateCheckError, Exception) as exc:  # noqa: BLE001
-            # 网络失败等：手动模式弹窗，自动模式静默
-            self.update_check_result.emit(exc)
-
-    def _on_check_result(self, result: object) -> None:
-        """主线程：处理检查结果。"""
-        from PySide6.QtWidgets import QMessageBox
-
-        from atprobe.infra.version import current_version
-
-        # 异常：失败
-        if isinstance(result, Exception):
-            if getattr(self, "_check_manual", False):
-                QMessageBox.warning(self, "检查更新", f"检查失败：{result}")
-            return
-        # None：已是最新
-        if result is None:
-            if getattr(self, "_check_manual", False):
-                QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_version()}")
-            return
-        # ReleaseInfo：有新版 → 弹升级对话框
-        self._show_update_dialog(result)  # type: ignore[arg-type]
-
-    def _show_update_dialog(self, info: object) -> None:
-        """有新版时弹升级对话框（版本号 + changelog + 立即更新/稍后）。"""
-        import html as _html
-
-        from PySide6.QtWidgets import (
-            QDialog,
-            QDialogButtonBox,
-            QLabel,
-            QTextEdit,
-            QVBoxLayout,
-        )
-
-        from atprobe.infra.version import current_version
-
-        dlg = QDialog(self)
-        # P3：预发布版本在弹窗标题标注（info.prerelease 由 checker 按 tag 后缀解析）
-        dlg.setWindowTitle(
-            "发现新版本（预发布）" if getattr(info, "prerelease", False) else "发现新版本"
-        )
-        dlg.setMinimumWidth(480)
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(
-            QLabel(
-                f"<b>发现新版本 {info.version}</b>（当前 {current_version()}）"  # type: ignore[attr-defined]
-            )
-        )
-        notes = QTextEdit()
-        notes.setReadOnly(True)
-        # HTML 转义 changelog，避免含 <,>,& 的 release body 破坏渲染
-        safe_notes = _html.escape(str(getattr(info, "release_notes", "")))
-        notes.setHtml(f"<pre>{safe_notes}</pre>")
-        layout.addWidget(QLabel("更新内容："))
-        layout.addWidget(notes, 1)
-        size_mb = getattr(info, "zip_size", 0) / (1024 * 1024)
-        layout.addWidget(QLabel(f"下载大小：约 {size_mb:.1f} MB"))
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("立即更新")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("稍后")
-        btns.accepted.connect(lambda: self._start_download(info, dlg))
-        btns.rejected.connect(dlg.reject)
-        layout.addWidget(btns)
-        dlg.exec()
-
-    def _start_download(self, info: object, dlg: object) -> None:
-        """用户点立即更新：关闭对话框，启动下载（工作线程 + 进度对话框）。"""
-        from PySide6.QtWidgets import QProgressDialog
-
-        dlg.accept()  # type: ignore[attr-defined]
-        self._update_in_progress = True
-
-        self._progress_dlg = QProgressDialog(
-            f"正在更新到 {info.version}...",  # type: ignore[attr-defined]
-            "取消",
-            0,
-            100,
-            self,  # type: ignore[attr-defined]
-        )
-        self._progress_dlg.setWindowTitle("更新")
-        self._progress_dlg.setMinimumDuration(0)
-        self._progress_dlg.setValue(0)
-        self._progress_dlg.canceled.connect(self._cancel_download)
-        self._cancelled = False
-
-        threading.Thread(target=self._download_worker, args=(info,), daemon=True).start()
-
-    def _download_worker(self, info: object) -> None:
-        from atprobe.infra.update import DownloadCancelled, DownloadError
-        from atprobe.infra.update.session import UpdateSession
-
-        try:
-            # D-3/P1-9 结构修：下载编排收敛 UpdateSession（此前 GUI 此处硬编码
-            # 文件名、漏传校验参数，与 CLI 两处拼装各自漂移——单点后天然一致）
-            result = UpdateSession().download(
-                info,  # type: ignore[arg-type]
-                progress_cb=lambda d, t: self.update_download_progress.emit(d, t),
-                cancel_token=lambda: getattr(self, "_cancelled", False),
-            )
-            self.update_download_done.emit(result.path)
-        except (DownloadCancelled, DownloadError, Exception) as exc:  # noqa: BLE001
-            self.update_download_done.emit(exc)
-
-    def _on_download_progress(self, done: int, total: int) -> None:
-        if hasattr(self, "_progress_dlg") and total > 0:
-            self._progress_dlg.setValue(done * 100 // total)
-
-    def _cancel_download(self) -> None:
-        self._cancelled = True
-
-    def _on_download_done(self, result: object) -> None:
-        """下载完成（Path）或失败（Exception）。"""
-        from pathlib import Path
-
-        from PySide6.QtWidgets import QApplication, QMessageBox
-
-        from atprobe.infra.runtime import app_root
-        from atprobe.infra.update import DownloadCancelled, UpdateError
-        from atprobe.infra.update.installer import apply_update
-
-        if hasattr(self, "_progress_dlg"):
-            self._progress_dlg.close()
-        self._update_in_progress = False
-
-        if isinstance(result, Exception):
-            if not isinstance(result, DownloadCancelled):
-                QMessageBox.critical(self, "更新失败", f"下载失败：{result}")
-            return
-        # 下载成功 → 最终确认安装
-        zip_path = Path(result)  # type: ignore[arg-type]
-        choice = QMessageBox.question(
-            self,
-            "开始安装",
-            "更新已就绪。点击「是」后程序将关闭并自动完成升级（约 5 秒）。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if choice != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            apply_update(zip_path, app_root())
-        except UpdateError as exc:
-            QMessageBox.critical(self, "安装失败", str(exc))
-            return
-        # 脚本已 detached 启动，主动退出
-        QApplication.quit()
 
     # ------------------------------------------------------------------
     # 选项卡管理（§2.3）
@@ -715,6 +540,23 @@ class MainWindow(QMainWindow):
             return "IDLE"
         return str(self._engine.state().value)
 
+    def _file_send_active(self) -> bool:
+        """manual_debug 选项卡的文件发送是否进行中（2b⑧ 启动前探测）.
+
+        经 ``_find_tab("manual_debug")`` 定位 widget 后读其 ``_file_worker`` /
+        ``_file_thread``（getattr 防御：tab 未开、替身缺属性或属性非预期形态
+        一律视为不在发送，不阻断启动）。worker 与 thread 在 manual_debug 中
+        同置同清，双检仅为对竞态窗口（set 间隙）保守。
+        """
+        tab = self._find_tab("manual_debug")
+        if tab is None:
+            return False
+        if getattr(tab, "_file_worker", None) is not None:
+            return True
+        thread = getattr(tab, "_file_thread", None)
+        is_running = getattr(thread, "isRunning", None)
+        return callable(is_running) and bool(is_running())
+
     def send_manual(self, port: str, command: str, *, terminator: Terminator | None = None) -> bool:
         """手动调试：写字符串命令到端口，不等待响应（纯流式，§4.2/§6.2）.
 
@@ -819,7 +661,13 @@ class MainWindow(QMainWindow):
             return False, f"打开端口 {port} 失败：{exc}"
 
     def open_port(
-        self, port: str, baud: int = 115200, frame: str = "8N1", flow: str = "none"
+        self,
+        port: str,
+        baud: int = 115200,
+        frame: str = "8N1",
+        flow: str = "none",
+        *,
+        quiet: bool = False,
     ) -> bool:
         """同步打开端口（兼容入口：monitor 等仍在主线程调用）。失败弹窗并返回 False.
 
@@ -832,16 +680,18 @@ class MainWindow(QMainWindow):
             baud: 波特率。
             frame: 紧凑帧格式（如 8N1），经 FrameFormat.parse 校验。
             flow: 流控（none/rts_cts/xon_xoff）。
+            quiet: True 时失败不弹窗（P3：monitor 多端口批量打开由调用方聚合
+                失败端口单弹窗列出，替代逐端口连环弹窗）。
         """
         ok, err = self._open_port_impl(port, baud, frame, flow)
-        if not ok:
+        if not ok and not quiet:
             QMessageBox.critical(self, "端口错误", err or f"打开端口 {port} 失败")
         return ok
 
     def open_port_async(
         self, port: str, baud: int = 115200, frame: str = "8N1", flow: str = "none"
     ) -> None:
-        """后台打开端口（Pf-3，参照 _check_update_worker 模式）.
+        """后台打开端口（Pf-3，worker 线程 + 信号回主线程模式，同更新控制器）.
 
         慢速 COM 驱动的 open 可达秒级，同步在主线程会冻结 UI。工作线程执行
         ``_open_port_impl``（不弹窗），结果经 ``port_open_result`` 信号回主线程
@@ -877,6 +727,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: object) -> None:  # noqa: D401
         """窗口关闭：释放全部资源（B6 修复：遍历 tab cleanup + 停引擎 + 关串口）."""
+        if self._closing:
+            # F-17：processEvents 重入防护——等待循环期间用户再点 X 会二次进入
+            # closeEvent（重复 stop_engine/双重 close_all/二次清理信号已断的 tab）
+            ignore = getattr(event, "ignore", None)
+            if callable(ignore):
+                ignore()
+            return
+        self._closing = True
         try:
             # 先停引擎（若在跑），避免引擎线程操作已关闭的串口
             self.stop_engine()
@@ -930,6 +788,13 @@ class MainWindow(QMainWindow):
 
         if self._engine is not None and self._engine.state() is EngineState.RUNNING:
             QMessageBox.warning(self, "正在执行", "已有用例正在执行中，请先停止后再开始。")
+            return
+
+        # 2b⑧ 启动前探测（终审 Important）：manual_debug 文件发送进行中（分块写
+        # 持端口命令锁）时启动引擎，首条 send_command 即 PortBusyError——步骤串
+        # 连环失败后才以引擎错误终结。此处快速拒绝并给出可操作提示。
+        if self._file_send_active():
+            QMessageBox.warning(self, "无法启动", "文件发送进行中，请先完成或取消后再启动测试")
             return
 
         from atprobe.domain.case.parser import CaseParseError

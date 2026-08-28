@@ -99,6 +99,9 @@ class ExecutionProgressWidget(QWidget):
         self.detail_label.setObjectName("caption")
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.detail_label.setWordWrap(True)
+        # P3 视觉注入消除：QLabel 默认 AutoText——命令/错误消息含 <b>/<a> 等
+        # 片段时被解释为富文本（视觉注入）。此处只做纯文本追加，显式锁 PlainText
+        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.detail_label)
 
         # 操作行
@@ -216,7 +219,12 @@ class ExecutionProgressWidget(QWidget):
         pass
 
     def refresh_theme(self) -> None:
-        """主题切换时刷新内联富文本配色（M11）."""
+        """主题切换时刷新内联富文本配色（M11）.
+
+        有意设计（P3 文档化）：**历史行不重渲染**——表格状态项前景色与步骤
+        明细是渲染快照，切主题只换 tokens 供后续新事件使用，旧行保留渲染时
+        配色（逐行重染成本高且可能与进行中的执行竞争表格写）。
+        """
         self._tokens = get_tokens()
 
     def _on_finished(self, ev: object) -> None:

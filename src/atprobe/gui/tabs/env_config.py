@@ -49,6 +49,10 @@ class EnvConfigWidget(QWidget):
         self._env: EnvConfig = empty_env_config()
         self._path: Path | None = None
         self._group_widgets: dict[str, dict[str, QLineEdit]] = {}
+        # P3 惰性收集：表单编辑只置脏标记，全量收集推迟到首次读取
+        # （current_env/is_dirty/save）——旧实现每击键 textChanged 即全量遍历
+        # 表单重建 EnvConfig，大配置下高频无谓开销。
+        self._form_dirty = False
         self._init_ui()
         # 尝试加载默认 env.yaml
         if hasattr(self._main, "env_config_path"):
@@ -117,8 +121,9 @@ class EnvConfigWidget(QWidget):
             # 密码脱敏（§7.2）
             if any(k in pname.lower() for k in ("password", "pass", "secret")):
                 edit.setEchoMode(QLineEdit.EchoMode.Password)
-            # 文本编辑即时同步内存：所见即所跑（无需点保存）
-            edit.textChanged.connect(self._collect_and_update_env)
+            # 文本编辑即时同步内存：所见即所跑（无需点保存）。P3 惰性收集：
+            # 击键只置脏标记，收集推迟到首次读取（见 _ensure_collected）
+            edit.textChanged.connect(self._mark_form_dirty)
             form.addRow(pname, edit)
             entries[pname] = edit
         add_param_btn = QPushButton("＋参数")
@@ -161,6 +166,15 @@ class EnvConfigWidget(QWidget):
         self._env = EnvConfig(_groups=groups, source=str(self._path) if self._path else None)
         self._rebuild_form()
 
+    def _mark_form_dirty(self) -> None:
+        """表单有编辑：置脏标记（P3 惰性收集的写入侧，替代逐击键全量收集）。"""
+        self._form_dirty = True
+
+    def _ensure_collected(self) -> None:
+        """惰性收集读侧（P3）：表单有编辑时全量收集一次，无编辑零开销直读缓存。"""
+        if self._form_dirty:
+            self._collect_and_update_env()
+
     def _collect_and_update_env(self) -> None:
         # 浅拷贝内层 dict，避免把可变 dict 直接塞进 EnvConfig（其 _groups 注解为
         # Mapping，暗示不可变；防引擎/报告代码持有引用跨用例累积的隐患）。
@@ -171,12 +185,18 @@ class EnvConfigWidget(QWidget):
                 params[pname] = edit.text()
             groups[gname] = dict(params)
         self._env = EnvConfig(_groups=groups, source=str(self._path) if self._path else None)
+        # 全量收集后表单与 _env 一致，脏标记随之清除
+        self._form_dirty = False
 
     # ------------------------------------------------------------------
     # 实时生效接口：供 MainWindow.run_cases 读取内存值（所见即所跑）
     # ------------------------------------------------------------------
     def current_env(self) -> EnvConfig:
-        """返回当前表单内存中的 EnvConfig（已 collect，含未保存的编辑）."""
+        """返回当前表单内存中的 EnvConfig（已 collect，含未保存的编辑）.
+
+        P3 惰性收集：读取点触发收集（表单有编辑时全量收集一次）。
+        """
+        self._ensure_collected()
         return self._env
 
     def is_dirty(self) -> bool:
@@ -188,7 +208,10 @@ class EnvConfigWidget(QWidget):
         复审修复：标量**归一为字符串**后比对——表单收集的值恒为 str，而磁盘
         YAML 的 `port: 21` 解析为 int、`flag: true` 为 bool，直接 != 恒不等
         → 含数值/布尔参数的配置永久 dirty（修复声称消除的行为对非字符串无效）。
+
+        P3 惰性收集：比对前先收集挂起的表单编辑（见 _ensure_collected）。
         """
+        self._ensure_collected()
 
         def _norm(groups: "Mapping[str, Mapping[str, object]]") -> dict[str, dict[str, str]]:
             from atprobe.infra.config.envconfig import _to_str

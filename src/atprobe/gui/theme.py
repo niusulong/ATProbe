@@ -637,6 +637,39 @@ DARK_QSS = _build_qss(DARK_TOKENS)
 # 这样主题切换不需逐视图传参，也不依赖 QApplication 单例的反查。
 _THEME_DARK: bool = False
 
+# 持久化主题偏好（P3 收敛单点）：org/app/key 与 bool 归一口径此前散在
+# app.py 启动与 MainWindow（读两处、写一处），现集中本模块。
+_THEME_PREF_ORG = "ATProbe"
+_THEME_PREF_APP = "ATProbe"
+_THEME_PREF_KEY = "theme/dark"
+
+
+def read_theme_pref() -> bool | None:
+    """读取持久化主题偏好（P3 收敛单点）.
+
+    返回 None 表示无记录（调用方回退各自默认/全局状态）；有记录返回 bool
+    （type=bool：注册表/INI 存的是 "true"/"false" 字符串，需经 QVariant 归一）。
+    """
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings(_THEME_PREF_ORG, _THEME_PREF_APP)
+    if not settings.contains(_THEME_PREF_KEY):
+        return None
+    return bool(settings.value(_THEME_PREF_KEY, False, type=bool))
+
+
+def write_theme_pref(dark: bool) -> None:
+    """写入并显式 sync 持久化主题偏好（P3 收敛单点）.
+
+    显式 sync：旧实现靠临时 QSettings 对象析构触发落盘，进程异常退出时
+    5 秒自动 sync 定时器可能未跑到 → 偏好丢失。
+    """
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings(_THEME_PREF_ORG, _THEME_PREF_APP)
+    settings.setValue(_THEME_PREF_KEY, dark)
+    settings.sync()
+
 
 def current_theme_is_dark() -> bool:
     """当前是否深色主题."""

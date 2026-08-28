@@ -2147,6 +2147,8 @@ class TestDownloadWorkerPassesSha256:
 
     T5（D-3）迁移：_download_worker 改经 UpdateSession 编排，patch 目标随迁
     到 session 层——断言不变：sha256/size 仍端到端贯通至 downloader.download。
+    T7（D-1）：方法随 UpdateController 迁移，调用点改为 win._update_controller
+    （MainWindow 不再持有更新族方法/信号）。
     """
 
     def test_download_receives_expected_sha256(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -2175,13 +2177,15 @@ class TestDownloadWorkerPassesSha256:
             minisig_url=None,
         )
         win = MainWindow()
+        ctrl = win._update_controller  # noqa: SLF001
         # 主线程同步调用 _download_worker 时，emit 为直接连接，会同步执行
         # _on_download_done → QMessageBox.question 模态框——offscreen 模式无人可点，
         # 测试将永久挂起。本测试只验证 download 收到的参数，故先断开该信号。
-        win.update_download_done.disconnect()
+        ctrl.download_done.disconnect()
         try:
-            win._download_worker(info)  # noqa: SLF001 - 同步执行，直接调用验证参数
+            ctrl._download_worker(info)  # noqa: SLF001 - 同步执行，直接调用验证参数
         finally:
+            win._raw_logger.stop()  # noqa: SLF001
             win.close()
         assert recorded["expected_sha256"] == "deadbeef", (
             "_download_worker 未把 ReleaseInfo.sha256 传给 download——GUI 更新链路缺内容校验"
@@ -2614,3 +2618,583 @@ class TestCaseParseCacheReuse:
             assert len(calls) == 1, "run_cases 应复用 _load_path 的解析结果，不得重复 parse"
         finally:
             win._raw_logger.stop()
+
+
+# ===========================================================================
+# 批4 T7：F-17 closeEvent 重入 + D-1 UpdateController 拆分 + GUI P3 批
+#         + 文件发送守卫断言（逻辑层）+ 启动前探测（2b⑧后半）
+# ===========================================================================
+class TestCloseEventReentryGuard:
+    """F-17：closeEvent 的 processEvents 等待循环期间用户再点 X 会二次进入."""
+
+    def test_second_close_is_ignored(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """已置 _closing 后再入 closeEvent：event 被 ignore 且不重复清理."""
+        from PySide6.QtGui import QCloseEvent
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        win._engine_thread = None  # noqa: SLF001 - 跳过引擎等待循环
+        # 第一次进入：完整清理路径（置 _closing=True）
+        ev1 = QCloseEvent()
+        win.closeEvent(ev1)
+        assert win._closing is True  # noqa: SLF001
+
+        # 第二次进入（等待循环期间再点 X）：应被忽略——不重复 stop_engine/
+        # close_all/二次遍历 tab cleanup（哨兵异常验证清理不可达）
+        def _boom(*a, **k):  # noqa: ANN002, ANN003
+            raise AssertionError("重入的 closeEvent 不得再次执行清理")
+
+        monkeypatch.setattr(win, "stop_engine", _boom)
+        monkeypatch.setattr(win._port_manager, "close_all", _boom)  # noqa: SLF001
+        ev2 = QCloseEvent()
+        win.closeEvent(ev2)
+        assert ev2.isAccepted() is False, "重入的 closeEvent 应 ignore 该事件"
+
+    def test_closing_flag_initialized_false(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """构造后 _closing 初始 False（首次关闭不被误拦）."""
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            assert win._closing is False  # noqa: SLF001
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+
+class TestUpdateControllerMigration:
+    """D-1：更新族方法/信号/状态整体迁 UpdateController（行为零变化）."""
+
+    def test_mainwindow_no_longer_hosts_update_flow(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """MainWindow 不再持有更新族信号/方法；持有控制器实例并以自己为宿主."""
+        from atprobe.gui.controllers import UpdateController
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            assert isinstance(win._update_controller, UpdateController)  # noqa: SLF001
+            assert win._update_controller._host is win  # noqa: SLF001
+            for gone in ("update_check_result", "update_download_progress", "update_download_done"):
+                assert not hasattr(win, gone), f"MainWindow 应删除信号 {gone}（随迁控制器）"
+            for gone in (
+                "_check_update",
+                "_check_update_worker",
+                "_on_check_result",
+                "_show_update_dialog",
+                "_start_download",
+                "_download_worker",
+                "_on_download_progress",
+                "_cancel_download",
+                "_on_download_done",
+                "_update_in_progress",
+            ):
+                assert not hasattr(win, gone), f"MainWindow 应删除属性/方法 {gone}（随迁控制器）"
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_controller_signals_self_connected(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """控制器三信号自连接呈现槽（worker emit → queued → 主线程弹窗）."""
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            ctrl = win._update_controller  # noqa: SLF001
+            emitted: list[object] = []
+            ctrl.check_result.connect(lambda r: emitted.append(r))
+            ctrl.check_result.emit(RuntimeError("probe"))
+            qapp.processEvents()
+            assert len(emitted) == 1, "控制器信号应可正常 emit/接收（迁移动接线完整）"
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_check_skipped_while_download_in_progress(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """下载进行中重复 check 被忽略（不起新工作线程）——旧行为零变化."""
+        import types
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        class _RecordingThread:
+            """check() 的线程替身：记录 start 但不真跑（避免真 HTTP 线程）."""
+
+            def __init__(self, *a, **k) -> None:  # noqa: ANN002, ANN003
+                pass
+
+            def start(self) -> None:
+                started.append(1)
+
+        started: list[int] = []
+        # 只替换控制器命名空间的 threading（全局 patch 会波及 RawLogger 等真线程）
+        monkeypatch.setattr(
+            "atprobe.gui.controllers.update.threading",
+            types.SimpleNamespace(Thread=_RecordingThread),
+        )
+
+        win = MainWindow()
+        try:
+            ctrl = win._update_controller  # noqa: SLF001
+            ctrl._update_in_progress = True  # noqa: SLF001 —— 模拟下载中
+            ctrl.check(manual=True)
+            assert not started, "下载中重复 check 不得再起新线程"
+            # 下载空闲时正常放行（线程替身记录 start）
+            ctrl._update_in_progress = False  # noqa: SLF001
+            ctrl.check(manual=True)
+            assert started, "空闲时 check 应照常发起后台线程"
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_on_check_result_manual_vs_auto(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """结果呈现随迁：手动模式失败/无新版弹窗，自动模式静默（零变化）."""
+        import PySide6.QtWidgets as _qw
+
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+        monkeypatch.setattr(
+            _qw.QMessageBox, "information", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+
+        from atprobe.gui.controllers.update import UpdateController
+
+        ctrl = UpdateController(parent=None)
+        # 异常 + 自动（manual=False）：静默
+        ctrl._check_manual = False  # noqa: SLF001
+        ctrl._on_check_result(RuntimeError("网络失败"))
+        assert shown == []
+        # 异常 + 手动：warning
+        ctrl._check_manual = True  # noqa: SLF001
+        ctrl._on_check_result(RuntimeError("网络失败"))
+        assert len(shown) == 1 and "检查失败" in shown[0][1]
+        # None + 手动：已是最新 information
+        ctrl._on_check_result(None)
+        assert len(shown) == 2 and "已是最新" in shown[1][1]
+
+
+class TestFileSendGuardAssertions:
+    """批 2a 携带守卫断言（逻辑层；pytest-qt 全量序列原生崩溃已证实、勿再引入）."""
+
+    @staticmethod
+    def _make_win(qapp) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.config import PortConfig
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        win = MainWindow()
+        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+        win._port_manager.open(PortConfig(name="COM9"))  # noqa: SLF001
+        return win
+
+    def test_send_file_rejected_while_engine_running(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """守卫①：引擎 RUNNING 时 send_file 被拒——warning 弹窗 + False + 不写端口."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.engine.config import EngineState
+
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+
+        win = self._make_win(qapp)
+
+        class _RunningEngine:
+            def state(self) -> EngineState:
+                return EngineState.RUNNING
+
+        win._engine = _RunningEngine()  # noqa: SLF001
+        try:
+            assert win.send_file("COM9", b"\x01\x02") is False
+            assert shown and shown[0][0] == "发送被拒绝"
+            assert "正在运行" in shown[0][1]
+        finally:
+            win._engine = None  # noqa: SLF001
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_enter_file_sending_disables_panels(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """守卫②：文件发送期间 UI 面板禁用；退出后恢复（离屏 widget 直测）."""
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        main = _FakeMain()
+        main._connected.add("COM1")  # noqa: SLF001
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), main)  # type: ignore[arg-type]
+        try:
+            for w in (widget.send_btn, widget.send_edit, widget.file_btn, widget._cmd_panel):
+                assert w.isEnabled(), "发送前相关控件应可用"
+
+            widget._enter_file_sending()  # noqa: SLF001
+            for w in (widget.send_btn, widget.send_edit, widget.file_btn, widget._cmd_panel):
+                assert not w.isEnabled(), "文件发送中文本发送/命令库面板应禁用"
+
+            widget._exit_file_sending()  # noqa: SLF001
+            for w in (widget.send_btn, widget.send_edit, widget.file_btn, widget._cmd_panel):
+                assert w.isEnabled(), "退出文件发送后应恢复可用"
+        finally:
+            widget.cleanup()
+
+    def test_send_file_port_busy_branch(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """守卫③：send_file 的 PortBusyError 捕获分支——友好提示 + False（不弹通用错误）."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.infra.serial.exceptions import PortBusyError
+
+        infos: list[tuple[str, str]] = []
+        crits: list[str] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "information", lambda p, t, x, *a, **k: infos.append((t, x))
+        )
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda p, t, x, *a, **k: crits.append(x))
+
+        win = self._make_win(qapp)
+
+        def _busy(port, spec, **kwargs):  # noqa: ANN001, ANN003
+            raise PortBusyError(port, "另一发送周期进行中")
+
+        monkeypatch.setattr(win._port_manager, "write_data", _busy)  # noqa: SLF001
+        try:
+            assert win.send_file("COM9", b"\x01\x02") is False
+            assert infos and infos[0][0] == "端口忙", "撞锁应弹友好提示而非通用错误"
+            assert crits == [], "PortBusyError 分支不得落入通用错误框"
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+
+class TestFileSendPreStartProbe:
+    """2b⑧ 后半：启动引擎前探测 manual_debug 文件发送进行中 → 拒绝启动."""
+
+    @staticmethod
+    def _inject_manual_debug_tab(win) -> None:  # noqa: ANN001
+        """注入一个最小 manual_debug 假 tab（只带 _file_worker/_file_thread 属性）."""
+        from PySide6.QtWidgets import QWidget
+
+        w = QWidget()
+        w.setProperty("tab_type", "manual_debug")
+        win.tabs.addTab(w, "手动调试")
+        return w
+
+    def test_probe_false_when_no_tab(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            assert win._file_send_active() is False  # noqa: SLF001
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_probe_detects_active_worker(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            tab = self._inject_manual_debug_tab(win)
+            assert win._file_send_active() is False  # noqa: SLF001 —— 无发送
+            tab._file_worker = object()  # 模拟发送中  # noqa: SLF001
+            assert win._file_send_active() is True  # noqa: SLF001
+            tab._file_worker = None  # noqa: SLF001
+
+            class _FakeThread:
+                def isRunning(self) -> bool:
+                    return True
+
+            tab._file_thread = _FakeThread()  # noqa: SLF001 —— 线程视角同样探测到
+            assert win._file_send_active() is True  # noqa: SLF001
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+    def test_run_cases_rejected_while_file_sending(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """run_cases 在文件发送进行中被拒：warning 弹窗 + 不建引擎线程."""
+        import PySide6.QtWidgets as _qw
+
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+
+        from atprobe.gui.mainwindow import MainWindow
+
+        win = MainWindow()
+        try:
+            tab = self._inject_manual_debug_tab(win)
+            tab._file_worker = object()  # noqa: SLF001 —— 文件发送进行中
+
+            case_file = tmp_path / "c.yaml"
+            case_file.write_text(
+                "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+            )
+            win.run_cases([str(case_file)], "COM9", 90)
+            assert shown and "文件发送进行中" in shown[0][1]
+            assert win._engine is None and win._engine_thread is None, (  # noqa: SLF001
+                "拒绝路径不得创建引擎/引擎线程"
+            )
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
+
+class TestMonitorPortOpenAggregation:
+    """P3：monitor 多端口打开失败聚合单弹窗（替代逐端口连环 critical 框）."""
+
+    @staticmethod
+    def _make_widget(qapp, ports) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.tabs.monitor import MonitorWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        class _FailingMain:
+            """open_port 旧签名（不收 quiet）且恒失败的替身——同时验证 TypeError 回退."""
+
+            def available_ports(self) -> list[str]:
+                return list(ports)
+
+            def is_port_connected(self, port: str) -> bool:
+                return False
+
+            def open_port(self, port: str) -> bool:
+                return False
+
+            def subscribe_monitor(self, ports_, sink) -> None:  # noqa: ANN001
+                pass
+
+            def unsubscribe_monitor(self) -> None:
+                pass
+
+        return MonitorWidget(TabBinding(type_name="monitor", params={}), _FailingMain())  # type: ignore[arg-type]
+
+    def test_multiple_failures_single_warning(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import PySide6.QtWidgets as _qw
+
+        warns: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: warns.append((t, x))
+        )
+
+        widget = self._make_widget(qapp, ["COM1", "COM2"])
+        try:
+            for cb in widget._port_checks:  # noqa: SLF001
+                cb.setChecked(True)
+            widget._toggle(True)  # noqa: SLF001
+            assert len(warns) == 1, f"多端口失败应聚合为单弹窗，实际 {len(warns)} 次"
+            assert "COM1" in warns[0][1] and "COM2" in warns[0][1], "弹窗应列出全部失败端口"
+        finally:
+            widget.cleanup()
+
+    def test_open_quietly_falls_back_on_old_signature(self) -> None:  # type: ignore[no-untyped-def]
+        """替身/旧签名 open_port（不收 quiet）→ TypeError 回退普通调用."""
+        from atprobe.gui.tabs.monitor import MonitorWidget
+
+        calls: list[dict[str, object]] = []
+
+        def old_open(port: str) -> bool:
+            calls.append({"port": port, "quiet": False})
+            return port == "COM1"
+
+        def new_open(port: str, *, quiet: bool = False) -> bool:
+            calls.append({"port": port, "quiet": quiet})
+            return quiet
+
+        assert MonitorWidget._open_quietly(old_open, "COM1") is True
+        assert MonitorWidget._open_quietly(new_open, "COM3") is True
+        # 新签名走 quiet=True（静默失败由调用方聚合），旧签名回退
+        assert calls[0]["quiet"] is False and calls[1]["quiet"] is True
+
+
+class TestCommandLibraryRenameTransaction:
+    """P3：命令库重命名事务化——迁移失败回滚，不留半改状态."""
+
+    @staticmethod
+    def _make_editor(qapp) -> None:  # noqa: ANN001, no-untyped-def
+        from PySide6.QtWidgets import QTreeWidget, QWidget
+
+        from atprobe.domain.quickcmd import CommandLibrary
+        from atprobe.gui.theme import get_tokens
+        from atprobe.gui.widgets.command_library import _LibraryTreeEditor
+
+        class _Harness(QWidget, _LibraryTreeEditor):
+            """最小编辑器宿主：只提供 _library/tree/_tokens 与提交记录."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._tokens = get_tokens()
+                self.tree = QTreeWidget()
+                self._library = CommandLibrary.empty()
+                self.commits: list[tuple[str, ...] | None] = []
+
+            def _commit_and_refresh(self, select: tuple[str, ...] | None = None) -> None:
+                self.commits.append(select)
+
+        return _Harness()
+
+    def test_rename_group_rolls_back_on_mid_failure(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """第 N 个命令迁移失败（空命令串）：已迁移项与新组回滚 + 提示."""
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtWidgets import QInputDialog
+
+        warns: list[str] = []
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda p, t, x, *a, **k: warns.append(x))
+        monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("new", True))
+
+        ed = self._make_editor(qapp)
+        lib = ed._library  # noqa: SLF001
+        lib.add_project("P")
+        grp = lib.add_group("P", "old")
+        # 直接注入空命令（模拟手改 YAML 绕过 add_command 校验载入）——迁移到第 2 个时抛
+        grp.commands = ["AT", "", "AT+CSQ"]
+
+        ed._rename_group("P", "old")  # noqa: SLF001
+        assert warns and "回滚" in warns[0], "失败应弹提示（旧实现异常裸抛无提示）"
+        assert lib.find_group("P", "new") is None, "回滚应删除半迁移的新组"
+        old_grp = lib.find_group("P", "old")
+        assert old_grp is not None, "回滚应保留旧组"
+        assert old_grp.commands == ["AT", "", "AT+CSQ"]
+        assert ed.commits == [], "失败路径不得提交（不落盘半改状态）"
+
+    def test_rename_group_success_path_unchanged(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """正常重命名零变化：命令全迁移 + 旧组移除 + 提交."""
+        import PySide6.QtWidgets as _qw
+        from PySide6.QtWidgets import QInputDialog
+
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("new", True))
+
+        ed = self._make_editor(qapp)
+        lib = ed._library  # noqa: SLF001
+        lib.add_project("P")
+        lib.add_group("P", "old")
+        lib.add_command("P", "old", "AT")
+        lib.add_command("P", "old", "AT+CSQ")
+
+        ed._rename_group("P", "old")  # noqa: SLF001
+        assert lib.find_group("P", "old") is None
+        new_grp = lib.find_group("P", "new")
+        assert new_grp is not None and new_grp.commands == ["AT", "AT+CSQ"]
+        assert ed.commits == [("group", "P", "new")]
+
+
+class TestExecutionProgressPlainText:
+    """P3：execution_progress 步骤明细 QLabel 锁 PlainText（AutoText 视觉注入）."""
+
+    def test_detail_label_plain_text_format(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import Qt
+
+        from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ExecutionProgressWidget(
+            TabBinding(type_name="execution_progress", params={}),
+            object(),  # type: ignore[arg-type]
+        )
+        assert widget.detail_label.textFormat() == Qt.TextFormat.PlainText
+
+    def test_device_text_with_markup_shown_literally(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """含 <b>/<a> 片段的命令文本按字面显示（不被解释为富文本）."""
+        from atprobe.engine.interfaces import StepResultEvent
+        from atprobe.gui.tabs.execution_progress import ExecutionProgressWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ExecutionProgressWidget(
+            TabBinding(type_name="execution_progress", params={}),
+            object(),  # type: ignore[arg-type]
+        )
+        ev = StepResultEvent(
+            step_index=0,
+            phase="steps",
+            status="PASS",
+            duration_ms=1.0,
+            port="COM3",
+            command='AT+X=<b>BOOM</b><a href="http://evil">click</a>',
+        )
+        widget._on_step(ev)  # noqa: SLF001
+        text = widget.detail_label.text()  # noqa: SLF001
+        assert "<b>BOOM</b>" in text, "PlainText 模式下标签文本应按字面保留"
+
+
+class TestThemePrefSinglePoint:
+    """P3：主题偏好读/写收敛 theme.read/write_theme_pref（app.py 与 MainWindow 共用）."""
+
+    def test_roundtrip(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QSettings
+
+        from atprobe.gui.theme import read_theme_pref, write_theme_pref
+
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+        try:
+            probe = QSettings("ATProbe", "ATProbe")
+            probe.setValue("theme/dark", False)
+            probe.sync()
+            if probe.status() is not QSettings.Status.NoError:
+                pytest.skip("QSettings 持久化在当前环境不可写（仅内存缓存）")
+            write_theme_pref(True)
+            assert read_theme_pref() is True
+            write_theme_pref(False)
+            assert read_theme_pref() is False
+        finally:
+            QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
+
+    def test_absent_returns_none(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """无记录 → None（调用方回退默认/全局状态）.
+
+        QSettings 按 org/app 进程级缓存——换唯一 org 名绕开同进程其它用例
+        已写入的 theme/dark 记录（ININ 路径随 setPath 指向本用例 tmp_path）。
+        """
+        from PySide6.QtCore import QSettings
+
+        import atprobe.gui.theme as theme_mod
+
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+        try:
+            monkeypatch.setattr(theme_mod, "_THEME_PREF_ORG", "ATProbeTestAbsent")
+            monkeypatch.setattr(theme_mod, "_THEME_PREF_APP", "ATProbeTestAbsent")
+            assert theme_mod.read_theme_pref() is None, "无记录应返回 None（调用方回退默认）"
+        finally:
+            QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
+
+
+class TestEnvConfigLazyCollection:
+    """P3：env_config 表单收集惰性化——击键只置脏，读取时全量收集一次."""
+
+    @staticmethod
+    def _make_widget(qapp, tmp_path) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.tabs.env_config import EnvConfigWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        env_file = tmp_path / "env.yaml"
+        env_file.write_text("net:\n  apn: cmnet\n", encoding="utf-8")
+
+        class _Main:
+            def env_config_path(self) -> str:
+                return str(env_file)
+
+        return EnvConfigWidget(TabBinding(type_name="env_config", params={}), _Main())  # type: ignore[arg-type]
+
+    def test_typing_does_not_collect_read_does(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        widget = self._make_widget(qapp, tmp_path)
+        calls: list[int] = []
+        orig = widget._collect_and_update_env  # noqa: SLF001
+
+        def _counting() -> None:
+            calls.append(1)
+            orig()
+
+        monkeypatch.setattr(widget, "_collect_and_update_env", _counting)
+
+        # 模拟用户击键：textChanged 只置脏标记，不触发全量收集
+        edits = widget._group_widgets["net"]["apn"]  # noqa: SLF001
+        edits.setText("cmwap")
+        edits.setText("cmnet")
+        assert calls == [], "击键不得全量收集（旧实现逐击键重建 EnvConfig）"
+
+        # 读取点（run_cases 消费的接口）收集一次并带回最新值
+        env = widget.current_env()
+        assert len(calls) == 1
+        assert str(env.groups()["net"]["apn"]) == "cmnet"
+        # 无后续编辑的重复读取不再收集
+        widget.current_env()
+        assert len(calls) == 1
+
+    def test_is_dirty_sees_pending_edits(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """惰性化后 is_dirty 仍能看到未收集的表单编辑（run_cases 前置 save 语义不变）."""
+        widget = self._make_widget(qapp, tmp_path)
+        edits = widget._group_widgets["net"]["apn"]  # noqa: SLF001
+        assert widget.is_dirty() is False  # 加载后未编辑 → 干净
+        edits.setText("changed")
+        assert widget.is_dirty() is True, "挂起编辑须经读取点收集后参与比对"

@@ -32,7 +32,6 @@ def run_gui(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 - 恢复失败不阻断启动（继续尝试现状运行）
             logger.exception("升级中断恢复检查失败")
 
-    from PySide6.QtCore import QSettings
     from PySide6.QtGui import QIcon, QPixmap
     from PySide6.QtWidgets import QApplication
 
@@ -61,10 +60,12 @@ def run_gui(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             pass  # 图标缺失不影响功能
 
-    from atprobe.gui.theme import apply_theme
+    from atprobe.gui.theme import apply_theme, read_theme_pref
 
-    # 加载记忆的主题（默认浅色）
-    dark = bool(QSettings("ATProbe", "ATProbe").value("theme/dark", False, type=bool))
+    # 加载记忆的主题（默认浅色）；P3 收敛：读取经 theme.read_theme_pref 单点
+    # （与 MainWindow 构造共用，org/app/key 与 bool 归一口径一致）
+    _pref = read_theme_pref()
+    dark = False if _pref is None else _pref
     apply_theme(app, dark=dark)
 
     win = MainWindow()
@@ -73,7 +74,7 @@ def run_gui(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import QTimer
 
     def _startup_check() -> None:
-        win._check_update(manual=False)  # noqa: SLF001
+        win._update_controller.check(manual=False)  # noqa: SLF001
 
     QTimer.singleShot(3000, _startup_check)
     return app.exec()

@@ -222,7 +222,7 @@ def test_no_stale_zip_is_noop(tmp_path: Path) -> None:
     assert fake.calls[0]["filename"] == _ZIP_NAME
 
 
-# ---------- GUI _download_worker 迁移（D-3/P1-9）----------
+# ---------- GUI 下载 worker（D-3/P1-9；T7/D-1 随 UpdateController 迁移）----------
 
 
 class _StubSignals:
@@ -234,41 +234,41 @@ class _StubSignals:
 
 
 class _StubWindow:
-    """替代 MainWindow：只提供 _download_worker 用到的信号与取消标记。"""
+    """替代 UpdateController：只提供 _download_worker 用到的信号与取消标记。"""
 
     def __init__(self) -> None:
-        self.update_download_progress = _StubSignals()
-        self.update_download_done = _StubSignals()
+        self.download_progress = _StubSignals()
+        self.download_done = _StubSignals()
         self._cancelled = False
 
 
 def test_gui_download_worker_uses_session() -> None:
     """GUI worker 经 UpdateSession.download 编排；进度经信号转发、结果投递 Path。"""
-    from atprobe.gui.mainwindow import MainWindow
+    from atprobe.gui.controllers.update import UpdateController
 
     result = DownloadResult(path=Path("tmp") / _ZIP_NAME, size=1)
     session = MagicMock()
     session.download.return_value = result
     stub = _StubWindow()
     with patch("atprobe.infra.update.session.UpdateSession", return_value=session):
-        MainWindow._download_worker(stub, _info())  # type: ignore[arg-type]
+        UpdateController._download_worker(stub, _info())  # type: ignore[arg-type]
     args, kwargs = session.download.call_args
     assert args[0].version == "0.3.0"
     assert callable(kwargs["progress_cb"])
     assert callable(kwargs["cancel_token"])
-    assert stub.update_download_done.events == [(result.path,)]
+    assert stub.download_done.events == [(result.path,)]
     kwargs["progress_cb"](10, 100)  # 进度回调 → 信号投递
-    assert stub.update_download_progress.events == [(10, 100)]
+    assert stub.download_progress.events == [(10, 100)]
 
 
 def test_gui_download_worker_failure_emitted() -> None:
-    """GUI worker：下载异常经 update_download_done 投递 Exception（弹窗路径）。"""
-    from atprobe.gui.mainwindow import MainWindow
+    """GUI worker：下载异常经 download_done 投递 Exception（弹窗路径）。"""
+    from atprobe.gui.controllers.update import UpdateController
 
     session = MagicMock()
     session.download.side_effect = DownloadError("签名验证失败——安装包可能被篡改，已拒绝安装")
     stub = _StubWindow()
     with patch("atprobe.infra.update.session.UpdateSession", return_value=session):
-        MainWindow._download_worker(stub, _info())  # type: ignore[arg-type]
-    assert len(stub.update_download_done.events) == 1
-    assert isinstance(stub.update_download_done.events[0][0], DownloadError)
+        UpdateController._download_worker(stub, _info())  # type: ignore[arg-type]
+    assert len(stub.download_done.events) == 1
+    assert isinstance(stub.download_done.events[0][0], DownloadError)

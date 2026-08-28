@@ -215,7 +215,12 @@ class _LibraryTreeEditor:
         self._commit_and_refresh(select=(_LEVEL_PROJECT, new))
 
     def _rename_group(self, proj: str, old: str) -> None:
-        """重命名功能组：add 新组迁移命令 + remove 旧组（model 无原生 rename_group）."""
+        """重命名功能组：add 新组迁移命令 + remove 旧组（model 无原生 rename_group）.
+
+        P3 事务化：迁移命令中途异常（如手改 YAML 混入空命令串）时回滚已迁移
+        项与新组再提示——旧实现留下"新组半迁移 + 旧组全量"的半改状态且异常
+        裸抛进 Qt 事件循环（无提示、树与库不一致）。
+        """
         new, ok = QInputDialog.getText(self._as_widget(), "重命名功能组", "新功能组名:", text=old)
         if not (ok and new.strip() and new.strip() != old):
             return
@@ -227,8 +232,18 @@ class _LibraryTreeEditor:
         except ValueError as exc:
             QMessageBox.warning(self._as_widget(), "无法重命名", str(exc))
             return
-        for c in cmds:
-            self._library.add_command(proj, new, c)
+        migrated: list[str] = []
+        try:
+            for c in cmds:
+                self._library.add_command(proj, new, c)
+                migrated.append(c)
+        except ValueError as exc:
+            # 回滚：撤回已迁移命令 + 删除本事务新建的组（add_group 成功即新建）
+            for c in reversed(migrated):
+                self._library.remove_command(proj, new, c)
+            self._library.remove_group(proj, new)
+            QMessageBox.warning(self._as_widget(), "无法重命名", f"迁移命令失败，已回滚：{exc}")
+            return
         self._library.remove_group(proj, old)
         self._commit_and_refresh(select=(_LEVEL_GROUP, proj, new))
 
