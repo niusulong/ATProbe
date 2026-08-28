@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
+import atprobe.domain.case.evaluator as evaluator
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.templater import UndefinedReferenceError
 from atprobe.infra.config.envconfig import EnvConfig
@@ -213,3 +217,67 @@ class TestAdversarialValues:
         assert evaluate('"{{a}}{{b}}" == "XY"', {"a": "X", "b": "Y"}) is True
         with pytest.raises(ExpressionError):
             evaluate('{{a}}{{b}} == "XY"', {"a": "X", "b": "Y"})
+
+
+class TestParseCache:
+    """Pf-5（设计 §4.3）：AST 缓存——poll/压测高频路径免重复 tokenize+parse."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_parse_cache(self) -> Iterator[None]:
+        # 冷缓存起点：防止先前测试（本文件或引擎/step_runner 测试）已缓存同名
+        # 表达式导致计数断言失真；结束后清理，避免污染后续测试
+        evaluator._parse_cached.cache_clear()
+        yield
+        evaluator._parse_cached.cache_clear()
+
+    @staticmethod
+    def _counting_tokenize(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """包装 evaluator._tokenize，记录每次调用的输入串（lru_cache 未命中才到达）."""
+        calls: list[str] = []
+        original = evaluator._tokenize
+
+        def wrapper(expr: str) -> object:
+            calls.append(expr)
+            return original(expr)
+
+        monkeypatch.setattr(evaluator, "_tokenize", wrapper)
+        return calls
+
+    def test_plain_expr_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 无 {{}}：processed == 原表达式（scope 无关），第二次求值全命中
+        calls = self._counting_tokenize(monkeypatch)
+        expr = 'cache_a == "1" or cache_b > 7'
+        assert evaluate(expr, {"cache_a": "1", "cache_b": "9"}) is True
+        assert evaluate(expr, {"cache_a": "2", "cache_b": "1"}) is False  # 同 AST 不同 scope
+        assert calls == [expr]  # 只 tokenize 一次
+
+    def test_mustache_same_value_hits_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # {{}}：同 scope 同值 → 处理串相同 → 第二次命中
+        calls = self._counting_tokenize(monkeypatch)
+        expr = '{{cache_v}} == "OK"'
+        assert evaluate(expr, {"cache_v": "OK"}) is True
+        assert evaluate(expr, {"cache_v": "OK"}) is True
+        assert calls == ['"OK" == "OK"']  # 只 tokenize 一次
+
+    def test_mustache_different_values_no_cross_talk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # scope 值不同 → 处理串不同 → 各自解析求值，不串台；值复现的轮次命中
+        calls = self._counting_tokenize(monkeypatch)
+        expr = "{{cache_w}} > 3"
+        assert evaluate(expr, {"cache_w": "23"}) is True
+        assert evaluate(expr, {"cache_w": "2"}) is False
+        assert evaluate(expr, {"cache_w": "23"}) is True  # 处理串复现 → 命中
+        assert calls == ['"23" > 3', '"2" > 3']
+
+    def test_empty_expression_raises_every_time(self) -> None:
+        # lru_cache 不缓存异常调用：空表达式每次都重抛（语义与无缓存一致）
+        for _ in range(2):
+            with pytest.raises(ExpressionError):
+                evaluate("", {})
+
+    def test_concurrent_evaluate_smoke(self) -> None:
+        # 冒烟：多线程共享缓存节点（eval 纯函数）求值无异常、无串台
+        expr = 'cc_a == "1" and cc_b is not null'
+        scopes = [{"cc_a": "1", "cc_b": "z"}, {"cc_a": "2", "cc_b": "z"}] * 40
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda s: evaluate(expr, s), scopes))
+        assert results == [s["cc_a"] == "1" for s in scopes]

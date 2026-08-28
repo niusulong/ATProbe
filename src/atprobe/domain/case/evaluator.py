@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import functools
 import re as _re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -97,6 +98,9 @@ def _tokenize(expr: str) -> list[_Token]:
 # ---------------------------------------------------------------------------
 # AST 节点
 # ---------------------------------------------------------------------------
+# 只读性契约（Pf-5）：各节点仅在 __init__ 赋值一次字段，eval(scope) 为纯函数
+# （只读自身字段 + 入参 scope），求值全程不改任何状态——节点对象跨线程共享与
+# _parse_cached 复用安全。
 class _Node:  # pragma: no cover - abstract
     def eval(self, scope: Mapping[str, object]) -> bool:  # noqa: A003
         raise NotImplementedError
@@ -407,6 +411,25 @@ def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -
     return "".join(out)
 
 
+@functools.lru_cache(maxsize=512)
+def _parse_cached(processed: str) -> _Node:
+    """按处理后字符串缓存 tokenize+parse 结果（Pf-5，设计 §4.3）.
+
+    键 = 处理后表达式：无 ``{{}}`` 时即原表达式（scope 无关，poll/压测重复求值全命中）；
+    含 ``{{}}`` 时替换结果相同即命中（变量值复现的轮次同样命中）。
+
+    - 线程安全：节点对象为只读数据（见 AST 节点节的只读性契约），
+      eval(scope) 是纯函数——跨线程共享安全。
+    - 异常：空表达式在此抛 ExpressionError，lru_cache 不缓存异常调用，每次重抛
+      （开销可接受，语义与无缓存一致；空表达式高频场景不存在）。
+    - maxsize=512：poll/压测的表达式数量级远小于此，超出 LRU 淘汰最旧，语义无差。
+    """
+    tokens = _tokenize(processed)
+    if not tokens:
+        raise ExpressionError("空表达式")
+    return _Parser(tokens).parse()
+
+
 def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvConfig | None = None) -> bool:
     """求值条件表达式，返回布尔结果.
 
@@ -419,8 +442,5 @@ def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvConfig | None = 
         UndefinedReferenceError: 旧写法 {{var}} 中 var 未定义。
     """
     processed = _preprocess(expr, scope, env)
-    tokens = _tokenize(processed)
-    if not tokens:
-        raise ExpressionError("空表达式")
-    node = _Parser(tokens).parse()
+    node = _parse_cached(processed)
     return node.eval(scope)
