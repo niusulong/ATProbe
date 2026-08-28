@@ -360,81 +360,87 @@ class SerialConnection:
             )
 
         try:
-            # 等待响应队列（带超时 + 取消轮询）
-            deadline = self._clock() + to
-            while True:
-                if cancel is not None and cancel.cancelled:
-                    # M1 修复：取消时统一抛 OperationCancelled（与 Fake/vsim 一致），
-                    # 上层 step_runner catch 后判 INTERRUPTED，而非旧实现的返回 CANCELLED
-                    # Response（被 _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉）。
-                    self._awaiting.clear()
-                    self._drain_response_q()
-                    raise OperationCancelled("命令等待被取消")
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    # 末次非阻塞检查：消除「get 超时与 break 之间响应入队」的窗口。
-                    # 若此刻读线程/断连刚好 put 了响应，取之返回（更准确：设备确实
-                    # 回了/确实断了，而非笼统 TIMEOUT）；取不到才走超时。
-                    try:
-                        resp = self._response_q.get_nowait()
-                        self._awaiting.clear()
-                        return resp
-                    except queue.Empty:
-                        break
+            return self._await_response(to, cancel)
+        finally:
+            # 无论正常返回/超时/异常，均复位 wait_urc 状态，避免污染下一条命令
+            self._reset_wait_urc()
+
+    def _await_response(self, timeout: float, cancel: CancelToken | None) -> Response:
+        """等待响应队列（带超时 + 取消轮询 + 超时快照 + 迟到收割，§7.5）.
+
+        send_command 与数据发送周期（批 2b）共用的等待原语。
+        调用前提：调用方已置 _awaiting、已清排响应队列。
+        """
+        # 等待响应队列（带超时 + 取消轮询）
+        deadline = self._clock() + timeout
+        while True:
+            if cancel is not None and cancel.cancelled:
+                # M1 修复：取消时统一抛 OperationCancelled（与 Fake/vsim 一致），
+                # 上层 step_runner catch 后判 INTERRUPTED，而非旧实现的返回 CANCELLED
+                # Response（被 _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉）。
+                self._awaiting.clear()
+                self._drain_response_q()
+                raise OperationCancelled("命令等待被取消")
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                # 末次非阻塞检查：消除「get 超时与 break 之间响应入队」的窗口。
+                # 若此刻读线程/断连刚好 put 了响应，取之返回（更准确：设备确实
+                # 回了/确实断了，而非笼统 TIMEOUT）；取不到才走超时。
                 try:
-                    resp = self._response_q.get(timeout=min(remaining, 0.2))
+                    resp = self._response_q.get_nowait()
                     self._awaiting.clear()
                     return resp
                 except queue.Empty:
-                    continue
-            # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
-            self._awaiting.clear()
-            with self._buffer_lock:
-                partial = bytes(self._buffer)
-                # 快照后清缓冲：若存在未完结半行置孤儿标记（收割窗口内到达的
-                # 续行由读线程字节级丢弃）
-                keep_re = self._wait_urc_re  # wait_urc 超时：目标行不得被 filter 剥离
-                self._reset_buffer_locked()
-            text = self._strip_filtered_urcs(
-                partial.decode("utf-8", errors="replace"), keep_re=keep_re
-            )
-            err = "响应超时" if wait_urc is None else "等待 URC 超时"
-            # 迟到响应收割（N58 实测 bug 修复）：超时预算小于设备实际响应时延时
-            # （典型：poll 末次 attempt 预算被钳到 0.05s，设备 ~60-90ms 才回），
-            # 本命令的响应会在超时返回之后、下一条命令 write 前后的窗口到达——
-            # 若不处理，读线程会把已在等待态的下一条命令错认为收件人，其响应
-            # 0ms 即回、内容却是本命令的应答（COM5 复现：ATE0 收到 +CEREG: 0,2 OK）。
-            # 对策：超时后保持等待态进入收割窗口，静默消费窗口内到达的迟到响应，
-            # 通道干净后再返回 TIMEOUT。窗口取 150ms（覆盖 0.05s 钳位预算 + 设备
-            # 典型时延）；期间到达的数据按正常分流（URC 派发/响应入队后丢弃）。
-            reap_deadline = self._clock() + _STALE_REAP_GRACE_S
-            self._awaiting.set()
+                    break
             try:
-                while True:
-                    if cancel is not None and cancel.cancelled:
-                        self._awaiting.clear()
-                        self._drain_response_q()
-                        raise OperationCancelled("命令等待被取消")
-                    remain = reap_deadline - self._clock()
-                    if remain <= 0:
-                        break
-                    try:
-                        # 迟到响应：取出即丢弃（其文本已在上方 partial 快照之外，
-                        # 设备对同一命令不会二次应答，无需合并）
-                        self._response_q.get(timeout=min(remain, 0.05))
-                    except queue.Empty:
-                        continue
-            finally:
+                resp = self._response_q.get(timeout=min(remaining, 0.2))
                 self._awaiting.clear()
-                self._drain_response_q()
-                # 收割窗口内可能又累积了半行数据（迟到响应的尾巴）：清缓冲，
-                # 避免泄漏给下一条命令（其入口本也会清，此处提前消除）。
-                with self._buffer_lock:
-                    self._reset_buffer_locked()
-            return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
+                return resp
+            except queue.Empty:
+                continue
+        # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
+        self._awaiting.clear()
+        with self._buffer_lock:
+            partial = bytes(self._buffer)
+            # 快照后清缓冲：若存在未完结半行置孤儿标记（收割窗口内到达的
+            # 续行由读线程字节级丢弃）
+            keep_re = self._wait_urc_re  # wait_urc 超时：目标行不得被 filter 剥离
+            self._reset_buffer_locked()
+        text = self._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
+        err = "响应超时" if self._wait_urc_re is None else "等待 URC 超时"
+        # 迟到响应收割（N58 实测 bug 修复）：超时预算小于设备实际响应时延时
+        # （典型：poll 末次 attempt 预算被钳到 0.05s，设备 ~60-90ms 才回），
+        # 本命令的响应会在超时返回之后、下一条命令 write 前后的窗口到达——
+        # 若不处理，读线程会把已在等待态的下一条命令错认为收件人，其响应
+        # 0ms 即回、内容却是本命令的应答（COM5 复现：ATE0 收到 +CEREG: 0,2 OK）。
+        # 对策：超时后保持等待态进入收割窗口，静默消费窗口内到达的迟到响应，
+        # 通道干净后再返回 TIMEOUT。窗口取 150ms（覆盖 0.05s 钳位预算 + 设备
+        # 典型时延）；期间到达的数据按正常分流（URC 派发/响应入队后丢弃）。
+        reap_deadline = self._clock() + _STALE_REAP_GRACE_S
+        self._awaiting.set()
+        try:
+            while True:
+                if cancel is not None and cancel.cancelled:
+                    self._awaiting.clear()
+                    self._drain_response_q()
+                    raise OperationCancelled("命令等待被取消")
+                remain = reap_deadline - self._clock()
+                if remain <= 0:
+                    break
+                try:
+                    # 迟到响应：取出即丢弃（其文本已在上方 partial 快照之外，
+                    # 设备对同一命令不会二次应答，无需合并）
+                    self._response_q.get(timeout=min(remain, 0.05))
+                except queue.Empty:
+                    continue
         finally:
-            # 无论正常返回/超时/异常，都复位 wait_urc 状态，避免污染下一条命令
-            self._reset_wait_urc()
+            self._awaiting.clear()
+            self._drain_response_q()
+            # 收割窗口内可能又累积了半行数据（迟到响应的尾巴）：清缓冲，
+            # 避免泄漏给下一条命令（其入口本也会清，此处提前消除）。
+            with self._buffer_lock:
+                self._reset_buffer_locked()
+        return Response(text=text, status=ResponseStatus.TIMEOUT, error=err)
 
     def _reset_buffer_locked(self) -> None:
         """清空响应缓冲（调用方须已持 _buffer_lock）.

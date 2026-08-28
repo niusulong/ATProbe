@@ -13,6 +13,7 @@ import pytest
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 from atprobe.infra.serial.connection import SerialConnection
 from atprobe.infra.serial.exceptions import SendError
+from atprobe.infra.serial.interfaces import Response, ResponseStatus
 
 
 class _StubSerial:
@@ -87,3 +88,38 @@ class TestPortManagerWriteBytes:
         pm = PortManager()
         with pytest.raises(KeyError):
             pm.write_bytes("COM9", b"data")
+
+
+class TestAwaitResponsePrimitive:
+    """批 2a T1：_await_response 可独立于 send_command 组合使用（数据路径前置）.
+
+    手动组合「置等待态 → write_bytes → _await_response」等价一次命令等待。
+    """
+
+    def test_manual_cycle_returns_complete(self, monkeypatch) -> None:
+        import threading
+
+        conn = _make_connection(monkeypatch)
+        # 等价 send_command 前半（置等待态 → 清排 → 清缓冲/记回显），不经过 send_command
+        conn._awaiting.set()
+        conn._drain_response_q()
+        with conn._buffer_lock:
+            conn._reset_buffer_locked()
+            conn._echo_line = b"AT"
+        conn.write_bytes(b"AT\r\n")
+        conn._process_incoming(b"\r\nOK\r\n")
+
+        result: list[Response] = []
+
+        def _wait() -> None:
+            result.append(conn._await_response(1.0, None))
+
+        t = threading.Thread(target=_wait)
+        t.start()
+        t.join(timeout=5.0)
+
+        # 已入队的完整响应被等待原语取走：COMPLETE 且文本含 OK
+        assert not t.is_alive()
+        assert len(result) == 1
+        assert result[0].status is ResponseStatus.COMPLETE
+        assert "OK" in result[0].text
