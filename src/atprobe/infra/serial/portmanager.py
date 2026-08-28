@@ -172,11 +172,15 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             if conn is not None:
                 conn.bind_log_file(None)
 
-    def configs(self) -> set[str]:
-        """已注册端口名快照（持锁收集）——供 GUI connected_ports 等视图使用，
-        替代越过封装裸迭代 _configs（F-3 同型崩溃点，批 1 复核发现）。"""
+    def configs(self) -> list[str]:
+        """已注册端口名快照（持锁收集、排序定序）——供 GUI connected_ports 等视图使用，
+        替代越过封装裸迭代 _configs（F-3 同型崩溃点，批 1 复核发现）。
+
+        返回排序 list 而非 set：str 哈希随机化使 set 跨进程迭代序不定，
+        monitor 复选框/下拉等视图顺序会漂移；sorted 定序。
+        """
         with self._lock:
-            return set(self._configs.keys())
+            return sorted(self._configs.keys())
 
     # ------------------------------------------------------------------
     # §3.1 命令发送（含重连，§4.2）

@@ -879,16 +879,23 @@ class SerialConnection:
 
         替代 PortManager 直写 ``conn._log_file`` 的越封装访问（§3.3）。None 即
         解绑（用例结束/端口关闭）——_log_tx/_log_rx 据此停写该用例日志。
+        读线程经 _log_tx/_log_rx 快照读，绑定切换的竞态已消除。
         """
         self._log_file = log_file
 
     def _log_tx(self, data: bytes) -> None:
-        if self._raw_logger is not None and self._log_file is not None:
-            self._raw_logger.log(self._log_file, "TX", data)  # type: ignore[arg-type]
+        # P2 加固：单次快照读——引擎线程 clear 绑定的字节码交错会使第二次读得 None，
+        # RawLogger._write 对 None 的 stem.parent 抛 AttributeError（未捕获）→ 写入线程
+        # 整体死亡、全部原始日志静默停写。局部变量消除该窗口。
+        lf = self._log_file
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "TX", data)
 
     def _log_rx(self, data: bytes) -> None:
-        if self._raw_logger is not None and self._log_file is not None:
-            self._raw_logger.log(self._log_file, "RX", data)  # type: ignore[arg-type]
+        # 同 _log_tx：单次快照读消除双读竞态（写入线程存活防线）。
+        lf = self._log_file
+        if self._raw_logger is not None and lf is not None:
+            self._raw_logger.log(lf, "RX", data)
 
     # ------------------------------------------------------------------
     # 重连支持（§4.2）—— 由 PortManager 调用
