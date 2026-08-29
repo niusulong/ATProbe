@@ -61,12 +61,18 @@
 | `mcp.host` | 字符串 | `127.0.0.1` | MCP serve 监听地址；默认故意回环（最小暴露面），远程访问需显式 `0.0.0.0` |
 | `mcp.port` | 整数 | `8470` | MCP serve 监听端口 |
 | `mcp.token_file` | 字符串 | 不设置 | serve 形态的 Token 文件（可选；Token 四级优先级的第 4 级） |
+| `mcp.allowed_roots` | 字符串列表 | `[]` | MCP 路径参数（用例/套件/data 文件）的白名单根目录（§3.9）；空 = 仅 cases_dir |
+| `update.allowed_hosts` | 字符串列表 | `[]` | 更新下载 URL 的 host 追加白名单（§3.10）；空 = 仅内置 GitHub 域 |
 
 注意：`log.keep`（日志保留份数）字段**已移除**——它从未接入任何清理逻辑，
 写进文件会被静默忽略；日志目录按会话留存，需手动清理。
 
-`mcp.*` 三键仅 `serve` 形态消费（`stdio` 形态忽略），命令行
+`mcp.*` 四键仅 `serve` 形态消费（`stdio` 形态忽略），命令行
 `--host`/`--port`/`--token-file` 优先于配置；详见 `mcp-guide.md` §4.2/§7。
+
+`mcp.allowed_roots` 是**管理员语义的显式扩权**：判定按「路径在根目录树内」
+（`is_relative_to`），配置父目录即放行整棵子树——配 `D:\` 等于全盘可达。
+始终配置**最小必要目录**（如共享用例库的根），不要图省事配大盘符根。
 
 ### 3.2 ports：复合端口表达式
 
@@ -129,8 +135,9 @@ examples 目录副本，在开发态命中仓库内同名目录。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `color` | `true` | 结果/错误着色；重定向到文件等非终端环境自动忽略，不会出乱码 |
+| `color` | `true` | 结果/错误着色；重定向到文件等非终端环境自动忽略，不会出乱码。**必须是裸布尔**——`"false"`（带引号）会报配置错误（防字符串被强转为真） |
 | `command_truncate` | `40` | 控制台显示 AT 命令的截断长度；过长命令截断显示，日志文件仍完整 |
+| `mask_credentials` | `false` | 凭据脱敏（v0.10+）：开启后呈现层（控制台/HTML 报告/GUI 进度/MCP 事件）掩 `AT+CPIN=`/`AT+CPINW=`/`AT+CPWD=`/`AT+CLCK=` 的参数段为 `****`；**rawlog 原始字节日志不掩**（字节核对用途）。须为裸布尔（同 `color`） |
 
 ### 3.6 log：原始日志
 
@@ -184,6 +191,40 @@ ports:
 urc_filter:
   - '^\$MYGPSPOS:'           # 剥离每秒到达的 GPS 行；URC 事件仍照常派发
 ```
+
+### 3.9 mcp.allowed_roots：MCP 路径白名单（S-8/S-3）
+
+MCP 工具（list_cases / start_run 等）接受客户端传入的路径参数，安全边界 =
+「cases_dir ∪ mcp.allowed_roots」。白名单外路径返回 INVALID_INPUT：
+
+```yaml
+mcp:
+  allowed_roots:
+    - D:\shared-testcases   # 共享用例库根；渲染后的 data 文件路径也受此约束
+```
+
+- 空（默认）= 仅 `cases_dir` 可达；
+- 每个根**按整棵目录树**放行（路径 `is_relative_to` 判定）——配父目录即扩权
+  整棵子树，属管理员语义，配最小必要目录（见 §3.1 注）；
+- `data` 步骤引用的文件（含 `{{file_size()}}`）同样受此白名单约束——不可信
+  用例不能借 MCP 通道读取白名单外文件。
+
+### 3.10 update：更新下载白名单（S-5/S-6）
+
+应用内更新（CLI `atprobe update` / GUI 检查更新）的下载 URL 强制 HTTPS 且
+host 必须在白名单内（防重定向降级到任意识别域）。内置白名单覆盖 GitHub
+Release 全链路（github.com、objects.githubusercontent.com、github-releases.
+githubusercontent.com、api.github.com）；自建镜像/代理时追加：
+
+```yaml
+update:
+  allowed_hosts:
+    - mirrors.example.com    # 追加（不收窄内置白名单）；必须是 https 可达的 host
+```
+
+CLI 侧用 `atprobe update --config <path>` 指定配置文件（定位规则与 run/list
+一致：显式 --config > 打包态 exe 同级 > cwd）。发布包完整性另有 minisign
+签名校验（`docs/user/update-signing.md`），本段只管 host 白名单。
 
 ## 4. env.yaml 完全说明
 
@@ -302,6 +343,11 @@ mcp:                             # MCP 服务（仅 serve 形态消费，stdio �
   host: 127.0.0.1                # serve 监听地址：默认回环，远程访问需显式 0.0.0.0
   port: 8470                     # serve 监听端口
   # token_file: ./mcp-token.txt  # 可选：serve 的第 4 级 Token 来源（mcp-guide.md §4.2）
+  # allowed_roots:               # 可选：MCP 路径白名单追加根（§3.9；管理员语义，配最小目录）
+  #   - D:\shared-testcases
+
+update:                          # 应用内更新下载白名单（§3.10；默认仅内置 GitHub 域）
+  allowed_hosts: []              # 空列表 = 不追加；自建镜像时填 host，须 https 可达
 ```
 
 ### 5.2 env.yaml（节选带注释，完整 18 组见 examples/env.yaml）

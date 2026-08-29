@@ -99,6 +99,10 @@ teardown:                             # 后置步骤：无条件执行，用于�
 | `retry` | RetryConfig | 重试配置 `{count, interval}`；与 `poll` 互斥（§7） |
 | `poll` | PollConfig | 轮询配置 `{until, timeout, interval}`；与 `retry`/`wait_urc` 互斥（§7） |
 | `wait_urc` | str | 异步指令：OK 仅受理，等到匹配此正则的 URC 才算终结（§7） |
+| `expect` | str | 附加完成正则（与 `wait_urc` 互斥）：响应命中即视为本步完成——两阶段发送的 `
+>` 提示符等非 OK/ERROR 终结形态 |
+| `interval` | int | 本步每次发送前的固定延迟（毫秒，≥0）——如 CIPSEND 收到 `
+>` 提示符后延迟 50-100ms 再发数据 |
 | `extract` | dict | `{变量名: 正则}`，提取变量入池（§5） |
 | `assert` | 单元素或列表 | 断言；支持单键式与列表式两种写法（§4） |
 | `on_failure` | str | 本步失败策略 `abort`/`skip`/`continue`，覆盖用例级配置 |
@@ -109,11 +113,16 @@ teardown:                             # 后置步骤：无条件执行，用于�
 steps:
   - data:
       inline: "Hello{{payload_suffix}}"   # 或 file: ./payload.bin；值同样走模板渲染
+      # inline_hex: "48656c6c6f"          # 或十六进制串（三选一）；渲染后按 hex 解析发送
       chunk_threshold: 4096   # 超过该字节数才分块（默认 4096）
       chunk_size: 1024        # 每块字节数（默认 1024，校验 ≤ threshold）
       chunk_interval: 50      # 块间隔毫秒（默认 50）
       append_terminator: false  # 是否在结尾追加终止符（默认 false）
 ```
+
+`inline_hex` 的**延迟校验边界**：值含 `{{` 占位符时，解析期无法静态验证十六进制
+合法性（模板变量渲染前未知），改为引擎层在渲染后复核——非法 hex 串或零字节数据
+在执行时报错（而非解析期）。不含 `{{` 的字面量仍在解析期校验。
 
 失败策略三值语义：
 
@@ -197,6 +206,20 @@ steps:
 - command: AT+CEREG?
   extract:
     cereg_stat: '\+CEREG:\s*\d+,(\d)'   # 响应 +CEREG: 0,1 → cereg_stat="1"
+```
+
+**单行业务码的提取正则用排除字符类 `([^
+]+)`，不要用贪婪 `.+`**：响应文本
+逐行保留 ``（框架不做行尾剥除），`(.+)` 会连同行尾 `` 一起吞入变量——后续
+拿去拼 AT 命令或做 `equals` 断言时出现不可见的尾随回车，极难排查：
+
+```yaml
+- command: AT+FSFL=...
+  extract:
+    # +FSFL: 0,"a.txt",1024 → 提取文件名；[^
+]+ 保证不吃行尾
+    fs_name: '\+FSFL:\s*\d+,"([^
+]+)"'
 ```
 
 ### 5.2 模板渲染 {{var}}
@@ -350,6 +373,8 @@ steps:
 - 每行 dict 的值可为 str/int/float/bool；每行展开为一个实例，报告名追加 `#1`、`#2`… 后缀。
 - 参数在 setup 之前注入用例变量池，**优先级最高**（模板查找先于环境配置默认组）；后续 extract 同名变量可覆盖。
 - 空列表（默认）即普通非参数化用例。
+- **保留字拒绝**：行内键名不可为 `timestamp` / `port`——二者每步无条件内置注入，
+  同名参数会被覆盖（解析期直接报错，与 `extract` 保留字同款校验）。
 
 ---
 
@@ -488,12 +513,29 @@ AT 响应中冒号后有无空格、空格有几个，不同固件不同。严�
 | 症状/误区 | 原因与对策 |
 |---|---|
 | extract 没匹配上，后续模板报「未定义」 | 无匹配的变量**不写入池**；检查正则或用 `is null` 判别 |
-| `not_contains: ""` 或 `matches: ""` 被拒 | 空串行为反直觉（恒失败），解析期直接报错；空响应断言用 `equals: ''` |
+| `contains/not_contains/matches: ""` 被拒 | 空串行为反直觉（恒真/恒失败），解析期直接报错；空响应断言用 `equals: ''` |
+| parameters 行内写了 `timestamp`/`port` 被拒 | 与每步内置注入的保留字冲突，改名即可（§8） |
 | retry 与 poll 同时写报错 | 二者互斥（wait_urc 与 poll 也互斥），解析期校验 |
 | YAML 键拼错报错 | 模型禁止未知键——这是特性，检查拼写（如 `not_contains` 不是 `notcontains`） |
 | when 里写 `{{var}}` 行为不同 | 旧写法未定义直接报错；新用例用裸名（未定义→null） |
 | 压测中步骤失败却继续跑 | 压测中未配 on_failure 的步骤默认 `continue`；要中止就配 `abort` 或 `abort_on_failure: true` |
 | 用例被记 SKIPPED 而非 FAIL | setup 任一步 FAIL/SKIPPED 即整用例 SKIPPED；看 error_msg 里首个失败步骤原因 |
+
+### 12.6 原始日志明文敏感信息与脱敏开关
+
+原始串口日志（`logs/<会话>/.../*.log`）按**字节级原样**记录 TX/RX——这是它的
+用途（发送前后字节核对），也因此**不脱敏**：含 PIN/密码的 AT 命令（如
+`AT+CPIN=1234`）会明文入日志。共享测试环境注意日志目录的访问控制。
+
+呈现层（控制台输出 / HTML 报告 / GUI 进度面板 / MCP 事件流）可通过配置开启脱敏：
+
+```yaml
+console:
+  mask_credentials: true   # 默认 false（零变化）；掩 AT+CPIN=/AT+CPINW=/AT+CPWD=/AT+CLCK= 的参数段为 ****
+```
+
+掩码只作用于呈现文本，不影响断言、提取与统计；rawlog 与 GUI 手动调试台的
+原始 RX 视图永远不掩（与 rawlog 同语义）。
 
 ---
 
