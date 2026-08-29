@@ -57,7 +57,7 @@ class _Prompt:
 
     无尾 CRLF、无 OK/ERROR——裸数据发送仍待继续（手册 TCPSEND：``<CR><LF>><content>``）。
     TCPSEND 提示符 ``b">"``（无尾空格）、UDPSEND ``b"> "``（带尾空格，手册响应格式
-    ``<CR><LF>> <CR><LF>OK``）、FSWF ``b">"``（形态手册未定义，默认同 TCPSEND）。
+    ``<CR><LF>> <CR><LF>OK``）、FSWF ``b"> "``（真机实测带尾空格，见 _h_fswf docstring）。
     """
 
     data: bytes

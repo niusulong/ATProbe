@@ -36,17 +36,17 @@ class TestParseWarnings:
     """Step/Case 校验期的两类告警（caplog 捕获 _log.warning）."""
 
     def test_expect_without_assert_warns(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Step(command='AT+FSWF="t.txt",0,16,5000', expect="\\r\\n> ")
         assert any("expect 但无 assert" in r.message for r in caplog.records)
 
     def test_wait_urc_without_assert_warns(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Step(command="AT$MYGPSPOS=0,1", wait_urc="\\$MYGPSPOS")
         assert any("wait_urc 但无 assert" in r.message for r in caplog.records)
 
     def test_expect_with_assert_no_warn(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Step(
                 command='AT+FSWF="t.txt",0,16,5000',
                 expect="\\r\\n> ",
@@ -56,7 +56,7 @@ class TestParseWarnings:
 
     def test_prompt_step_followed_by_command_warns(self, caplog: pytest.LogCaptureFixture) -> None:
         """expect 提示符步骤的直接后继是 command（漏写 data）→ 静态告警."""
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Case(
                 name="漏data",
                 steps=(
@@ -72,7 +72,7 @@ class TestParseWarnings:
 
     def test_prompt_step_last_in_phase_warns(self, caplog: pytest.LogCaptureFixture) -> None:
         """expect 提示符步骤是阶段末步（无后继）→ 同款告警."""
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Case(
                 name="末步悬置",
                 steps=(Step(command='AT+FSWF="t.txt",0,16,5000', expect="\\r\\n> "),),
@@ -81,7 +81,7 @@ class TestParseWarnings:
 
     def test_prompt_step_followed_by_data_no_warn(self, caplog: pytest.LogCaptureFixture) -> None:
         """正常两阶段配对（expect → data）→ 不告警."""
-        with caplog.at_level(logging.WARNING, logger="atprobe.domain.case.models"):
+        with caplog.at_level(logging.WARNING):
             Case(
                 name="正常两阶段",
                 steps=(
@@ -187,6 +187,21 @@ class TestRuntimePendingPrompt:
         with caplog.at_level(logging.WARNING, logger="atprobe.engine.step_runner"):
             _run(Step(data={"inline": "0123456789abcdef"}), ctx, sender, index=2)
         assert any("未回 OK" in r.message for r in caplog.records)
+        assert ctx.pending_prompt is None
+
+    def test_cme_error_terminated_command_does_not_set_pending(self) -> None:
+        """m-2 收窄：设备拒绝两阶段命令（+CME ERROR 终结，COMPLETE 状态）
+        ——expect 从未命中提示符，不得置悬置（否则下一步收到误导性告警）."""
+        ctx = CaseContext()
+        cme = Response(text="\r\n+CME ERROR: 53\r\n", status=ResponseStatus.COMPLETE)
+        sender = FakeCommandSender([cme])
+        _run(
+            Step(
+                command='AT+FSWF="t.txt",0,16,240000', expect="\r\n> ", assert_={"contains": "OK"}
+            ),
+            ctx,
+            sender,
+        )
         assert ctx.pending_prompt is None
 
     def test_ok_terminated_command_does_not_set_pending(self) -> None:

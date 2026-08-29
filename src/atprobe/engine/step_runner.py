@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -55,6 +56,12 @@ from atprobe.infra.serial.interfaces import (
 from atprobe.infra.serial.sleep import cancellable_sleep
 
 _log = logging.getLogger(__name__)
+
+# 终结行形态（悬置判定的"设备回了终结行而非提示符等待"分支）：响应末行是
+# OK / ERROR / +C[ME] ERROR: <码> 任一终结行 → 设备未进入等数据态。口径对齐
+# line_assembler._ERROR_RE（终结行判定单一来源在串口层，此处为文本尾部匹配
+# 的消费侧副本——不 import 私有名，形态变化时两处同步）。
+_TERMINAL_LINE_RE = re.compile(r"(?:^|\r\n)(?:OK|ERROR|\+CM[ES] ERROR:[^\r\n]*)\r?\n?$")
 
 
 @dataclass
@@ -175,15 +182,15 @@ def execute_step(
 
     # ------------------------------------------------------------------
     # 0a. 两阶段悬置检查（真机验收教训 2026-08-29）：上一 command 步骤经
-    #     expect 命中提示符后设备进入等数据态，若声明的 data 步骤未执行
-    #     （漏写/when 跳过/断言中止在 data 之前/数据装配失败），本步骤的
-    #     AT 命令字节会被设备当作数据吞掉（COM5 实证）。一次性告警并清除
+    #     expect 终结（提示符形态）后设备进入等数据态，若声明的 data 步骤
+    #     未执行（漏写/when 跳过/断言中止在 data 之前/数据装配失败），本步骤
+    #     的 AT 命令字节会被设备当作数据吞掉（COM5 实证）。一次性告警并清除
     #     （设备随后按 <time> 超时自行退出等待态）。
     # ------------------------------------------------------------------
     if ctx.pending_prompt is not None and step.data is None:
         _log.warning(
-            "步骤 %d 前存在两阶段悬置（expect %r 已命中提示符但数据未发送）："
-            "设备仍在等数据态，本命令的字节可能被当作数据吞掉",
+            "步骤 %d 前存在两阶段悬置（expect %r 已终结但声明的数据未发送）："
+            "设备可能仍在等数据态，本命令的字节可能被当作数据吞掉",
             index,
             ctx.pending_prompt,
         )
@@ -274,9 +281,13 @@ def execute_step(
 
     # ------------------------------------------------------------------
     # 两阶段悬置簿记（与入口 0a 检查配对，见 CaseContext.pending_prompt）：
-    # - command 步骤 expect 命中提示符完成（COMPLETE 且文本不以 OK 结尾——
-    #   OK 结尾说明设备回了终结行而非提示符等待）→ 置悬置标记（无论本步断言
-    #   结果如何——断言失败中止正是不发数据的常见路径）；
+    # - command 步骤 expect 终结且响应非 OK/ERROR 结尾（提示符等待形态——
+    #   OK/ERROR 结尾说明设备回了终结行而非进入等数据态；设备拒绝两阶段命令
+    #   的 +CME ERROR 终结亦因此不误置）→ 置悬置标记（无论本步断言结果
+    #   如何——断言失败中止正是不发数据的常见路径）；
+    # - 已知假阳性（一次性 warn-only，噪音可接受）：expect 用于等业务码而非
+    #   提示符时（如 +TCPSEND: SOCKET ID OPEN FAILED 分支命中）同样置位——
+    #   设备并未等数据，但该告警仅提示"可能被吞"，不改变执行；
     # - data 步骤收尾：收到 OK（COMPLETE）→ 会话完整关闭，清除；否则（设备
     #   未确认）→ 立即告警（会话状态不明）并清除（一次性）。
     # ------------------------------------------------------------------
@@ -295,7 +306,7 @@ def execute_step(
     elif (
         step.expect is not None
         and attempt.response.status is ResponseStatus.COMPLETE
-        and not attempt.response.text.rstrip().endswith("OK")
+        and not _TERMINAL_LINE_RE.search(attempt.response.text)
     ):
         ctx.pending_prompt = step.expect
 
