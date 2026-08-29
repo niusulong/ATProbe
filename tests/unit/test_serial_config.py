@@ -31,6 +31,41 @@ class TestFrameFormat15Stopbits:
         with pytest.raises(ValueError, match="帧格式"):
             FrameFormat.parse("9N1")
 
+    def test_default_stopbits_float_and_display_normalized(self) -> None:
+        """默认 stopbits 浮点口径（1.0）且 __str__ 展示归一（不出现 "8N1.0"）."""
+        ff = FrameFormat()
+        assert ff.stopbits == 1.0
+        assert isinstance(ff.stopbits, float)
+        assert str(ff) == "8N1"
+        assert FrameFormat.parse(str(ff)) == ff
+
+
+class TestFrameFormatToSerialKwargs:
+    """帧格式 → pyserial 参数映射（8N1.5 经 _build_serial 透传 stopbits=1.5）."""
+
+    @pytest.fixture()
+    def captured_kwargs(self, monkeypatch):  # type: ignore[no-untyped-def]
+        """构造 SerialConnection 并捕获 _build_serial 传给 serial.Serial 的参数."""
+        from atprobe.infra.serial import connection as conn_mod
+        from atprobe.infra.serial.config import PortConfig
+
+        captured: dict[str, object] = {}
+
+        class _FakeSerial:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        monkeypatch.setattr(conn_mod.serial, "Serial", _FakeSerial)
+        cfg = PortConfig(name="COM_TEST", frame=FrameFormat.parse("8N1.5"))
+        conn = conn_mod.SerialConnection(cfg)
+        conn._build_serial()
+        return captured
+
+    def test_8n15_maps_stopbits_1_5(self, captured_kwargs: dict[str, object]) -> None:
+        assert captured_kwargs["stopbits"] == 1.5
+        assert captured_kwargs["bytesize"] == 8
+        assert captured_kwargs["parity"] == "N"
+
 
 class TestDataStreamSpecValidation:
     """F-5：chunk 参数校验（chunk_size<=0 会致 send_chunks 死循环）."""

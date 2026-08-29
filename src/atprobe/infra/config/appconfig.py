@@ -287,6 +287,13 @@ def load_app_config_file(path: str | Path) -> AppConfig:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise AppConfigError(f"无法读取配置文件：{exc.strerror or exc}", source=str(p)) from exc
+    except UnicodeDecodeError as exc:
+        # F-16 同型守卫（T7 审查 M-1）：GBK 等非 UTF-8 配置裸抛 UnicodeDecodeError
+        # 会穿透 CLI（traceback+exit 1，违反 AppConfigError→exit 2 契约）并使
+        # GUI 启动即崩（MainWindow.__init__ 无包裹）
+        raise AppConfigError(
+            f"配置文件非 UTF-8 编码，请转存为 UTF-8：{exc}", source=str(p)
+        ) from exc
     return load_app_config(text, source=str(p))
 
 

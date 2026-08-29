@@ -61,8 +61,10 @@ def read_suite_meta(path: Path) -> SuiteMeta:
 
     try:
         raw = YAML(typ="safe").load(StringIO(path.read_text(encoding="utf-8")))
-    # F-16 修复：GBK 等非 UTF-8 文件抛 UnicodeDecodeError（ValueError 子类，
-    # 非 OSError）——case/suite parser 均已收敛，此处漏网使 list 命令裸崩
+    # F-16：GBK 等非 UTF-8 文件抛 UnicodeDecodeError（ValueError 子类，
+    # 非 OSError）。parse_case_file/parse_suite_file 文件包装层已同口径收敛
+    # （F-16 同型补漏）；此处 read_suite_meta 是独立读文件入口，同样兜住
+    # （list 展示容错语义：读不出元信息返回空值，不裸崩）
     except (YAMLError, OSError, UnicodeDecodeError):
         return SuiteMeta(None, None, None, ())
     if not isinstance(raw, dict):

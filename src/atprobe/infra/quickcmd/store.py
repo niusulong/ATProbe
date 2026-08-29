@@ -37,12 +37,19 @@ def load_library(path: Path) -> CommandLibrary:
     """从 YAML 文件加载命令库。
 
     文件缺失或为空 → 返回空库（不抛错，幂等）。
-    格式非法 → 抛 QuickCmdStoreError。
+    格式非法或非 UTF-8 编码 → 抛 QuickCmdStoreError。
     """
     if not path.exists():
         return CommandLibrary.empty()
     try:
         text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # F-16 同型：GBK 等非 UTF-8 文件在 read_text 处抛 UnicodeDecodeError
+        # （ValueError 子类，非 OSError），旧实现裸抛逃逸到 GUI/CLI——收敛为
+        # QuickCmdStoreError（模块契约：文件读不出来 → QuickCmdStoreError）
+        raise QuickCmdStoreError(
+            f"命令库文件非 UTF-8 编码（{path}），请转存为 UTF-8：{exc}"
+        ) from exc
     except OSError as exc:
         raise QuickCmdStoreError(f"无法读取命令库文件：{exc}") from exc
     if not text.strip():

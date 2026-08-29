@@ -89,10 +89,20 @@ def parse_case(data: str | bytes | dict[str, Any], *, source: str | None = None)
 
 
 def parse_case_file(path: str | Path) -> Case:
-    """从文件解析用例."""
+    """从文件解析用例.
+
+    Raises:
+        CaseParseError: 文件不可读、非 UTF-8 编码或解析/校验失败。
+    """
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # F-16 同型：GBK 等非 UTF-8 文件在 read_text 处抛 UnicodeDecodeError
+        # （ValueError 子类，非 OSError），旧实现裸抛逃逸——须收敛为 CaseParseError
+        raise CaseParseError(
+            f"用例文件非 UTF-8 编码，无法解析（请转存为 UTF-8）：{exc}", source=str(p)
+        ) from exc
     except OSError as exc:
         raise CaseParseError(f"无法读取用例文件：{exc.strerror or exc}", source=str(p)) from exc
     return parse_case(text, source=str(p))

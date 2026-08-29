@@ -3309,3 +3309,77 @@ class TestEnvConfigLazyCollection:
         assert widget.is_dirty() is False  # 加载后未编辑 → 干净
         edits.setText("changed")
         assert widget.is_dirty() is True, "挂起编辑须经读取点收集后参与比对"
+
+
+class TestManualDebugFrameOptions:
+    """P3：手动调试页帧格式下拉补 8N1.5（对齐 FrameFormat 模型支持集）."""
+
+    def test_frames_options_cover_8n15(self) -> None:
+        from atprobe.gui.tabs.manual_debug import _FRAMES
+        from atprobe.infra.serial.config import FrameFormat
+
+        assert "8N1.5" in _FRAMES, "下拉缺 8N1.5：1.5 停止位不可选（下拉不可编辑）"
+        # 下拉全部选项均可被模型解析（下拉与模型支持集不脱钩）
+        for f in _FRAMES:
+            assert FrameFormat.parse(f) is not None
+
+    def test_frame_combo_items_match_options(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        from atprobe.gui.tabs.manual_debug import _FRAMES, ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        try:
+            items = [widget.frame_combo.itemText(i) for i in range(widget.frame_combo.count())]
+            assert items == _FRAMES
+            assert widget.frame_combo.currentText() == "8N1", "默认仍是 8N1"
+        finally:
+            widget.cleanup()
+
+
+class TestFileNameLabelsPlainText:
+    """P3：承接 execution_progress 之外的 QLabel AutoText 残留——文件名标签锁 PlainText."""
+
+    def test_manual_debug_file_label_plain_and_literal(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import Qt
+
+        from atprobe.gui.tabs.manual_debug import ManualDebugWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        widget = ManualDebugWidget(TabBinding(type_name="manual_debug", params={}), _FakeMain())  # type: ignore[arg-type]
+        try:
+            assert widget.file_label.textFormat() == Qt.TextFormat.PlainText
+            # 文件名含 <...> 片段（POSIX 合法文件名）按字面显示——AutoText 下会被
+            # 当富文本解释（视觉注入/丢字）。注：不含 "/"，Windows Path 解析不拆
+            widget._file_path = str(tmp_path / "<b>evil.bin")  # noqa: SLF001
+            widget._update_file_label()  # noqa: SLF001
+            assert "<b>evil.bin" in widget.file_label.text()
+        finally:
+            widget.cleanup()
+
+    def test_command_library_labels_plain(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from pathlib import Path
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QLabel
+
+        from atprobe.domain.quickcmd.models import CommandLibrary
+        from atprobe.gui.widgets.command_library import CommandLibraryPanel, LibraryManagerDialog
+
+        panel = CommandLibraryPanel()
+        assert panel._file_label.textFormat() == Qt.TextFormat.PlainText  # noqa: SLF001
+
+        # 管理对话框：路径名含 <...> 片段（POSIX 合法）时构造即显示，须按字面
+        # （路径仅用于展示，不需真实存在）；树节点名称标签（用户命名的
+        # 项目/功能组名，经 _make_node_widget 的 QLabel 渲染）同样锁 PlainText
+        lib = CommandLibrary.empty()
+        lib.add_project("<b>evil")
+        markup_path = Path(str(tmp_path), "<b>lib.yaml")
+        dlg = LibraryManagerDialog(lib, markup_path)
+        try:
+            assert dlg._file_label.textFormat() == Qt.TextFormat.PlainText  # noqa: SLF001
+            assert "<b>lib.yaml" in dlg._file_label.text()  # noqa: SLF001
+            node_labels = dlg.tree.findChildren(QLabel)  # noqa: SLF001
+            assert node_labels, "管理对话框树应含节点名称标签"
+            assert all(lbl.textFormat() == Qt.TextFormat.PlainText for lbl in node_labels)
+        finally:
+            dlg.deleteLater()

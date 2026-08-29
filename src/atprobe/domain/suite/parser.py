@@ -81,10 +81,20 @@ def parse_suite(data: str | bytes | dict[str, Any], *, source: str | None = None
 
 
 def parse_suite_file(path: str | Path) -> Suite:
-    """从文件解析套件."""
+    """从文件解析套件.
+
+    Raises:
+        SuiteParseError: 文件不可读、非 UTF-8 编码或解析/校验失败。
+    """
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # F-16 同型：GBK 等非 UTF-8 文件在 read_text 处抛 UnicodeDecodeError
+        # （ValueError 子类，非 OSError），旧实现裸抛逃逸——须收敛为 SuiteParseError
+        raise SuiteParseError(
+            f"套件文件非 UTF-8 编码，无法解析（请转存为 UTF-8）：{exc}", source=str(p)
+        ) from exc
     except OSError as exc:
         raise SuiteParseError(f"无法读取套件文件：{exc.strerror or exc}", source=str(p)) from exc
     return parse_suite(text, source=str(p))

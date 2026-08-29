@@ -68,8 +68,9 @@ _BAUDRATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "
 _MAX_BAUDRATE = 4_000_000
 # 下拉末尾固定项：选中后弹输入框让用户填自定义波特率
 _CUSTOM_BAUD_LABEL = "自定义…"
-# 常见帧格式（3 字符紧凑写法）
-_FRAMES = ["8N1", "8N2", "8E1", "8O1", "7E1", "7O1"]
+# 常见帧格式（紧凑写法；8N1.5 与模型 FrameFormat.parse 支持集对齐——
+# 下拉不可编辑，缺项时用户无法选择 1.5 停止位）
+_FRAMES = ["8N1", "8N1.5", "8N2", "8E1", "8O1", "7E1", "7O1"]
 
 # 响应区环形缓冲行数上限（§10.3，超出自动丢弃旧行）
 _MAX_RESPONSE_LINES = 10000
@@ -209,6 +210,9 @@ class ManualDebugWidget(QWidget):
         file_row.addWidget(self.file_btn)
 
         self.file_label = QLabel("未选择文件")
+        # 文件名是用户数据：锁 PlainText（QLabel 默认 AutoText，文件名含 <...>
+        # 片段时会被解释为富文本——视觉注入/丢字）
+        self.file_label.setTextFormat(Qt.TextFormat.PlainText)
         self.file_label.setObjectName("caption")
         file_row.addWidget(self.file_label, 1)
 
@@ -999,7 +1003,12 @@ class ManualDebugWidget(QWidget):
         self._rx_console.stop()
 
     def refresh_theme(self) -> None:
-        """主题切换时刷新内联富文本配色（M11：旧实现硬编码 dark=False 不随主题变）."""
+        """主题切换时刷新内联富文本配色（M11：旧实现硬编码 dark=False 不随主题变）.
+
+        有意设计（与 monitor/主窗口同口径）：已渲染的历史行不重染——响应区
+        QTextEdit 为 append-only 渲染快照，旧行保留渲染时配色；此处只换 tokens
+        供后续新行使用（逐行重染成本高且扰动滚动位置，清屏/重开后自然新主题）。
+        """
         self._tokens = get_tokens()
         # 传播到命令库子面板
         panel_refresher = getattr(self._cmd_panel, "refresh_theme", None)

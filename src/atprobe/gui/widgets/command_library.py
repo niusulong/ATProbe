@@ -335,6 +335,8 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
         bar.addStretch()
         self._file_label = QLabel()
         self._file_label.setObjectName("caption")
+        # 文件名是用户数据：锁 PlainText（AutoText 下文件名含 <...> 会被当富文本）
+        self._file_label.setTextFormat(Qt.TextFormat.PlainText)
         bar.addWidget(self._file_label)
         layout.addLayout(bar)
 
@@ -487,6 +489,8 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
         top.addStretch()
         self._file_label = QLabel(self._path.name if self._path else "（未保存）")
         self._file_label.setObjectName("caption")
+        # 同上：文件名（用户数据）锁 PlainText，防富文本解释
+        self._file_label.setTextFormat(Qt.TextFormat.PlainText)
         top.addWidget(self._file_label)
         outer.addLayout(top)
 
@@ -568,6 +572,8 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
         row.setContentsMargins(2, 0, 2, 0)
         row.setSpacing(4)
         name_lbl = QLabel(label_text)
+        # 项目/功能组名是用户数据：锁 PlainText（AutoText 下名称含 <...> 被当富文本）
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         row.addWidget(name_lbl)
         row.addStretch()
         btn = QToolButton()

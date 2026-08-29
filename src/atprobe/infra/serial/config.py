@@ -37,7 +37,7 @@ class FrameFormat:
 
     databits: int = 8  # 5/6/7/8
     parity: Parity = Parity.NONE
-    stopbits: float = 1  # 1 / 1.5 / 2
+    stopbits: float = 1.0  # 1 / 1.5 / 2（浮点口径统一，__str__ 展示归一为 1/2/1.5）
 
     @classmethod
     def parse(cls, compact: str) -> FrameFormat:

@@ -202,6 +202,12 @@ def load_env_config_file(path: str | Path) -> EnvConfig:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise EnvConfigError(f"无法读取环境配置文件：{exc.strerror or exc}", source=str(p)) from exc
+    except UnicodeDecodeError as exc:
+        # F-16 同型守卫（T7 审查 M-2）：非 UTF-8 环境配置裸抛会穿透 CLI/MCP
+        # 的 EnvConfigError 捕获（MCP 侧破坏 McpError→INVALID_INPUT 契约）
+        raise EnvConfigError(
+            f"环境配置文件非 UTF-8 编码，请转存为 UTF-8：{exc}", source=str(p)
+        ) from exc
     return load_env_config(text, source=str(p))
 
 

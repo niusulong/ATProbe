@@ -77,7 +77,8 @@ def _read_token_file(p: Path) -> str | None:
     失败分类（CLI 统一转干净错误）：目录 → ValueError（Windows 下 read_text
     对目录抛 PermissionError、POSIX 抛 IsADirectoryError，故先判 is_dir 统一
     文案）；文件不存在 → FileNotFoundError 原样上抛（CLI 有专门呈现）；
-    其余 OSError → ValueError。
+    其余 OSError / 非 UTF-8 内容（UnicodeDecodeError，ValueError 子类，
+    F-16 同型补漏）→ ValueError。
     """
     if p.is_dir():
         raise ValueError(f"Token 文件路径是目录：{p}")
@@ -87,6 +88,11 @@ def _read_token_file(p: Path) -> str | None:
         if isinstance(exc, FileNotFoundError):
             raise  # 保持原异常类型：CLI 现有"Token 文件不存在"专门呈现依赖它
         raise ValueError(f"Token 文件读取失败（{p}）：{exc}") from exc
+    except UnicodeDecodeError as exc:
+        # F-16 同型：GBK/UTF-16 等 Token 文件裸 UnicodeDecodeError 逃逸
+        # （PowerShell 重定向默认 UTF-16 是常见来源）——收敛为 ValueError，
+        # 由 CLI 统一转「Token 加载失败」exit 2
+        raise ValueError(f"Token 文件非 UTF-8 编码（{p}），请转存为 UTF-8：{exc}") from exc
     return text.strip() or None
 
 
