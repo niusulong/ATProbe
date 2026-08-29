@@ -32,10 +32,12 @@ from atprobe.domain.suite import SuiteParseError
 from atprobe.domain.suite.collect import (
     Collected,
     collect_case_paths,
+    collect_suite_paths,
     filter_by_tags,
     load_cases,
     read_suite_meta,
 )
+from atprobe.domain.suite.parser import parse_suite_file
 from atprobe.engine.config import EngineConfig
 from atprobe.infra.config.appconfig import AppConfig, AppConfigError, parse_port_expr
 from atprobe.infra.config.envconfig import EnvConfig, EnvConfigError, load_env_config_file
@@ -61,6 +63,12 @@ def _display_name(c: Case) -> str:
 # 免重复 IO+解析；超限淘汰最旧条目（dict 迭代序 = 插入序）
 _CASE_CACHE_MAX = 512
 
+# suite 引用 mtime 级联探测上限（批 3 终审②，防病态引用列表拖慢缓存命中）：
+# suite 文件本是小 YAML（引用路径列表），但防御性封顶避免异常大引用集
+# 在每次缓存判定时 stat 风暴。边界：超过上限的引用不参与失效键——第
+# 257+ 个被引用用例的编辑理论上命中陈旧缓存，suite 自身 mtime 变动自然收敛
+_SUITE_DEP_MAX = 256
+
 # S-3 目录扫描上限（设计 §5）：MCP 收集路径的递归深度/文件数上限——rglob 式
 # 无界扫描被指向大目录（如根盘符）时会长时间占满 IO；CLI 调用点不传上限不变。
 _MCP_SCAN_MAX_DEPTH = 4
@@ -78,6 +86,8 @@ class McpService:
     ``_port_urc_handles`` 的「检查已挂转发 + 挂接」/「pop + 摘除」两个
     check-then-act 段经 ``_urc_handles_lock`` 互斥——pm 层挂接/摘除是
     快操作（仅改内部 dict/列表）可在锁内，端口 open/close 等重活不持锁。
+    ``_case_cache`` 的读写/淘汰经 ``_case_cache_lock`` 互斥（单次操作粒度，
+    解析重活在锁外，见 _load_cases_cached）。
     """
 
     def __init__(
@@ -113,11 +123,14 @@ class McpService:
         # port → (tx_handle, rx_handle)；与 URC 转发共用 _urc_handles_lock。
         self._manual_log_handles: dict[str, tuple[object, object]] = {}
         self._manual_session = (
-            f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(2)}"
+            f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
         )
         self._urc_handles_lock = threading.Lock()
-        # 用例收集缓存（§4.9/P3）：文件路径 → (mtime, Collected)，见 _load_cases_cached
-        self._case_cache: dict[Path, tuple[float, Collected]] = {}
+        # 用例收集缓存（§4.9/P3）：文件路径 → (mtime, suite 引用 mtime 元组,
+        # Collected)，见 _load_cases_cached；读写经 ``_case_cache_lock`` 互斥
+        # （批 5 T1：线程池并发下 512 封顶淘汰的迭代删除理论可 RuntimeError）
+        self._case_cache: dict[Path, tuple[float, tuple[float, ...], Collected]] = {}
+        self._case_cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 资源发现
@@ -180,6 +193,10 @@ class McpService:
         """S-3 路径白名单（设计 §5）：解析后的 cases_dir 恒在锚集内，
         ``mcp.allowed_roots`` 非空则追加；全部 resolve 并按 normcase 口径去重
         （复用 datasource.data_roots，与 S-8 锚集同一套比较语义）。
+
+        管理员语义：白名单是**根目录树**（ensure_within 按 is_relative_to 判定）
+        ——配置父目录即放行整棵子树（如配 D 盘根目录则全盘可达），属管理员
+        显式扩权动作，应配到实际需要的最小目录。
         """
         roots = [resolve_workspace_path(self._app_cfg.cases_dir)] + [
             Path(p) for p in self._app_cfg.mcp_allowed_roots
@@ -248,26 +265,61 @@ class McpService:
             suite_teardown.extend(collected.suite_teardown)
         return cases, tuple(suite_setup), tuple(suite_teardown)
 
+    def _suite_dep_mtimes(self, f: Path) -> tuple[float, ...]:
+        """suite 引用级联失效探测（批 3 终审②）：解析套件引用列表并逐个 stat.
+
+        场景：显式传入 suite- 文件时缓存键若只含 suite 自身 mtime，编辑其
+        引用的用例文件（suite mtime 不变）会命中陈旧 Collected。方案 (a)
+        级联 mtime：把每个被引用用例文件的 mtime 并入缓存键——suite 文件
+        只是小 YAML（引用路径列表），parse_suite_file 便宜，被引用用例的
+        pydantic 解析（真正的大头）仍走缓存。解析失败返回 ()（照常走真实
+        解析抛错路径，不缓存）；引用缺失 stat 失败记 -1.0（与主 mtime 同款
+        哨兵：文件出现后 mtime 变化自然触发失效）。
+        """
+        try:
+            suite = parse_suite_file(f)
+        except SuiteParseError:
+            return ()
+        mtimes: list[float] = []
+        for crel in suite.cases[:_SUITE_DEP_MAX]:
+            try:
+                mtimes.append((f.parent / crel).resolve().stat().st_mtime)
+            except OSError:
+                mtimes.append(-1.0)
+        return tuple(mtimes)
+
     def _load_cases_cached(self, f: Path) -> Collected:
         """单文件解析 + mtime 缓存（§4.9/P3）：同文件二次收集免重复 IO+解析.
 
-        缓存策略：``_case_cache`` 按文件路径 → (mtime, Collected)；stat 的
-        mtime 与缓存一致则复用，否则 load_cases([f]) 后写回。失效条件即
-        mtime 变化（文件被编辑后下次收集自动重解析）；解析抛错不缓存
-        （重试照常走真实解析）。上限 512 条，超出淘汰最旧（插入序首条）。
+        缓存策略：``_case_cache`` 按文件路径 → (mtime, dep_mtimes, Collected)；
+        stat 的 mtime（suite 文件另含被引用用例的 mtime 元组，见
+        ``_suite_dep_mtimes``）与缓存一致则复用，否则 load_cases([f]) 后写回。
+        失效条件即 mtime 变化（文件被编辑后下次收集自动重解析）；解析抛错
+        不缓存（重试照常走真实解析）。上限 512 条，超出淘汰最旧（插入序首条）。
+
+        线程安全（批 5 T1）：缓存读写经 ``_case_cache_lock`` 互斥（粒度到
+        单次 dict 操作：get 一次、写回+淘汰一段）——淘汰段的
+        ``next(iter(...))`` 与并发线程的写入交错会 RuntimeError（字典迭代
+        期间改变大小），真实解析（重活）留在锁外不阻塞并发读。
         """
         try:
             mtime = f.stat().st_mtime
         except OSError:
             mtime = -1.0  # stat 失败（窗口期被删等）：不缓存，让解析自然抛错
-        cached = self._case_cache.get(f)
-        if cached is not None and cached[0] == mtime:
-            return cached[1]
+        # suite 文件：级联引用 mtime（编辑被引用用例而 suite 自身不变 → 失效）
+        dep_mtimes: tuple[float, ...] = ()
+        if mtime >= 0 and f.name.startswith("suite-"):
+            dep_mtimes = self._suite_dep_mtimes(f)
+        with self._case_cache_lock:
+            cached = self._case_cache.get(f)
+        if cached is not None and cached[0] == mtime and cached[1] == dep_mtimes:
+            return cached[2]
         collected = load_cases([f])
         if mtime >= 0:
-            self._case_cache[f] = (mtime, collected)
-            if len(self._case_cache) > _CASE_CACHE_MAX:
-                self._case_cache.pop(next(iter(self._case_cache)), None)
+            with self._case_cache_lock:
+                self._case_cache[f] = (mtime, dep_mtimes, collected)
+                if len(self._case_cache) > _CASE_CACHE_MAX:
+                    self._case_cache.pop(next(iter(self._case_cache)), None)
         return collected
 
     def list_suites(self, path: str | None = None) -> list[dict[str, Any]]:
@@ -275,7 +327,10 @@ class McpService:
 
         显式 path 统一预检（批 3 终审⑨）：不存在 → INVALID_INPUT；越出 S-3
         白名单 → INVALID_INPUT（口径与 list_cases 一致）。缺省时 base 锚定
-        到工作区解析后的 cases_dir。
+        到工作区解析后的 cases_dir。目录扫描经 ``collect_suite_paths`` 受限
+        遍历（批 5 T8，批 4 终审预备⑥）：与 list_cases 同一套深度 4 / 文件数
+        2000 上限（旧 rglob 无界——显式传大目录可长时间占满 IO，且与
+        list_cases 的 max_depth=4 不对称）。
         """
         if path is not None:
             base = Path(path)
@@ -284,7 +339,9 @@ class McpService:
             self._check_paths_allowed([base])
         else:
             base = resolve_workspace_path(self._app_cfg.cases_dir)
-        suite_files = sorted({*base.rglob("suite-*.yaml"), *base.rglob("suite-*.yml")})
+        suite_files, _warnings = collect_suite_paths(
+            base, max_depth=_MCP_SCAN_MAX_DEPTH, max_files=_MCP_SCAN_MAX_FILES
+        )
         out: list[dict[str, Any]] = []
         for f in suite_files:
             meta = read_suite_meta(f)

@@ -2813,6 +2813,20 @@ class TestUpdateControllerMigration:
         finally:
             win._raw_logger.stop()  # noqa: SLF001
 
+    def test_controller_wired_with_user_update_config(self, qapp) -> None:  # type: ignore[no-untyped-def]
+        """批 5 T8：MainWindow 把 app_config.update_config() 接线进控制器——
+        atprobe.yaml 的 update.allowed_hosts 到达 GUI 升级链（S-5 白名单追加）."""
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.config.appconfig import AppConfig
+
+        win = MainWindow(app_config=AppConfig(update_allowed_hosts=("mirror.example.com",)))
+        try:
+            uconfig = win._update_controller._update_config  # noqa: SLF001
+            assert uconfig.allowed_hosts == ("mirror.example.com",)
+            assert "mirror.example.com" in uconfig.effective_allowed_hosts()
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+
     def test_on_check_result_manual_vs_auto(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """结果呈现随迁：手动模式失败/无新版弹窗，自动模式静默（零变化）."""
         import PySide6.QtWidgets as _qw

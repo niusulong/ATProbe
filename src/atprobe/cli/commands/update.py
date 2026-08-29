@@ -10,6 +10,7 @@ UpdateSession，本层只做展示与交互），只在展示与交互层不同�
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import typer
 
@@ -20,9 +21,17 @@ from atprobe.infra.version import current_version, is_version_known
 def update(
     check_only: bool = typer.Option(False, "--check", help="只检查是否有新版，不下载"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接安装（非交互）"),
+    config: Path | None = typer.Option(
+        None, "--config", "-c", help="配置文件路径（读 update 段，定位规则同 run/list）"
+    ),
 ) -> None:
     """检查并安装 ATProbe 最新版本。"""
     # 重型依赖下沉到命令体（见模块 docstring）
+    from atprobe.infra.config.appconfig import (
+        AppConfigError,
+        load_app_config_file,
+        resolve_config_path,
+    )
     from atprobe.infra.update import (
         DownloadCancelled,
         DownloadError,
@@ -32,9 +41,18 @@ def update(
     from atprobe.infra.update.installer import apply_update
     from atprobe.infra.update.session import UpdateSession
 
+    # 批 5 T8：update.allowed_hosts 配置面接线（批 4 终审预备⑨）——用户配置的
+    # 镜像主机并入 S-5 下载白名单；定位规则与其余子命令共用 resolve_config_path
+    try:
+        app_cfg = load_app_config_file(resolve_config_path(config))
+    except AppConfigError as exc:
+        typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    uconfig = app_cfg.update_config()
+
     local = current_version()
     try:
-        info = fetch_latest()
+        info = fetch_latest(uconfig)
     except UpdateError as exc:
         # P2 修复：捕获 UpdateError 基类——旧实现只捕 UpdateCheckError，漏掉
         # AssetNotFoundError（Release 缺 Windows 安装包时 checker 抛它）→ 裸 traceback
@@ -81,8 +99,9 @@ def update(
             return
 
     try:
-        # D-3：下载编排收敛 UpdateSession（文件名模板/校验参数/签名策略单点）
-        result = UpdateSession().download(info, progress_cb=_print_progress)
+        # D-3：下载编排收敛 UpdateSession（文件名模板/校验参数/签名策略单点）；
+        # config=用户配置（批 5 T8：update.allowed_hosts 并入下载白名单）
+        result = UpdateSession(config=uconfig).download(info, progress_cb=_print_progress)
     except DownloadCancelled:
         # 退出码口径：用户主动取消不是错误 → 0（旧实现 1，脚本无法区分失败与取消）
         typer.echo("\n已取消下载。")

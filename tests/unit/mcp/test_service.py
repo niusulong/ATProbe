@@ -19,7 +19,7 @@ from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.serial.exceptions import InvalidArgumentError, PortBusyError
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
 from atprobe.mcp.errors import McpError
-from atprobe.mcp.service import McpService
+from atprobe.mcp.service import _CASE_CACHE_MAX, McpService
 
 MINIMAL_CASE = """\
 name: mini
@@ -277,6 +277,56 @@ def test_list_suites_default_scans_cases_dir(tmp_path):
     (cases_dir / "suite-x.yaml").write_text("name: x\ncases: []\n", encoding="utf-8")
     suites = svc.list_suites()
     assert [s["file"] for s in suites] == [str(cases_dir / "suite-x.yaml")]
+
+
+def test_list_suites_deep_level_excluded(tmp_path):
+    """批 5 T8（批 4 终审预备⑥）：list_suites 受限遍历与 list_cases 对称——
+    深层（>4 层）suite 文件不被列出（旧 rglob 无界，两者不对称）."""
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    cases_dir = tmp_path / "cases"
+    d = cases_dir
+    for i in range(1, 6):
+        d = d / f"l{i}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"case{i}.yaml").write_text(MINIMAL_CASE, encoding="utf-8")
+        (d / f"suite-{i}.yaml").write_text("name: s\ncases: []\n", encoding="utf-8")
+    # 对称性双向钉住：1-4 层照收，第 5 层两者都不收
+    assert len(svc.list_suites(path=str(cases_dir))) == 4
+    assert len(svc.list_cases(path=str(cases_dir))) == 4
+
+
+def test_case_cache_concurrent_smoke(tmp_path):
+    """批 5 T1 并发冒烟：线程池并发 list_cases（文件数>512 强制走缓存淘汰）
+    不抛 RuntimeError（旧实现 next(iter(dict)) 与并发写入交错可
+    「字典迭代期间改变大小」）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    cases_dir = tmp_path / "cases"
+    for i in range(_CASE_CACHE_MAX + 8):  # 超过 512 封顶 → 必然触发淘汰路径
+        _write_case(cases_dir, f"c{i:03d}", MINIMAL_CASE.replace("name: mini", f"name: c{i:03d}"))
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda _: svc.list_cases(path=str(cases_dir)), range(24)))
+    assert all(len(r) == _CASE_CACHE_MAX + 8 for r in results)
+    assert len(svc._case_cache) <= _CASE_CACHE_MAX  # 封顶不超限
+
+
+def test_collect_cache_suite_reference_invalidation(tmp_path):
+    """批 3 终审②：显式 suite 输入的缓存键级联被引用用例的 mtime——编辑
+    被引用用例文件（suite 自身 mtime 不变）→ 缓存失效重解析（修复陈旧结果）。"""
+    d = tmp_path / "cases"
+    case = _write_case(d, "mini", MINIMAL_CASE)
+    suite = d / "suite-all.yaml"
+    suite.write_text("name: 全\ncases:\n  - mini.yaml\n", encoding="utf-8")
+    svc = McpService(_app_cfg(tmp_path), vsim=True)
+    assert [c["name"] for c in svc.list_cases(path=str(suite))] == ["mini"]
+    # 编辑被引用用例：case mtime 显式 +5s（避开文件系统时间戳粒度），suite 不动
+    old = case.stat().st_mtime
+    suite_mtime = suite.stat().st_mtime
+    case.write_text(MINIMAL_CASE.replace("name: mini", "name: edited"), encoding="utf-8")
+    os.utime(case, (old + 5, old + 5))
+    assert suite.stat().st_mtime == suite_mtime  # 前置：suite 自身未变
+    assert [c["name"] for c in svc.list_cases(path=str(suite))] == ["edited"]
 
 
 def test_start_run_data_allowed_roots_from_whitelist(tmp_path, monkeypatch):

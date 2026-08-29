@@ -99,6 +99,54 @@ class Collected:
     suite_teardown: tuple[Step, ...] = ()
 
 
+def _walk_yaml_files(base: Path, *, max_depth: int | None = None) -> list[Path]:
+    """S-3 受限遍历核心：os.walk 手控深度收集 .yaml/.yml（后缀大小写不敏感）.
+
+    max_depth 限相对 base 的下潜深度（base 自身为 0 层，max_depth=4 即收
+    1-4 层子目录内文件，5 层起不收——防 ``list_*(path="C:\\")`` 全盘扫）。
+    rglob 无法限制下潜，故手控 os.walk。返回按路径字符串排序（保留 rglob
+    sorted 的确定性语义）。suite-/非 suite- 前缀区分由调用方过滤（两者
+    语义相反：collect_case_paths 排除 suite-，collect_suite_paths 只收）。
+    """
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        cur = Path(dirpath)
+        # 相对起始目录的深度（起始目录为 0）：到达上限即剪枝不再下潜
+        # （当前层文件照收，下一层起不收）
+        if max_depth is not None and len(cur.relative_to(base).parts) >= max_depth:
+            dirnames[:] = []
+        for name in filenames:
+            f = cur / name
+            # 同时覆盖 .yaml 与 .yml 两种后缀（大小写不敏感，对齐 Windows
+            # pathlib glob 行为——否则 .YAML 在目录扫描中被静默漏收）
+            if f.suffix.lower() not in (".yaml", ".yml"):
+                continue
+            found.append(f)
+    found.sort(key=str)
+    return found
+
+
+def collect_suite_paths(
+    base: Path,
+    *,
+    max_depth: int | None = None,
+    max_files: int | None = None,
+) -> tuple[list[Path], list[str]]:
+    """受限遍历收集 suite- 前缀套件文件（MCP list_suites 用，批 5 T8）.
+
+    与 ``collect_case_paths`` 共用 ``_walk_yaml_files``（同一套深度/排序
+    语义），前缀过滤方向相反：目录扫描只收 suite- 文件（list_suites 语义）。
+    max_files 限收集总数，超出截断并附警告（与 collect_case_paths 同款文案）。
+    base 为普通文件时返回空（与旧 rglob 行为一致——os.walk 不产出）。
+    """
+    files = [f for f in _walk_yaml_files(base, max_depth=max_depth) if f.name.startswith("suite-")]
+    warnings: list[str] = []
+    if max_files is not None and len(files) > max_files:
+        files = files[:max_files]
+        warnings.append(f"文件数超过上限 {max_files}，已截断")
+    return files, warnings
+
+
 def collect_case_paths(
     paths: list[Path] | None,
     cases_dir: Path,
@@ -127,26 +175,15 @@ def collect_case_paths(
     truncated = False
     for p in paths:
         if p.is_dir():
-            # 单路径内先全量收集再按路径字符串排序（对齐旧 rglob+sorted 的确定性），
+            # 受限遍历核心收敛 _walk_yaml_files（与 collect_suite_paths 共享，
+            # 批 5 T8）；单路径内按路径字符串排序（对齐旧 rglob+sorted 的确定性），
             # 跨路径保持参数顺序（CLI 多参数的执行序，T2 审查修复——不做全局排序）
-            found: list[Path] = []
-            for dirpath, dirnames, filenames in os.walk(p):
-                cur = Path(dirpath)
-                # 相对起始目录的深度（起始目录为 0）：到达上限即剪枝不再下潜
-                # （当前层文件照收，下一层起不收）
-                if max_depth is not None and len(cur.relative_to(p).parts) >= max_depth:
-                    dirnames[:] = []
-                for name in filenames:
-                    # 同时覆盖 .yaml 与 .yml 两种后缀（大小写不敏感，对齐 Windows
-                    # pathlib glob 行为——否则 .YAML 在目录扫描中被静默漏收）
-                    f = cur / name
-                    if f.suffix.lower() not in (".yaml", ".yml"):
-                        continue
-                    # 目录扫描排除套件文件避免与显式指定重复
-                    if f.name.startswith("suite-"):
-                        continue
-                    found.append(f)
-            found.sort(key=str)
+            found = [
+                f
+                for f in _walk_yaml_files(p, max_depth=max_depth)
+                # 目录扫描排除套件文件避免与显式指定重复
+                if not f.name.startswith("suite-")
+            ]
             for f in found:
                 key = f.resolve()
                 if key in seen:

@@ -19,6 +19,7 @@ from atprobe.domain.case.parser import CaseParseError
 from atprobe.domain.suite import SuiteParseError
 from atprobe.domain.suite.collect import (
     collect_case_paths,
+    collect_suite_paths,
     expand_parameters,
     filter_by_tags,
     load_cases,
@@ -158,6 +159,61 @@ class TestCollectCasePathsLimits:
         _write(tmp_path / "m.yaml", MINIMAL_CASE)
         files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
         assert files == sorted(files, key=str)
+
+
+class TestCollectSuitePaths:
+    """受限遍历收集 suite- 文件（批 5 T8，MCP list_suites 用）.
+
+    与 collect_case_paths 共用 _walk_yaml_files：同一套深度/排序语义，前缀
+    过滤方向相反（此处只收 suite- 文件）。旧实现 service.list_suites 用无界
+    rglob——与 list_cases 的 max_depth=4 不对称（批 4 终审预备⑥）。
+    """
+
+    def test_only_suite_prefix_collected(self, tmp_path: Path) -> None:
+        # 普通用例文件不进套件列表；.yml 后缀的套件同收（与 .yaml 一致）
+        _write(tmp_path / "case.yaml", MINIMAL_CASE)
+        _write(tmp_path / "suite-x.yaml", "name: x\ncases: []\n")
+        _write(tmp_path / "suite-y.yml", "name: y\ncases: []\n")
+        files, warnings = collect_suite_paths(tmp_path, max_depth=4)
+        assert [f.name for f in files] == ["suite-x.yaml", "suite-y.yml"]
+        assert warnings == []
+
+    def test_max_depth_excludes_fifth_level(self, tmp_path: Path) -> None:
+        # 与 collect_case_paths 对称（同款上限语义）：max_depth=4 收 1-4 层，
+        # 第 5 层的 suite 文件不收——防 list_suites(path=大盘符) 全盘扫
+        d = tmp_path
+        for i in range(1, 6):
+            d = d / f"l{i}"
+            _write(d / f"suite-{i}.yaml", "name: s\ncases: []\n")
+        files, warnings = collect_suite_paths(tmp_path, max_depth=4)
+        # 按名字集合断言（排序按完整路径字符串，深层目录的 suite- 前缀排在前）
+        assert sorted(f.name for f in files) == [f"suite-{i}.yaml" for i in range(1, 5)]
+        assert warnings == []
+
+    def test_no_limits_by_default(self, tmp_path: Path) -> None:
+        # 缺省不设限（与 collect_case_paths 缺省口径一致；上限由 MCP 调用方传）
+        d = tmp_path
+        for i in range(6):
+            d = d / f"l{i}"
+            _write(d / f"suite-{i}.yaml", "name: s\ncases: []\n")
+        files, warnings = collect_suite_paths(tmp_path)
+        assert len(files) == 6
+        assert warnings == []
+
+    def test_max_files_truncates_with_warning(self, tmp_path: Path) -> None:
+        # 文件数超上限：截断 + 警告（文案与 collect_case_paths 同款）
+        for i in range(4):
+            _write(tmp_path / f"suite-{i}.yaml", "name: s\ncases: []\n")
+        files, warnings = collect_suite_paths(tmp_path, max_files=2)
+        assert [f.name for f in files] == ["suite-0.yaml", "suite-1.yaml"]
+        assert warnings == ["文件数超过上限 2，已截断"]
+
+    def test_file_base_returns_empty(self, tmp_path: Path) -> None:
+        # base 为普通文件：返回空（对齐旧 rglob 在非目录上不产出的行为）
+        sf = _write(tmp_path / "suite-x.yaml", "name: s\ncases: []\n")
+        files, warnings = collect_suite_paths(sf)
+        assert files == []
+        assert warnings == []
 
 
 class TestLoadCases:

@@ -199,7 +199,8 @@ def run(
         return
 
     # 7. 构造引擎配置并执行
-    # session_id 加 4 位随机后缀，避免连续快速运行时按秒生成的 id 冲突覆盖报告
+    # session_id 加 8 hex 随机后缀（批 5 T8 对齐 jobs.py 的 token_hex(4) 口径），
+    # 避免连续快速运行时按秒生成的 id 冲突覆盖报告
     import secrets
 
     from atprobe.engine.config import StopMode
@@ -210,7 +211,7 @@ def run(
         StepResultEvent,
     )
 
-    session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
+    session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4)
     # 用户显式 --report-dir 按 cwd；否则锚定工作区
     rdir = report_dir or resolve_workspace_path(app_cfg.report_dir)
     engine_cfg = EngineConfig(

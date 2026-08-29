@@ -187,6 +187,44 @@ class TestConsoleStrictBool:
         assert load_app_config(None).mask_credentials is False
 
 
+class TestUpdateSection:
+    """批 5 T8（批 4 终审预备⑨）：update.allowed_hosts 配置面接线.
+
+    UpdateConfig.allowed_hosts 字段此前已存在（S-5）但 atprobe.yaml 无对应
+    段——downloader 报错文案承诺的「可在配置 update.allowed_hosts 追加」
+    用户配置面断裂。解析风格对齐 mcp.allowed_roots（嵌套段 → 扁平字段）。
+    """
+
+    def test_update_allowed_hosts_loaded(self) -> None:
+        cfg = load_app_config(
+            "update:\n  allowed_hosts:\n    - mirror.example.com\n    - gh.internal.cn\n"
+        )
+        assert cfg.update_allowed_hosts == ("mirror.example.com", "gh.internal.cn")
+
+    def test_update_allowed_hosts_default_empty(self) -> None:
+        # 缺省/空列表/显式 ~ 均为空元组 = 仅内置 GitHub 白名单（行为零变化）
+        assert load_app_config(None).update_allowed_hosts == ()
+        assert load_app_config("update:\n  allowed_hosts: []\n").update_allowed_hosts == ()
+        assert load_app_config("update:\n  allowed_hosts: ~\n").update_allowed_hosts == ()
+
+    def test_update_allowed_hosts_bad_type_rejected(self) -> None:
+        with pytest.raises(AppConfigError, match=r"update\.allowed_hosts"):
+            load_app_config("update:\n  allowed_hosts: mirror.example.com\n")
+
+    def test_update_config_merges_builtin_whitelist(self) -> None:
+        """update_config()：用户追加项与内置 GitHub 白名单合并（只追加不收窄）."""
+        from atprobe.infra.update.config import _DEFAULT_ALLOWED_HOSTS
+
+        cfg = load_app_config("update:\n  allowed_hosts: [mirror.example.com]\n")
+        uconfig = cfg.update_config()
+        assert uconfig.allowed_hosts == ("mirror.example.com",)
+        assert uconfig.effective_allowed_hosts() == (*_DEFAULT_ALLOWED_HOSTS, "mirror.example.com")
+        # 空配置面 → 生产默认（内置白名单原样）
+        assert load_app_config(None).update_config().effective_allowed_hosts() == (
+            _DEFAULT_ALLOWED_HOSTS
+        )
+
+
 class TestParsePortExpr:
     def test_full_expr(self) -> None:
         p = parse_port_expr("COM3:115200:8N1")

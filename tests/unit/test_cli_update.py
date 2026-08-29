@@ -189,3 +189,45 @@ def test_update_version_unknown_shows_hint_not_upgrade() -> None:
     # 不当作 0.0.0 参与比较：不提示升级、不调用 is_newer
     assert "有新版本可用" not in result.stdout
     is_newer_mock.assert_not_called()
+
+
+# ---------- 批 5 T8：update.allowed_hosts 配置面接线 ----------
+
+
+def test_update_passes_user_config_to_check_and_session(tmp_path: Path) -> None:
+    """--config 指定 yaml 的 update.allowed_hosts → fetch_latest 与
+    UpdateSession 都收到携带用户白名单的 UpdateConfig（批 4 终审预备⑨）。"""
+    from atprobe.infra.update.checker import ReleaseInfo
+    from atprobe.infra.update.config import UpdateConfig
+    from atprobe.infra.update.downloader import DownloadResult
+
+    cfg_file = tmp_path / "atprobe.yaml"
+    cfg_file.write_text("update:\n  allowed_hosts: [mirror.example.com]\n", encoding="utf-8")
+    fake = ReleaseInfo(
+        version="0.3.0",
+        tag="v0.3.0",
+        zip_url="https://mirror.example.com/ATProbe-0.3.0-win64.zip",
+        zip_size=80000000,
+        release_notes="",
+        html_url="h",
+    )
+    dl_result = DownloadResult(path=tmp_path / "ATProbe-0.3.0-win64.zip", size=1)
+    session = MagicMock()
+    session.download.return_value = dl_result
+    fetch_mock = MagicMock(return_value=fake)
+    with (
+        patch("atprobe.infra.update.checker.fetch_latest", fetch_mock),
+        patch("atprobe.infra.update.checker.is_newer", return_value=True),
+        patch("atprobe.cli.commands.update.is_frozen", return_value=True),
+        patch("atprobe.infra.update.session.UpdateSession", return_value=session) as ctor,
+        patch("atprobe.infra.update.installer.apply_update"),
+    ):
+        result = runner.invoke(app, ["update", "--yes", "--config", str(cfg_file)])
+    assert result.exit_code == 0
+    # 检查链收到用户配置（.sha256 资产下载同白名单）
+    uconfig = fetch_mock.call_args.args[0]
+    assert isinstance(uconfig, UpdateConfig)
+    assert uconfig.allowed_hosts == ("mirror.example.com",)
+    assert "mirror.example.com" in uconfig.effective_allowed_hosts()
+    # 下载链同样（UpdateSession 构造参数 config=）
+    assert ctor.call_args.kwargs["config"] is uconfig

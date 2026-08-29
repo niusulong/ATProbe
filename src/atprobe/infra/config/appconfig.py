@@ -23,6 +23,7 @@ from atprobe.domain.case.redos import check_pattern
 from atprobe.infra.resources import resolve_workspace_path
 from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import FrameFormat, PortConfig
+from atprobe.infra.update.config import UpdateConfig
 
 _yaml = YAML(typ="safe")
 _log = logging.getLogger("atprobe.config")
@@ -80,6 +81,20 @@ class AppConfig:
     # 路径的信任边界。解析后的 cases_dir 恒在锚集内，本字段追加额外根
     # （编码机可放用例的共享目录等）；空元组=仅 cases_dir。
     mcp_allowed_roots: tuple[str, ...] = ()
+    # S-5 升级链路用户追加的下载主机（批 5 T8，批 4 终审预备⑨）：镜像/自建
+    # 发布源主机名。空元组=仅内置 GitHub 白名单（默认，零变化）；经
+    # update_config() 并入 UpdateConfig，与内置白名单**合并**生效（只能追加
+    # 不能收窄内置项）。完整文档（update 段）见 docs/user/config-reference.md。
+    update_allowed_hosts: tuple[str, ...] = ()
+
+    def update_config(self) -> UpdateConfig:
+        """构造升级链 UpdateConfig（CLI update / GUI UpdateController 接线单点）.
+
+        用户 update.allowed_hosts 并入（其余 UpdateConfig 字段维持生产默认——
+        api_base/repo/超时等不属于用户配置面）；返回 frozen 实例可直接传
+        fetch_latest / UpdateSession。
+        """
+        return UpdateConfig(allowed_hosts=self.update_allowed_hosts)
 
 
 def _to_int(value: object, *, what: str, source: str | None) -> int:
@@ -261,6 +276,19 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
                     source=source,
                 )
             cfg = _replace(cfg, mcp_allowed_roots=tuple(roots_raw))
+    # S-5 升级链白名单追加项（批 5 T8）：字符串列表（空列表/显式 ~ 保持默认空
+    # 元组=仅内置 GitHub 白名单）；主机存在性不在配置层校验（downloader 触网
+    # 时按 effective_allowed_hosts 判定，报错文案自带白名单列表）。
+    update = raw.get("update") or {}
+    if isinstance(update, dict):
+        if "allowed_hosts" in update and update["allowed_hosts"] is not None:
+            hosts_raw = update["allowed_hosts"]
+            if not isinstance(hosts_raw, list) or not all(isinstance(x, str) for x in hosts_raw):
+                raise AppConfigError(
+                    f"'update.allowed_hosts' 必须是字符串列表（下载主机白名单追加项），实际：{hosts_raw!r}",
+                    source=source,
+                )
+            cfg = _replace(cfg, update_allowed_hosts=tuple(hosts_raw))
     return cfg
 
 

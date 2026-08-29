@@ -177,8 +177,11 @@ class MainWindow(QMainWindow):
         self._init_tabs()
         self._init_statusbar()
         # D-1 拆分：更新流程（检查/下载/安装确认）收敛 UpdateController——
-        # 本类只保留实例化与菜单入口，弹窗呈现随迁控制器（以本窗口为弹窗父级）
-        self._update_controller = UpdateController(parent=self)
+        # 本类只保留实例化与菜单入口，弹窗呈现随迁控制器（以本窗口为弹窗父级）；
+        # 批 5 T8：传 app_config.update_config()（update.allowed_hosts 配置接线）
+        self._update_controller = UpdateController(
+            parent=self, update_config=self._app_config.update_config()
+        )
         self._init_menubar()
         self.progress.connect(self._on_progress)
         self.port_open_result.connect(self._on_port_open_result)
@@ -882,10 +885,11 @@ class MainWindow(QMainWindow):
                     )
                     env = None
 
-        # session_id 加随机后缀，避免连续快速运行按秒冲突覆盖报告
+        # session_id 加 8 hex 随机后缀（批 5 T8 对齐 jobs.py/run.py 的 token_hex(4)
+        # 口径），避免连续快速运行按秒冲突覆盖报告
         import secrets
 
-        session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
+        session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4)
         cfg = EngineConfig(
             ports=(PortConfig(name=port, urc_filter=self._app_config.urc_filter),),
             cases=tuple(cases),  # type: ignore[arg-type]

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal
 
+from atprobe.infra.update.config import DEFAULT_CONFIG, UpdateConfig
+
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QProgressDialog, QWidget
 
@@ -37,10 +39,17 @@ class UpdateController(QObject):
     download_progress = Signal(int, int)  # (done, total)
     download_done = Signal(object)  # Path | Exception
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        update_config: UpdateConfig | None = None,
+    ) -> None:
         super().__init__(parent)
         # 弹窗父级：宿主窗口（MainWindow）——QMessageBox/QDialog 以其为父居中
         self._host = parent
+        # 升级链配置（批 5 T8）：MainWindow 传入 app_config.update_config()
+        # （update.allowed_hosts 并入下载白名单）；None 用生产默认（测试替身兼容）
+        self._update_config = update_config or DEFAULT_CONFIG
         self._update_in_progress = False
         self._cancelled = False
         self._check_manual = False
@@ -70,7 +79,9 @@ class UpdateController(QObject):
         from atprobe.infra.version import current_version, is_version_known
 
         try:
-            info = fetch_latest()
+            # config=用户配置（批 5 T8：update.allowed_hosts 同样作用于检查期的
+            # .sha256 资产下载白名单）
+            info = fetch_latest(self._update_config)
             local = current_version()
             if not is_version_known(local):
                 # VERSION 缺失时 local 是回退 '0.0.0'——不能参与 semver 比较
@@ -186,8 +197,9 @@ class UpdateController(QObject):
 
         try:
             # D-3/P1-9 结构修：下载编排收敛 UpdateSession（此前 GUI 此处硬编码
-            # 文件名、漏传校验参数，与 CLI 两处拼装各自漂移——单点后天然一致）
-            result = UpdateSession().download(
+            # 文件名、漏传校验参数，与 CLI 两处拼装各自漂移——单点后天然一致）；
+            # config=用户配置（批 5 T8：update.allowed_hosts 并入下载白名单）
+            result = UpdateSession(config=self._update_config).download(
                 info,  # type: ignore[arg-type]
                 progress_cb=lambda d, t: self.download_progress.emit(d, t),
                 cancel_token=lambda: self._cancelled,

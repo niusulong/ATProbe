@@ -80,6 +80,22 @@ def test_validate_url_user_appended_host_passes() -> None:
         _validate_url(url, DEFAULT_CONFIG)
 
 
+def test_yaml_update_allowed_hosts_reaches_downloader_whitelist() -> None:
+    """批 5 T8 特征测试：atprobe.yaml 配 update.allowed_hosts → 经
+    AppConfig.update_config() 接线 → downloader S-5 白名单对追加主机生效。"""
+    from atprobe.infra.config.appconfig import load_app_config
+
+    yaml_text = "update:\n  allowed_hosts:\n    - mirror.example.com\n"
+    cfg = load_app_config(yaml_text).update_config()
+    url = "https://mirror.example.com/ATProbe-0.3.0-win64.zip"
+    assert _validate_url(url, cfg) == url  # 用户镜像主机放行
+    # 内置 GitHub 白名单不受影响（合并而非替换）
+    assert _validate_url("https://github.com/a.zip", cfg) == "https://github.com/a.zip"
+    # 未配置的第三方主机仍拒（追加不等于放开一切）
+    with pytest.raises(DownloadError, match="白名单"):
+        _validate_url("https://evil.example.com/a.zip", cfg)
+
+
 def test_validate_url_hostname_excludes_port() -> None:
     """白名单按 hostname 判断（不含端口）——带端口的白名单主机放行。"""
     url = "https://github.com:8443/a.zip"

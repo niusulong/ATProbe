@@ -240,6 +240,11 @@ class _StubWindow:
         self.download_progress = _StubSignals()
         self.download_done = _StubSignals()
         self._cancelled = False
+        # 批 5 T8：_download_worker 构造 UpdateSession 时读用户升级配置
+        # （update.allowed_hosts 接线）；替身直接给生产默认
+        from atprobe.infra.update.config import DEFAULT_CONFIG
+
+        self._update_config = DEFAULT_CONFIG
 
 
 def test_gui_download_worker_uses_session() -> None:
