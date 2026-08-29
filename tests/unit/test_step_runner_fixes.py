@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import time
 
+from _fakes import FakeCommandSender
+
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.extractor import extract_one
 from atprobe.domain.case.models import (
@@ -27,30 +29,18 @@ from atprobe.domain.case.models import (
 from atprobe.domain.report.models import StepStatus
 from atprobe.engine.step_runner import CaseContext, StepExecResult, execute_step
 from atprobe.infra.config.envconfig import EnvConfig
-from atprobe.infra.serial.interfaces import CancelToken, ICommandSender, Response, ResponseStatus
+from atprobe.infra.serial.interfaces import Response, ResponseStatus
 
 
-class FakeSender(ICommandSender):
-    """脚本化发送器：按序返回预设响应."""
+class FakeSender(FakeCommandSender):
+    """脚本化发送器：按序返回预设响应（responses 即基类 script 队列，批 5 T4 收敛）.
+
+    calls 计数/耗尽返回 OK/只接受不消费 expect 均为基类默认行为；
+    本类仅保留 responses 形参原名（调用点零改动）。
+    """
 
     def __init__(self, responses: list[Response]) -> None:
-        self._responses = list(responses)
-        self.calls = 0
-
-    def send_command(
-        self,
-        port: str,
-        command: str,
-        *,
-        timeout: float | None = None,
-        wait_urc: str | None = None,
-        expect: str | None = None,
-        cancel: CancelToken | None = None,
-    ) -> Response:
-        # expect：step_runner 无条件透传（批 2b Task 6），替身只接受不消费
-        _ = expect
-        self.calls += 1
-        return self._responses.pop(0) if self._responses else Response(text="\r\nOK\r\n")
+        super().__init__(responses)
 
 
 def _ok(text: str = "\r\nOK\r\n") -> Response:

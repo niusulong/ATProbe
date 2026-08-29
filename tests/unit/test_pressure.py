@@ -17,6 +17,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from _fakes import FakeCommandSender
+
 from atprobe.domain.case.models import (
     AssertElement,
     Case,
@@ -35,28 +37,12 @@ from atprobe.infra.serial.interfaces import (
 )
 
 
-class ScriptedSender(ICommandSender):
-    """按脚本返回响应或抛异常的发送器."""
+class ScriptedSender(FakeCommandSender):
+    """按脚本返回响应或抛异常的发送器.
 
-    def __init__(self, script: list[Response | BaseException]) -> None:
-        self._script = list(script)
-
-    def send_command(
-        self,
-        port: str,
-        command: str,
-        *,
-        timeout: float | None = None,
-        wait_urc: str | None = None,
-        expect: str | None = None,
-        cancel: CancelToken | None = None,
-    ) -> Response:
-        # expect：step_runner 无条件透传（批 2b Task 6），替身只接受不消费
-        _ = expect
-        item = self._script.pop(0) if self._script else _ok()
-        if isinstance(item, BaseException):
-            raise item
-        return item
+    脚本消费/异常注入/耗尽返回 OK 即基类默认行为（批 5 T4 收敛），
+    本类仅保留测试语义命名；签名失配修复见 _fakes.FakeCommandSender。
+    """
 
 
 def _ok() -> Response:
@@ -194,10 +180,15 @@ class TestCaseLevelOnFailureNormalized:
         assert s.step_stats[0].skipped_count == 0
 
 
-class _CancelAfterFirstSend(ICommandSender):
-    """第 1 次发送返回成功，并在返回前触发取消令牌（模拟轮执行后、间隔期取消）."""
+class _CancelAfterFirstSend(FakeCommandSender):
+    """第 1 次发送返回成功，并在返回前触发取消令牌（模拟轮执行后、间隔期取消）.
+
+    覆写 send_command（不复用基类脚本队列——行为是"无条件成功 + 副作用触发"，
+    与队列消费无关）；继承基类仅为固化全形参签名（含 pre_check，批 5 T4）。
+    """
 
     def __init__(self, cancel: CancelToken) -> None:
+        super().__init__()
         self._cancel = cancel
         self._sent = False
 
@@ -210,8 +201,9 @@ class _CancelAfterFirstSend(ICommandSender):
         wait_urc: str | None = None,
         expect: str | None = None,
         cancel: CancelToken | None = None,
+        pre_check: Callable[[], None] | None = None,
     ) -> Response:
-        _ = port, command, timeout, wait_urc, expect, cancel
+        _ = port, command, timeout, wait_urc, expect, cancel, pre_check
         if not self._sent:
             self._sent = True
             self._cancel.cancel()
