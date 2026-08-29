@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from atprobe.domain.quickcmd.store import builtin_library_path
+from atprobe.infra.quickcmd import builtin_library_path
 
 
 def test_builtin_library_path_exists():

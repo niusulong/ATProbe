@@ -30,12 +30,8 @@ from __future__ import annotations
 import functools
 import re as _re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
 
-from atprobe.domain.case.templater import render
-
-if TYPE_CHECKING:
-    from atprobe.infra.config.envconfig import EnvConfig
+from atprobe.domain.case.templater import EnvLookup, render
 
 
 class ExpressionError(ValueError):
@@ -359,7 +355,7 @@ def _escape_str_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _preprocess(expr: str, scope: Mapping[str, object], env: EnvConfig | None) -> str:
+def _preprocess(expr: str, scope: Mapping[str, object], env: EnvLookup | None) -> str:
     """兼容旧写法（§6.5）：表达式含 {{}} 时先替换占位符再求值.
 
     替换规则（P1-4）：
@@ -430,7 +426,7 @@ def _parse_cached(processed: str) -> _Node:
     return _Parser(tokens).parse()
 
 
-def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvConfig | None = None) -> bool:
+def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvLookup | None = None) -> bool:
     """求值条件表达式，返回布尔结果.
 
     Args:

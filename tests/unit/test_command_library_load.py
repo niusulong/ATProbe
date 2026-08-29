@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from atprobe.domain.quickcmd import CommandLibrary, dump_library, load_library
+from atprobe.domain.quickcmd import CommandLibrary
 from atprobe.gui.widgets import command_library as cl_mod
 from atprobe.gui.widgets.command_library import LibraryManagerDialog
+from atprobe.infra.quickcmd import dump_library, load_library
 
 
 def _make_library() -> CommandLibrary:

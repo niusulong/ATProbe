@@ -37,15 +37,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from atprobe.domain.quickcmd import (
-    CommandLibrary,
+from atprobe.domain.quickcmd import CommandLibrary
+from atprobe.gui.icons import make_icon
+from atprobe.gui.theme import get_tokens
+from atprobe.infra.quickcmd import (
     QuickCmdStoreError,
     builtin_library_path,
     dump_library,
     load_library,
 )
-from atprobe.gui.icons import make_icon
-from atprobe.gui.theme import get_tokens
 
 # 树节点角色：data 存元组 ("project",name) / ("group",proj,grp) / ("command",proj,grp,cmd)
 _NODE_ROLE = Qt.ItemDataRole.UserRole
@@ -345,7 +345,7 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
         内置示例文件缺失或为空时，回落到内存默认库（store.default_library），
         保证开箱即用而非空树。
         """
-        from atprobe.domain.quickcmd import default_library
+        from atprobe.infra.quickcmd import default_library
 
         try:
             self._library = load_library(self._path)

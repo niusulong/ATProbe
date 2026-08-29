@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from atprobe.domain.quickcmd.models import CommandLibrary
-from atprobe.domain.quickcmd.store import (
+from atprobe.infra.quickcmd import (
     QuickCmdStoreError,
     builtin_library_path,
     default_library,

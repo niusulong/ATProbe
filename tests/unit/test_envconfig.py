@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from atprobe.domain.case.templater import UndefinedReferenceError
+from atprobe.domain.case.errors import UndefinedReferenceError
 from atprobe.infra.config.envconfig import (
     EnvConfigError,
     dump_env_config,

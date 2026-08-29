@@ -26,7 +26,7 @@ from pathlib import Path
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-from atprobe.domain.case.templater import UndefinedReferenceError
+from atprobe.domain.case.errors import UndefinedReferenceError
 
 # 默认组名：简单名 {{param}} 在用例级未命中时回退到这里查找（§4.2 默认组）
 _DEFAULT_GROUP = "default"

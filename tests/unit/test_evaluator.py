@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import atprobe.domain.case.evaluator as evaluator
+from atprobe.domain.case.errors import UndefinedReferenceError
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
-from atprobe.domain.case.templater import UndefinedReferenceError
 from atprobe.infra.config.envconfig import EnvConfig
 
 

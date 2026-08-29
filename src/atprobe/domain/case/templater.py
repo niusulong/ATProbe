@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from atprobe.domain.case.datasource import (
     DataPathError,
@@ -29,9 +29,7 @@ from atprobe.domain.case.datasource import (
     ensure_within,
     resolve_case_path,
 )
-
-if TYPE_CHECKING:
-    from atprobe.infra.config.envconfig import EnvConfig
+from atprobe.domain.case.errors import UndefinedReferenceError
 
 # 匹配 {{ ... }}，允许内部空白；捕获内部名称
 _PLACEHOLDER = re.compile(r"{{\s*([^{}]+?)\s*}}")
@@ -40,12 +38,21 @@ _PLACEHOLDER = re.compile(r"{{\s*([^{}]+?)\s*}}")
 _FUNC_FORM = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\((.*)\)")
 
 
-class UndefinedReferenceError(KeyError):
-    """模板中引用了未定义的变量/环境配置项."""
+class EnvLookup(Protocol):
+    """render 对环境配置的最小调用面（结构化协议，D-2：domain 不反向依赖 infra）.
 
-    def __init__(self, ref: str) -> None:
-        self.ref = ref
-        super().__init__(ref)
+    infra 的 EnvConfig 已有同名同签名方法（resolve_str/has），结构匹配即满足
+    （Protocol 按 duck-typing 结构子类型，无需显式继承）。方法集以 render 的
+    实际调用面为准——只声明用到的那两个，不多不少。
+    """
+
+    def resolve_str(self, ref: str) -> str:
+        """解析 ``group.param`` 或简单名引用，返回字符串形式；未定义抛 UndefinedReferenceError."""
+        ...
+
+    def has(self, name: str) -> bool:
+        """简单名是否在环境配置中定义（默认组查找）."""
+        ...
 
 
 class TemplateRenderError(ValueError):
@@ -70,7 +77,7 @@ _BUILTINS: dict[str, Callable[[str, Path | None, Sequence[Path]], str]] = {
 def render(
     template: str,
     variables: Mapping[str, object],
-    env: EnvConfig | None = None,
+    env: EnvLookup | None = None,
     *,
     case_dir: Path | None = None,
     data_allowed_roots: tuple[Path, ...] = (),
@@ -81,7 +88,8 @@ def render(
     Args:
         template: 含占位符的字符串。
         variables: 用例级变量池（简单名查找源）。
-        env: 环境配置（点号名 + 简单名兜底查找源），None 表示无环境配置。
+        env: 环境配置查找接口（EnvLookup 协议，EnvConfig 结构匹配；点号名 +
+            简单名兜底查找源），None 表示无环境配置。
         case_dir: 用例文件所在目录——内置路径函数的默认锚根与相对路径基准
             （S-8，§5）。None 时相对路径按 CWD 解析、锚集仅 data_allowed_roots。
         data_allowed_roots: 额外数据根（EngineConfig.data_allowed_roots），

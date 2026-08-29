@@ -1,5 +1,7 @@
 """命令库 YAML 存储层（ruamel.yaml，对齐 envconfig 模式）.
 
+自 domain/quickcmd/store.py 整体迁入（D-2 领域纯净：存储属基础设施，domain 只留纯模型）。
+
 加载优先级（由调用方编排）：
     1. 内置示例文件 examples/quick_commands.yaml（builtin_library_path）
     2. load_library：文件存在则解析，缺失返回空库（幂等）
@@ -18,6 +20,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from atprobe.domain.quickcmd.models import CommandLibrary
+from atprobe.infra.resources import builtin_resource
 
 
 class QuickCmdStoreError(Exception):
@@ -140,11 +143,10 @@ def default_library() -> CommandLibrary:
 
 
 def builtin_library_path() -> Path:
-    """返回内置示例文件的绝对路径 examples/quick_commands.yaml。
+    """返回内置示例文件的绝对路径 examples/quick_commands.yaml.
 
     经 ``atprobe.infra.resources.builtin_resource`` 定位，开发态读仓库根、
     打包态读 _internal/examples，避免 ``parents[N]`` 硬编码在打包后失效。
+    （迁移前为避开 domain→infra 依赖而函数内延迟 import，迁至 infra 后提升到模块顶层。）
     """
-    from atprobe.infra.resources import builtin_resource
-
     return builtin_resource("quick_commands.yaml")

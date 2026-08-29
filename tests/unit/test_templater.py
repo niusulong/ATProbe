@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from atprobe.domain.case.errors import UndefinedReferenceError
 from atprobe.domain.case.templater import (
     TemplateRenderError,
-    UndefinedReferenceError,
     find_references,
     render,
 )

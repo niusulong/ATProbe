@@ -30,14 +30,11 @@ from pathlib import Path
 
 from atprobe.domain.case.assessor import AssertionOutcome, assess_all
 from atprobe.domain.case.datasource import DataPathError, read_data_file
+from atprobe.domain.case.errors import UndefinedReferenceError
 from atprobe.domain.case.evaluator import ExpressionError, evaluate
 from atprobe.domain.case.extractor import extract_all
 from atprobe.domain.case.models import FailureStrategy, Step
-from atprobe.domain.case.templater import (
-    TemplateRenderError,
-    UndefinedReferenceError,
-    render,
-)
+from atprobe.domain.case.templater import TemplateRenderError, render
 from atprobe.domain.report.models import (
     AssertionResult,
     InputType,

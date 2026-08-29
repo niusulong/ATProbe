@@ -1586,8 +1586,8 @@ class TestLibraryManagerDialogToolbar:
 
     def test_toolbar_only_has_add_project(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """对话框顶部只有 [＋项目]，旧的 ＋功能组/＋命令 按钮已移除."""
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         lib = load_library(builtin_library_path())
         dlg = LibraryManagerDialog(lib, builtin_library_path())
@@ -1598,8 +1598,8 @@ class TestLibraryManagerDialogToolbar:
 
     def test_embedded_add_buttons_present(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """项目/功能组节点行内嵌 widget（含＋按钮），命令节点无."""
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         lib = load_library(builtin_library_path())
         dlg = LibraryManagerDialog(lib, builtin_library_path())
@@ -1619,8 +1619,8 @@ class TestLibraryManagerDialogToolbar:
         """项目节点内嵌＋ → _add_group_interactive → 新功能组出现在该项目下."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("新功能组", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
@@ -1647,8 +1647,8 @@ class TestLibraryManagerDialogToolbar:
         """功能组节点内嵌＋ → _add_command_interactive → 新命令加入该功能组."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGMM", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
@@ -1677,8 +1677,8 @@ class TestLibraryManagerDialogToolbar:
         """无需预先选中节点：直接传项目+功能组名即可加命令（消除旧痛点）."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         input_called: list[bool] = []
         monkeypatch.setattr(
@@ -1711,8 +1711,8 @@ class TestLibraryManagerDialogToolbar:
         """
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGSN", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
@@ -1737,8 +1737,8 @@ class TestLibraryManagerDialogToolbar:
         """添加功能组后，新功能组节点被选中并居中滚动到位."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("新功能组", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
@@ -1800,7 +1800,7 @@ class TestCommandLibraryPanelContextMenu:
 
         # 用临时文件作为库路径（避免污染内置示例文件）
         lib_file = tmp_path / "lib.yaml"
-        from atprobe.domain.quickcmd import default_library, dump_library
+        from atprobe.infra.quickcmd import default_library, dump_library
 
         dump_library(default_library(), lib_file)
         monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
@@ -1823,7 +1823,7 @@ class TestCommandLibraryPanelContextMenu:
         assert "AT+CGMM_NEW" in new_grp.commands
         assert old_cmd not in new_grp.commands or old_cmd == "AT+CGMM_NEW"
         # 已落盘到 YAML（reload 后仍能看到）
-        from atprobe.domain.quickcmd import load_library
+        from atprobe.infra.quickcmd import load_library
 
         disk_lib = load_library(lib_file)
         disk_grp = disk_lib.find_group(proj, grp)
@@ -1837,7 +1837,7 @@ class TestCommandLibraryPanelContextMenu:
         from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
         lib_file = tmp_path / "lib.yaml"
-        from atprobe.domain.quickcmd import default_library, dump_library
+        from atprobe.infra.quickcmd import default_library, dump_library
 
         dump_library(default_library(), lib_file)
         monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
@@ -1870,7 +1870,7 @@ class TestCommandLibraryPanelContextMenu:
         from atprobe.gui.widgets.command_library import CommandLibraryPanel
 
         lib_file = tmp_path / "lib.yaml"
-        from atprobe.domain.quickcmd import default_library, dump_library
+        from atprobe.infra.quickcmd import default_library, dump_library
 
         dump_library(default_library(), lib_file)
         monkeypatch.setattr(cl_mod, "builtin_library_path", lambda: lib_file)
@@ -1903,8 +1903,8 @@ class TestLibraryManagerDialogNoFormPanel:
 
     def test_form_panel_removed(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """右侧表单相关成员应已全部移除."""
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
         for attr in ("_form_host", "_form_layout", "_on_tree_select", "_build_project_form"):
@@ -1914,8 +1914,8 @@ class TestLibraryManagerDialogNoFormPanel:
         """对话框双击命令 → 修改（工作副本，未落盘）."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CGSN_NEW", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
@@ -1934,8 +1934,8 @@ class TestLibraryManagerDialogNoFormPanel:
 
     def test_context_menu_group_has_add_command(self, qapp) -> None:  # type: ignore[no-untyped-def]
         """对话框右键功能组：菜单含「重命名」「新增命令」「删除功能组」."""
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         dlg = LibraryManagerDialog(load_library(builtin_library_path()), builtin_library_path())
         first_grp = dlg.tree.topLevelItem(0).child(0)
@@ -1949,8 +1949,8 @@ class TestLibraryManagerDialogNoFormPanel:
         import PySide6.QtWidgets as _qw
         from PySide6.QtCore import Qt as _Qt
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         # Yes → 删
         monkeypatch.setattr(
@@ -1966,8 +1966,8 @@ class TestLibraryManagerDialogNoFormPanel:
         """功能组节点内嵌的＋按钮：点击 → 弹输入框 → 加命令（覆盖 lambda 接线）."""
         import PySide6.QtWidgets as _qw
 
-        from atprobe.domain.quickcmd import builtin_library_path, load_library
         from atprobe.gui.widgets.command_library import _NODE_ROLE, LibraryManagerDialog
+        from atprobe.infra.quickcmd import builtin_library_path, load_library
 
         monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("AT+CBC", True))
         monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
