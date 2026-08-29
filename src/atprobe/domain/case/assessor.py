@@ -122,7 +122,10 @@ def assess(el: AssertElement, response: str, variables: Mapping[str, object]) ->
         )
 
     # ---- B. 变量断言 ----
-    assert el.var is not None and el.op is not None  # 由模型校验保证
+    # 类型收窄（var/op 由模型校验保证成对出现）——显式抛错而非裸 assert：
+    # python -O 下 assert 被剥除，破坏时会以 AttributeError 形式逃逸（设计 §7）
+    if el.var is None or el.op is None:
+        raise ValueError(f"变量断言缺少 var/op（模型校验缺口）：{el.var!r}/{el.op!r}")
     var_name = el.var
     op = el.op
     present = var_name in variables

@@ -189,7 +189,11 @@ def run_exit_code(result: ExecutionResult) -> int:
       （CaseStatus.SKIPPED 唯一产生点）；**suite_setup 失败不产生任何 CaseResult**
       （summary 全零），故单独检查 suite_setup_results 中的 FAIL；
     - suite_setup 失败 → 1（套件前置没跑成，cases 整体未执行，是真实问题
-      而非"无用例"）；suite_teardown 失败维持引擎口径"仅记录，不影响结果"；
+      而非"无用例"）；**断连即弃的两形态都要计入**：默认 ABORT 产出 FAIL，
+      显式 on_failure: skip 产出 SKIPPED（批 5 终审 I-1——只判 FAIL 会让
+      skip+断连以 exit 0 伪装成功，复活"suite_setup 失败被 summary 全零掩盖"
+      的旧洞）。when 条件跳过是 SKIPPED 但 error_kind=NONE，不误伤；
+      suite_teardown 失败维持引擎口径"仅记录，不影响结果"；
     - 仅中断（用户 Ctrl+C 主动取消，无失败无跳过）→ 0（用户主动取消不是错误，
       与 update 取消下载同口径）；
     - 其余（含全部通过）→ 0。
@@ -197,6 +201,9 @@ def run_exit_code(result: ExecutionResult) -> int:
     s = result.summary
     if s.failed or s.skipped:
         return 1
-    if any(r.status == StepStatus.FAIL for r in result.suite_setup_results):
-        return 1
+    for r in result.suite_setup_results:
+        if r.status is StepStatus.FAIL:
+            return 1
+        if r.status is StepStatus.SKIPPED and r.error_kind == "DISCONNECT":
+            return 1
     return 0

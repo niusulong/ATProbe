@@ -72,7 +72,9 @@ def _list_cases(cases_dir: Path, tag: list[str]) -> None:
     # continue 静默吞掉，用户不知道自己的用例根本没列出来）
     broken: list[tuple[Path, str]] = []
     # M5 修复：同时扫 .yaml 与 .yml，与 run.py 一致（否则 .yml 用例被静默漏掉）
-    yaml_files = sorted({*cases_dir.rglob("*.yaml"), *cases_dir.rglob("*.yml")})
+    # 后缀大小写不敏感（对齐 run/MCP 的 suffix.lower()——Linux 上 rglob 模式
+    # 匹配大小写敏感会漏 .YAML/.Yml，批 5 终审 M-3）
+    yaml_files = sorted(f for f in cases_dir.rglob("*") if f.suffix.lower() in (".yaml", ".yml"))
     for f in yaml_files:
         if f.name.startswith("suite-"):
             continue
@@ -132,7 +134,9 @@ def _list_suites(cases_dir: Path) -> None:
     typer.echo("可用套件:")
     count = 0
     # M5 修复：同时扫 suite-*.yaml 与 suite-*.yml，与 run.py 一致
-    suite_files = sorted({*cases_dir.rglob("suite-*.yaml"), *cases_dir.rglob("suite-*.yml")})
+    suite_files = sorted(
+        f for f in cases_dir.rglob("suite-*") if f.suffix.lower() in (".yaml", ".yml")
+    )
     for f in suite_files:
         name, desc, case_count, tags = read_suite_meta(f)
         rel = f.relative_to(cases_dir)

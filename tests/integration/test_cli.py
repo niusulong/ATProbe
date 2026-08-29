@@ -188,6 +188,48 @@ class TestRunExitCode:
         result = ExecutionResult(summary=Summary(), suite_setup_results=(fail_step,))
         assert _exit_code(result) == 1
 
+    def test_suite_setup_skip_disconnect_also_one(self) -> None:
+        """suite_setup 配 on_failure: skip 且断连：状态 SKIPPED 而非 FAIL——同样 1.
+
+        批 5 终审 I-1：断连安全阀对 skip 产出 SKIPPED 步骤，旧判定只查 FAIL →
+        summary 全零 + 无 FAIL → exit 0 伪装成功（migration 文档承诺的场景复活）。
+        when 条件跳过（SKIPPED+error_kind=NONE）不受影响仍 0。
+        """
+        from atprobe.cli.commands.run import _exit_code
+        from atprobe.domain.report.models import (
+            ExecutionResult,
+            InputType,
+            StepResult,
+            StepStatus,
+            Summary,
+        )
+
+        def _setup_step(status: StepStatus, error_kind: str) -> StepResult:
+            return StepResult(
+                step_index=1,
+                phase="suite_setup",
+                input_type=InputType.COMMAND,
+                command="AT+S1",
+                port="COM3",
+                status=status,
+                request="AT+S1",
+                response="",
+                error_kind=error_kind,
+            )
+
+        # skip+断连 → 1
+        result = ExecutionResult(
+            summary=Summary(),
+            suite_setup_results=(_setup_step(StepStatus.SKIPPED, "DISCONNECT"),),
+        )
+        assert _exit_code(result) == 1
+        # when 条件跳过（无错误分类）→ 0
+        result2 = ExecutionResult(
+            summary=Summary(),
+            suite_setup_results=(_setup_step(StepStatus.SKIPPED, "NONE"),),
+        )
+        assert _exit_code(result2) == 0
+
 
 class TestRunDryRun:
     def test_dry_run_lists_cases(self, examples_dir: Path) -> None:  # type: ignore[no-untyped-def]
