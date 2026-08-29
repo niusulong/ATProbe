@@ -25,8 +25,8 @@ def test_update_check_reports_new_version() -> None:
         html_url="https://github.com/niusulong/ATProbe/releases/tag/v0.3.0",
     )
     with (
-        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
-        patch("atprobe.cli.commands.update.is_newer", return_value=True),
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", return_value=True),
     ):
         result = runner.invoke(app, ["update", "--check"])
     assert result.exit_code == 0
@@ -47,8 +47,8 @@ def test_update_check_already_latest() -> None:
         html_url="h",
     )
     with (
-        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
-        patch("atprobe.cli.commands.update.is_newer", return_value=False),
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", return_value=False),
     ):
         result = runner.invoke(app, ["update", "--check"])
     assert result.exit_code == 0
@@ -60,7 +60,7 @@ def test_update_check_network_error_exit_code() -> None:
     from atprobe.infra.update import UpdateCheckError
 
     with patch(
-        "atprobe.cli.commands.update.fetch_latest",
+        "atprobe.infra.update.checker.fetch_latest",
         side_effect=UpdateCheckError("网络连接失败"),
     ):
         result = runner.invoke(app, ["update", "--check"])
@@ -89,11 +89,11 @@ def test_update_install_uses_update_session() -> None:
     session = MagicMock()
     session.download.return_value = dl_result
     with (
-        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
-        patch("atprobe.cli.commands.update.is_newer", return_value=True),
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", return_value=True),
         patch("atprobe.cli.commands.update.is_frozen", return_value=True),
-        patch("atprobe.cli.commands.update.UpdateSession", return_value=session),
-        patch("atprobe.cli.commands.update.apply_update") as apply_mock,
+        patch("atprobe.infra.update.session.UpdateSession", return_value=session),
+        patch("atprobe.infra.update.installer.apply_update") as apply_mock,
     ):
         result = runner.invoke(app, ["update", "--yes"])
     assert result.exit_code == 0
@@ -118,11 +118,74 @@ def test_update_prerelease_labeled_in_prompt() -> None:
         prerelease=True,
     )
     with (
-        patch("atprobe.cli.commands.update.fetch_latest", return_value=fake),
-        patch("atprobe.cli.commands.update.is_newer", return_value=True),
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", return_value=True),
         patch("atprobe.cli.commands.update.is_frozen", return_value=True),
     ):
         result = runner.invoke(app, ["update"], input="\n")  # 确认提示默认否
     assert result.exit_code == 0
     assert "0.10.0-rc1（预发布）" in result.stdout
     assert "已取消" in result.stdout
+
+
+# ---------- 批 5：退出码口径 + 版本未知特殊文案 ----------
+
+
+def test_update_download_cancelled_exit_zero() -> None:
+    """用户取消下载 → exit 0（旧实现 1，主动取消不是错误，脚本无法区分失败与取消）."""
+    from atprobe.infra.update import DownloadCancelled
+    from atprobe.infra.update.checker import ReleaseInfo
+
+    fake = ReleaseInfo(
+        version="0.3.0",
+        tag="v0.3.0",
+        zip_url="https://example.com/ATProbe-0.3.0-win64.zip",
+        zip_size=80000000,
+        release_notes="",
+        html_url="h",
+    )
+    session = MagicMock()
+    session.download.side_effect = DownloadCancelled()
+    with (
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", return_value=True),
+        patch("atprobe.cli.commands.update.is_frozen", return_value=True),
+        patch("atprobe.cli.commands.update.current_version", return_value="0.2.1"),
+        patch("atprobe.infra.update.session.UpdateSession", return_value=session),
+    ):
+        result = runner.invoke(app, ["update", "--yes"])
+    assert result.exit_code == 0
+    assert "已取消下载" in result.stdout
+
+
+def test_update_version_unknown_shows_hint_not_upgrade() -> None:
+    """VERSION 缺失（current_version 回退 0.0.0）：特殊文案 + Release 页，不进升级流程.
+
+    旧实现拿 0.0.0 参与比较：任何远端版本都"更新"，恒提示"有新版本可用"误导。
+    """
+    from atprobe.infra.update.checker import ReleaseInfo
+
+    fake = ReleaseInfo(
+        version="0.99.0",
+        tag="v0.99.0",
+        zip_url="https://example.com/ATProbe-0.99.0-win64.zip",
+        zip_size=80000000,
+        release_notes="",
+        html_url="https://github.com/niusulong/ATProbe/releases",
+    )
+    is_newer_mock = MagicMock(return_value=True)
+    with (
+        patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+        patch("atprobe.infra.update.checker.is_newer", is_newer_mock),
+        # current_version/is_version_known 是 update 模块顶层轻量导入，
+        # 按既有惯例在消费方命名空间打桩
+        patch("atprobe.cli.commands.update.current_version", return_value="0.0.0"),
+    ):
+        result = runner.invoke(app, ["update", "--check"])
+    assert result.exit_code == 0
+    assert "无法确定当前版本" in result.stdout
+    assert "Release 页" in result.stdout
+    assert "0.99.0" in result.stdout
+    # 不当作 0.0.0 参与比较：不提示升级、不调用 is_newer
+    assert "有新版本可用" not in result.stdout
+    is_newer_mock.assert_not_called()

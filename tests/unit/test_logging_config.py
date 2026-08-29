@@ -137,6 +137,48 @@ def test_setup_logging_is_idempotent(monkeypatch, tmp_path):
         root.setLevel(saved_level)
 
 
+def test_setup_logging_no_stderr_degrades_safely(monkeypatch):
+    """windowed 态 sys.stderr 为 None + 日志目录不可写：降级不炸且告警不丢.
+
+    旧实现无条件 basicConfig(stream=sys.stderr)：stderr=None 时挂载空 stream
+    的坏 handler（emit 抛 AttributeError 被 handleError 静默吞），降级事实
+    彻底丢失。修后：跳过控制台兜底，降级事实补记到 temp 文件日志。
+    """
+    import tempfile
+
+    from atprobe.infra import logging_config
+
+    def _raise_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError("模拟无权限")
+
+    monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
+    monkeypatch.setattr(sys, "stderr", None)  # 模拟 windowed GUI
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        # 不抛异常（不挂坏 handler）且仍降级到 temp
+        log_path = logging_config.setup_logging(level=logging.INFO)
+        assert str(log_path).startswith(tempfile.gettempdir())
+        assert log_path.name == "atprobe.log"
+        # 无 stderr 时只挂文件 handler（无控制台 StreamHandler 兜底）
+        for h in root.handlers:
+            assert isinstance(h, logging.FileHandler)
+        # 降级事实补记到 temp 文件（唯一的落点），不静默丢失
+        for h in root.handlers:
+            h.flush()
+        content = log_path.read_text(encoding="utf-8")
+        assert "不可写" in content
+        assert "降级" in content
+    finally:
+        # 差集关闭：只 close setup_logging 新挂的 handler，进入前已有的原样恢复
+        for h in list(root.handlers):
+            if h not in saved_handlers:
+                h.close()
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
+
 def test_setup_logging_debug_level(monkeypatch, tmp_path):
     """setup_logging(level=DEBUG) 后根 logger 级别为 DEBUG."""
     from atprobe.infra import logging_config

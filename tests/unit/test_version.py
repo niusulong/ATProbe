@@ -52,6 +52,35 @@ def test_current_version_fallback_on_missing(tmp_path: Path) -> None:
         assert version_mod.current_version() == "0.0.0"
 
 
+def test_is_version_known_false_for_fallback() -> None:
+    """回退值 '0.0.0'（VERSION 缺失）→ 未知：升级检查等比较场景须先排除.
+
+    否则任何远端版本都比 0.0.0 新，恒提示升级。
+    """
+    assert version_mod.is_version_known("0.0.0") is False
+
+
+def test_is_version_known_true_for_real_version() -> None:
+    """真实版本号 → 已知。"""
+    assert version_mod.is_version_known("0.9.0") is True
+    assert version_mod.is_version_known("v1.2.3") is True
+
+
+def test_is_version_known_reads_current_when_omitted(tmp_path: Path) -> None:
+    """缺省参数时读 current_version()：VERSION 存在 → True；缺失 → False。"""
+    with (
+        patch.object(version_mod, "app_root", return_value=tmp_path),
+        patch.object(version_mod, "is_frozen", return_value=False),
+    ):
+        assert version_mod.is_version_known() is False
+    (tmp_path / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    with (
+        patch.object(version_mod, "app_root", return_value=tmp_path),
+        patch.object(version_mod, "is_frozen", return_value=False),
+    ):
+        assert version_mod.is_version_known() is True
+
+
 def test_current_version_reads_real_repo() -> None:
     """集成：读真实仓库根 VERSION，应等于 pyproject.toml 的 version。"""
     import tomllib

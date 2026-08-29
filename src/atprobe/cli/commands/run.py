@@ -2,6 +2,9 @@
 
 把命令行参数 + 配置文件翻译成 M3 engine.start(配置) 调用，订阅进度事件渲染控制台，
 结束后触发 M4 生成 HTML 报告。
+
+顶层只留 typer/stdlib（engine/jinja2/ruamel 等重型依赖全部下沉到命令体内——
+`atprobe --version` / `gui` / `mcp` 等其它子命令不为 run 的执行链买单）。
 """
 
 from __future__ import annotations
@@ -10,32 +13,14 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
-from atprobe.domain.case.parser import CaseParseError
-from atprobe.domain.suite import SuiteParseError
-from atprobe.domain.suite.collect import collect_case_paths, filter_by_tags, load_cases
-from atprobe.engine import Engine, EngineConfig
-from atprobe.engine.config import StopMode
-from atprobe.engine.interfaces import (
-    CaseResultEvent,
-    CaseStartEvent,
-    PressureProgressEvent,
-    StepResultEvent,
-)
-from atprobe.infra.config.appconfig import load_app_config_file, parse_port_expr
-from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
-from atprobe.infra.resources import resolve_workspace_path
-from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import PortConfig
-from atprobe.reporting.console import (
-    format_case_result,
-    format_case_start,
-    format_step_line,
-)
-from atprobe.reporting.html import HtmlReporter
-from atprobe.reporting.interfaces import ReportOutput
+
+if TYPE_CHECKING:
+    from atprobe.domain.report.models import ExecutionResult
 
 
 def run(
@@ -82,18 +67,30 @@ def run(
     if debug:
         logging.getLogger("atprobe").info("--debug 模式：详细日志已开启")
 
-    # 1. 加载配置
-    # 用户显式 --config 按其值（相对 cwd）；否则打包态优先找 exe 同级 atprobe.yaml，
-    # 找不到回退 cwd（开发态 cwd=仓库根，与 exe 同级等价）。
-    if config is not None:
-        cfg_path = config
-    elif is_frozen() and (resolve_workspace_path("atprobe.yaml")).exists():
-        cfg_path = resolve_workspace_path("atprobe.yaml")
-    else:
-        cfg_path = Path("atprobe.yaml")
-    # P2 修复：配置加载错误收敛为 exit 2（旧实现 AppConfigError 直面 traceback）
-    from atprobe.infra.config.appconfig import AppConfigError
+    # 重型依赖集中下沉到命令体（见模块 docstring）
+    from atprobe.domain.case.parser import CaseParseError
+    from atprobe.domain.suite import SuiteParseError
+    from atprobe.domain.suite.collect import collect_case_paths, filter_by_tags, load_cases
+    from atprobe.engine import Engine, EngineConfig
+    from atprobe.infra.config.appconfig import (
+        AppConfigError,
+        load_app_config_file,
+        parse_port_expr,
+        resolve_config_path,
+    )
+    from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
+    from atprobe.infra.resources import resolve_workspace_path
+    from atprobe.reporting.console import (
+        format_case_result,
+        format_case_start,
+        format_step_line,
+    )
+    from atprobe.reporting.html import HtmlReporter
+    from atprobe.reporting.interfaces import ReportOutput
 
+    # 1. 加载配置（定位规则收敛 resolve_config_path 单点，与 list/mcp/GUI 一致）
+    cfg_path = resolve_config_path(config)
+    # P2 修复：配置加载错误收敛为 exit 2（旧实现 AppConfigError 直面 traceback）
     try:
         app_cfg = load_app_config_file(cfg_path)
     except AppConfigError as exc:
@@ -166,8 +163,10 @@ def run(
     # 4. 标签过滤（§3.4：多 --tag 并集；--exclude-tag 排除）
     cases = filter_by_tags(cases, tag, exclude_tag)
     if not cases:
-        typer.secho("过滤后无可用用例", fg=typer.colors.YELLOW)
-        raise typer.Exit(1)
+        # 退出码口径：过滤条件把用例集清空是输入/用法问题 → 2（旧实现 1，
+        # 与真实执行失败混淆，脚本无法区分重试价值）
+        typer.secho("过滤后无可用用例", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(2)
 
     # 5. 环境配置（M7）。用户显式 --env-config 按 cwd；否则锚定工作区
     env_path = env_config or resolve_workspace_path(app_cfg.env_config)
@@ -198,6 +197,14 @@ def run(
     # 7. 构造引擎配置并执行
     # session_id 加 4 位随机后缀，避免连续快速运行时按秒生成的 id 冲突覆盖报告
     import secrets
+
+    from atprobe.engine.config import StopMode
+    from atprobe.engine.interfaces import (
+        CaseResultEvent,
+        CaseStartEvent,
+        PressureProgressEvent,
+        StepResultEvent,
+    )
 
     session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
     # 用户显式 --report-dir 按 cwd；否则锚定工作区
@@ -289,11 +296,17 @@ def run(
         HtmlReporter().render(result, ReportOutput(html_path=html_path, to_console=False))
         typer.echo(f"报告已生成: {html_path}")
 
-    # 9. 退出码（§9）
-    s = result.summary
-    if s.failed or s.skipped or s.interrupted:
-        raise typer.Exit(1)
-    raise typer.Exit(0)
+    # 9. 退出码（§9）。口径（单一决策点 run_exit_code，与 HTML 报告徽标共用）：
+    # 失败/跳过/suite_setup 失败 → 1（真实问题）；仅用户中断（Ctrl+C，无失败无
+    # 跳过）→ 0（用户主动取消不是错误，与 update 取消下载同口径）；成功 0
+    raise typer.Exit(_exit_code(result))
+
+
+def _exit_code(result: ExecutionResult) -> int:
+    """run 退出码（委托 domain/report.run_exit_code 单一决策点，特征测试直测）."""
+    from atprobe.domain.report.models import run_exit_code
+
+    return run_exit_code(result)
 
 
 def _check_ports_available(ports: list[PortConfig]) -> None:

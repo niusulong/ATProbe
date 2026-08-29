@@ -34,10 +34,13 @@ from atprobe.gui.controllers import UpdateController
 from atprobe.gui.icons import make_icon
 from atprobe.gui.tabs.registry import TabBinding, TabTypeRegistry, default_registry
 from atprobe.gui.theme import get_tokens, read_theme_pref, write_theme_pref
-from atprobe.infra.config.appconfig import AppConfig, load_app_config_file
+from atprobe.infra.config.appconfig import (
+    AppConfig,
+    load_app_config_file,
+    resolve_config_path,
+)
 from atprobe.infra.config.envconfig import load_env_config_file
 from atprobe.infra.resources import resolve_workspace_path
-from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import (
     DataStreamSpec,
     FlowControl,
@@ -134,12 +137,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ATProbe — 串口 AT 命令自动化测试工具")
         self.resize(1200, 800)
 
-        # atprobe.yaml 定位：打包态优先 exe 同级，回退 cwd（开发态 cwd=仓库根）
-        if is_frozen() and resolve_workspace_path("atprobe.yaml").exists():
-            _cfg_path = resolve_workspace_path("atprobe.yaml")
-        else:
-            _cfg_path = Path("atprobe.yaml")
-        self._app_config = app_config or load_app_config_file(_cfg_path)
+        # atprobe.yaml 定位：收敛 resolve_config_path 单点（与 run/list/mcp 一致）
+        self._app_config = app_config or load_app_config_file(resolve_config_path())
         # 主题状态：优先读持久化偏好（QSettings），无记录时回退全局状态。
         # P2 修复（单一真相源）：旧实现只读全局 _THEME_DARK（app.py 启动时桥接），
         # 单独构造 MainWindow（测试/嵌入复用）会忽略已持久化的主题偏好。

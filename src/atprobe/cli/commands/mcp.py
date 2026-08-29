@@ -11,9 +11,6 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from atprobe.infra.resources import resolve_workspace_path
-from atprobe.infra.runtime import is_frozen
-
 if TYPE_CHECKING:
     from atprobe.infra.config.appconfig import AppConfig
     from atprobe.mcp.service import McpService
@@ -22,17 +19,15 @@ mcp_app = typer.Typer(help="MCP 服务（向大模型开放 ATProbe 能力）", 
 
 
 def _load_app_config(config: Path | None) -> AppConfig:
-    """加载配置：显式 --config > 打包态 exe 同级 atprobe.yaml > cwd（与 run/list 同规则）."""
-    from atprobe.infra.config.appconfig import AppConfigError, load_app_config_file
+    """加载配置：定位规则收敛 resolve_config_path 单点（与 run/list/GUI 同规则）."""
+    from atprobe.infra.config.appconfig import (
+        AppConfigError,
+        load_app_config_file,
+        resolve_config_path,
+    )
 
-    if config is not None:
-        cfg_path = config
-    elif is_frozen() and (resolve_workspace_path("atprobe.yaml")).exists():
-        cfg_path = resolve_workspace_path("atprobe.yaml")
-    else:
-        cfg_path = Path("atprobe.yaml")
     try:
-        return load_app_config_file(cfg_path)
+        return load_app_config_file(resolve_config_path(config))
     except AppConfigError as exc:
         typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc

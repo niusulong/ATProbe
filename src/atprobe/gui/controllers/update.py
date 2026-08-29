@@ -16,11 +16,15 @@ from PySide6.QtCore import QObject, Signal
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QProgressDialog, QWidget
 
+# check_result 信号的哨兵：版本未知（VERSION 缺失，current_version 回退 0.0.0）。
+# 与 None（已是最新）/ Exception（检查失败）区分——主线程据此给特殊文案而非升级框。
+_VERSION_UNKNOWN = object()
+
 
 class UpdateController(QObject):
     """GUI 更新流程控制器（D-1 拆分,自 MainWindow 迁出 ~200 行）。
 
-    信号:check_result(object)  # ReleaseInfo | Exception | None
+    信号:check_result(object)  # ReleaseInfo | _VERSION_UNKNOWN | None | Exception
           download_progress(int, int)
           download_done(object)  # Path | Exception
     职责:检查(worker 线程)→ 结果呈现(弹窗)→ 下载(UpdateSession)→ 完成回调;
@@ -28,6 +32,7 @@ class UpdateController(QObject):
     """
 
     # 跨线程事件投递信号（工作线程 → 主线程槽；自连接在 __init__，弹窗呈现在本类）
+    # check_result 哨兵：_VERSION_UNKNOWN=版本未知（模块顶部常量，特殊文案路径）
     check_result = Signal(object)  # ReleaseInfo | None(无新版/失败) | Exception
     download_progress = Signal(int, int)  # (done, total)
     download_done = Signal(object)  # Path | Exception
@@ -62,12 +67,17 @@ class UpdateController(QObject):
 
     def _check_worker(self) -> None:
         from atprobe.infra.update.checker import fetch_latest, is_newer
-        from atprobe.infra.version import current_version
+        from atprobe.infra.version import current_version, is_version_known
 
         try:
             info = fetch_latest()
-            result = info if is_newer(info.version, current_version()) else None
-            self.check_result.emit(result)
+            local = current_version()
+            if not is_version_known(local):
+                # VERSION 缺失时 local 是回退 '0.0.0'——不能参与 semver 比较
+                # （任何远端版本都"更新"，恒弹升级框误导）。未知走特殊呈现。
+                self.check_result.emit(_VERSION_UNKNOWN)
+                return
+            self.check_result.emit(info if is_newer(info.version, local) else None)
         except Exception as exc:  # noqa: BLE001 - P3：网络失败等统一经信号回主线程呈现
             self.check_result.emit(exc)
 
@@ -81,6 +91,15 @@ class UpdateController(QObject):
         if isinstance(result, Exception):
             if self._check_manual:
                 QMessageBox.warning(self._host, "检查更新", f"检查失败：{result}")
+            return
+        # 版本未知（VERSION 缺失）：不进入升级流程，提示从 Release 页确认
+        if result is _VERSION_UNKNOWN:
+            if self._check_manual:
+                QMessageBox.warning(
+                    self._host,
+                    "检查更新",
+                    "无法确定当前版本（VERSION 文件缺失），请从 Release 页确认。",
+                )
             return
         # None：已是最新
         if result is None:

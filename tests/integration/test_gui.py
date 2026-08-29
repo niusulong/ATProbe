@@ -2784,6 +2784,46 @@ class TestUpdateControllerMigration:
         ctrl._on_check_result(None)
         assert len(shown) == 2 and "已是最新" in shown[1][1]
 
+    def test_version_unknown_no_upgrade_dialog(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """VERSION 缺失（current_version 回退 0.0.0）：不进升级比较，给"无法确定当前版本"提示.
+
+        旧实现拿 0.0.0 参与比较：任何远端版本都"更新"，恒弹"发现新版本"误导。
+        """
+        from unittest.mock import patch
+
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.gui.controllers.update import UpdateController
+        from atprobe.infra.update.checker import ReleaseInfo
+
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+        monkeypatch.setattr(
+            _qw.QMessageBox, "information", lambda p, t, x, *a, **k: shown.append((t, x))
+        )
+
+        fake = ReleaseInfo(
+            version="0.99.0",
+            tag="v0.99.0",
+            zip_url="u",
+            zip_size=1,
+            release_notes="",
+            html_url="h",
+        )
+        ctrl = UpdateController(parent=None)
+        ctrl._check_manual = True  # noqa: SLF001 —— 手动模式才有呈现，验证文案
+        with (
+            patch("atprobe.infra.update.checker.fetch_latest", return_value=fake),
+            patch("atprobe.infra.version.current_version", return_value="0.0.0"),
+        ):
+            ctrl._check_worker()  # noqa: SLF001 —— 同步执行（同线程信号直达呈现槽）
+        qapp.processEvents()
+        assert len(shown) == 1
+        assert "无法确定当前版本" in shown[0][1]
+        assert "已是最新" not in shown[0][1]
+
 
 class TestFileSendGuardAssertions:
     """批 2a 携带守卫断言（逻辑层；pytest-qt 全量序列原生崩溃已证实、勿再引入）."""

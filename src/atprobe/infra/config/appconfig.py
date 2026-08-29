@@ -20,6 +20,8 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from atprobe.domain.case.redos import check_pattern
+from atprobe.infra.resources import resolve_workspace_path
+from atprobe.infra.runtime import is_frozen
 from atprobe.infra.serial.config import FrameFormat, PortConfig
 
 _yaml = YAML(typ="safe")
@@ -255,6 +257,24 @@ def load_app_config_file(path: str | Path) -> AppConfig:
     except OSError as exc:
         raise AppConfigError(f"无法读取配置文件：{exc.strerror or exc}", source=str(p)) from exc
     return load_app_config(text, source=str(p))
+
+
+def resolve_config_path(config: Path | None = None) -> Path:
+    """定位 atprobe.yaml：显式 --config > 打包态 exe 同级 > cwd.
+
+    CLI run/list/mcp 与 GUI MainWindow 四处共用的单点（此前各自复制粘贴
+    同一三分支，漂移风险高）。用户显式 ``--config`` 按其原值（相对 cwd）；
+    打包态优先 exe 同级 atprobe.yaml，找不到回退 cwd（开发态 cwd=仓库根，
+    与 exe 同级等价）。仅定位路径，存在性/合法性由 load_app_config_file 判定
+    （不存在 → 默认配置，不报错）。
+    """
+    if config is not None:
+        return config
+    if is_frozen():
+        beside_exe = resolve_workspace_path("atprobe.yaml")
+        if beside_exe.exists():
+            return beside_exe
+    return Path("atprobe.yaml")
 
 
 # ---------------------------------------------------------------------------

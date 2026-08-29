@@ -1,4 +1,8 @@
-"""M5 `list` 子命令（REQ-M5 §4）."""
+"""M5 `list` 子命令（REQ-M5 §4）.
+
+顶层只留 typer/stdlib（parser/collect 的 pydantic+ruamel 下沉到命令体，
+其它子命令不为 list 的解析链买单）。
+"""
 
 from __future__ import annotations
 
@@ -6,11 +10,12 @@ from pathlib import Path
 
 import typer
 
-from atprobe.domain.case.parser import CaseParseError, parse_case_file
-from atprobe.domain.suite.collect import read_suite_meta
-from atprobe.infra.config.appconfig import load_app_config_file
-from atprobe.infra.resources import resolve_workspace_path
-from atprobe.infra.runtime import is_frozen
+# 损坏用例展示封顶（路径 + 错误摘要，超出折叠为一行计数）
+_BROKEN_SHOW_LIMIT = 10
+# 单条错误摘要截断宽度（解析错误可能带整段 YAML 上下文，防刷屏）
+_ERR_SUMMARY_LIMIT = 120
+
+_VALID_TARGETS = ("cases", "suites", "ports")
 
 
 def list_cmd(
@@ -19,18 +24,17 @@ def list_cmd(
     tag: list[str] = typer.Option([], "--tag", "-t", help="标签过滤"),
 ) -> None:
     """列出可用用例 / 套件 / 串口."""
-    # 用户显式 --config 按其值；否则打包态优先 exe 同级 atprobe.yaml，回退 cwd
-    if config is not None:
-        cfg_path = config
-    elif is_frozen() and resolve_workspace_path("atprobe.yaml").exists():
-        cfg_path = resolve_workspace_path("atprobe.yaml")
-    else:
-        cfg_path = Path("atprobe.yaml")
-    # P2 修复：配置错误收敛 exit 2
-    from atprobe.infra.config.appconfig import AppConfigError
+    # 重型依赖下沉到命令体（见模块 docstring）
+    from atprobe.infra.config.appconfig import (
+        AppConfigError,
+        load_app_config_file,
+        resolve_config_path,
+    )
+    from atprobe.infra.resources import resolve_workspace_path
 
+    # 配置定位规则收敛 resolve_config_path 单点（与 run/mcp/GUI 一致）
     try:
-        app_cfg = load_app_config_file(cfg_path)
+        app_cfg = load_app_config_file(resolve_config_path(config))
     except AppConfigError as exc:
         typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc
@@ -42,16 +46,31 @@ def list_cmd(
     if target == "suites":
         _list_suites(cases_dir)
         return
-    # 默认 cases
-    _list_cases(cases_dir, tag)
+    if target == "cases":
+        _list_cases(cases_dir, tag)
+        return
+    # 未知 target：明确报错 exit 2（旧实现静默落回用例列表，打错字如
+    # "suite"/"port" 看似成功实则列表驴唇不对马嘴）
+    typer.secho(
+        f"未知的目标：{target}（可用：{' / '.join(_VALID_TARGETS)}）",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(2)
 
 
 def _list_cases(cases_dir: Path, tag: list[str]) -> None:
+    from atprobe.domain.case.parser import CaseParseError, parse_case_file
+
     if not cases_dir.exists():
-        typer.echo(f"用例目录不存在: {cases_dir}")
-        raise typer.Exit(1)
+        # 输入问题（目录不存在）→ exit 2（与 run 未找到用例同口径，非执行失败 1）
+        typer.secho(f"用例目录不存在: {cases_dir}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     typer.echo(f"可用用例 (扫描目录: {cases_dir}):")
     count = 0
+    # 损坏用例（解析失败）：路径 + 错误摘要，随计数汇总可见（旧实现 except 后
+    # continue 静默吞掉，用户不知道自己的用例根本没列出来）
+    broken: list[tuple[Path, str]] = []
     # M5 修复：同时扫 .yaml 与 .yml，与 run.py 一致（否则 .yml 用例被静默漏掉）
     yaml_files = sorted({*cases_dir.rglob("*.yaml"), *cases_dir.rglob("*.yml")})
     for f in yaml_files:
@@ -59,7 +78,8 @@ def _list_cases(cases_dir: Path, tag: list[str]) -> None:
             continue
         try:
             c = parse_case_file(f)
-        except CaseParseError:
+        except CaseParseError as exc:
+            broken.append((f, _err_summary(str(exc))))
             continue
         if tag and not any(t in c.tags for t in tag):
             continue
@@ -68,13 +88,47 @@ def _list_cases(cases_dir: Path, tag: list[str]) -> None:
         typer.echo(f"  {rel}/")
         typer.echo(f"    {tags:<20} {c.name:<24} {f.name}")
         count += 1
-    typer.echo(f"共 {count} 个用例")
+    if broken:
+        typer.secho(
+            f"解析失败 {len(broken)} 个（修复后才会被执行）：", fg=typer.colors.YELLOW, err=True
+        )
+        for f, err in broken[:_BROKEN_SHOW_LIMIT]:
+            typer.secho(f"  {f}: {err}", fg=typer.colors.YELLOW, err=True)
+        if len(broken) > _BROKEN_SHOW_LIMIT:
+            typer.secho(
+                f"  ……其余 {len(broken) - _BROKEN_SHOW_LIMIT} 个解析失败略",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+    # 计数汇总：正常 N 个 + 解析失败 M 个并列（旧实现只报 N，M 不可见）
+    summary = f"共 {count} 个用例"
+    if broken:
+        summary += f"，{len(broken)} 个解析失败"
+    typer.echo(summary)
+
+
+def _err_summary(err: str) -> str:
+    """解析错误摘要：剥掉冗余的 ``[来源路径]`` 前缀（路径已单列展示）后取首行截断.
+
+    解析错误可能带整段 YAML 上下文，不截断会刷屏；CaseParseError 文案自带
+    ``[source]`` 前缀，与单列的路径重复，先剥再截。
+    """
+    text = err.strip()
+    if text.startswith("[") and "] " in text:
+        text = text.split("] ", 1)[1]
+    first_line = text.splitlines()[0] if text else ""
+    if len(first_line) > _ERR_SUMMARY_LIMIT:
+        return first_line[: _ERR_SUMMARY_LIMIT - 1] + "…"
+    return first_line
 
 
 def _list_suites(cases_dir: Path) -> None:
+    from atprobe.domain.suite.collect import read_suite_meta
+
     if not cases_dir.exists():
-        typer.echo(f"用例目录不存在: {cases_dir}")
-        raise typer.Exit(1)
+        # 输入问题 → exit 2（同 _list_cases 口径）
+        typer.secho(f"用例目录不存在: {cases_dir}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     typer.echo("可用套件:")
     count = 0
     # M5 修复：同时扫 suite-*.yaml 与 suite-*.yml，与 run.py 一致

@@ -88,6 +88,7 @@
     }
     .hero-cmd .prompt { color: #58a6ff; }
     .hero-cmd .ok { color: #3fb950; }
+    .hero-cmd .err { color: #f85149; }
 
     .hero-progress {
       padding-left: 64px; margin-bottom: 20px;
@@ -101,6 +102,7 @@
     .hero-pct.pass { color: #3fb950; }
     .hero-pct.fail { color: #f85149; }
     .hero-pct.partial { color: #d29922; }
+    .hero-pct.interrupted { color: #8b949e; }
     .hero-bar {
       flex: 1; min-width: 240px;
       height: 10px; background: rgba(110,118,129,0.2);
@@ -123,6 +125,7 @@
     .hero-verdict.pass { color: #3fb950; }
     .hero-verdict.fail { color: #f85149; }
     .hero-verdict.partial { color: #d29922; }
+    .hero-verdict.interrupted { color: #8b949e; }
     {# 启动级错误（ExecutionResult.error）：执行没开始的原因必须一眼可见 #}
     .hero-error {
       margin: -6px 0 16px 64px; font-size: 13px; color: #f85149;
@@ -347,12 +350,15 @@
 
   {# ===================== SIGNATURE: 终端启动 hero ===================== #}
   {% set pass_rate_pct = summary.pass_rate|round(1) %}
-  {% set hero_class = 'pass' if overall[1] == 'pass' else ('fail' if overall[1] == 'fail' else 'partial') %}
+  {# hero_class：pass 绿 / fail 红 / interrupted 灰（用户中断，与 CLI 退出码 0 对齐）/ 其余 partial 黄 #}
+  {% set hero_class = 'pass' if overall[1] == 'pass' else ('fail' if overall[1] == 'fail' else ('interrupted' if overall[1] == 'interrupted' else 'partial')) %}
   <section class="hero" aria-label="测试结果概览">
     <div class="hero-cmd">
       <span class="prompt">$</span> atprobe run
       {% if result.env_snapshot %}--env loaded{% endif %}
-      · <span class="ok">exit {{ '0' if overall[1] == 'pass' else '1' }}</span>
+      {# exit 徽标：渲染方传入的 exit_code 与 CLI 退出码共用 run_exit_code
+         单一决策点（失败/跳过/suite_setup 失败→1；仅用户中断→0） #}
+      · <span class="{{ 'ok' if exit_code == 0 else 'err' }}">exit {{ exit_code }}</span>
     </div>
 
     <div class="hero-progress">

@@ -50,19 +50,26 @@ def setup_logging(level: int = logging.INFO) -> Path:
 
     # 文件 handler：优先工作区 logs/，失败降级 temp
     log_path = _log_dir() / "atprobe.log"
+    degraded = False
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         import tempfile
 
         log_path = Path(tempfile.gettempdir()) / "atprobe.log"
-        # 降级也要先 log（用临时 stderr handler 兜底，此时文件 handler 还没建）
-        logging.basicConfig(level=level, stream=sys.stderr, format=_FORMAT)
-        logging.warning("日志目录 %s 不可写，降级到 %s", _log_dir(), log_path)
-        for h in root.handlers[:]:
-            h.close()
-            root.removeHandler(h)
-        root.setLevel(level)
+        degraded = True
+        # 降级也要先 log（用临时 stderr handler 兜底，此时降级目标文件 handler
+        # 还没建）。windowed 态 sys.stderr 为 None：无条件 basicConfig(stream=None)
+        # 只会挂载空 stream 的坏 handler（emit 抛 AttributeError 被 handleError
+        # 静默吞，降级告警彻底丢失）——此时跳过控制台兜底，告警改记到随后
+        # 挂载的 temp 文件 handler（见函数尾部补记）
+        if sys.stderr is not None:
+            logging.basicConfig(level=level, stream=sys.stderr, format=_FORMAT)
+            logging.warning("日志目录 %s 不可写，降级到 %s", _log_dir(), log_path)
+            for h in root.handlers[:]:
+                h.close()
+                root.removeHandler(h)
+            root.setLevel(level)
 
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT, encoding="utf-8"
@@ -77,6 +84,10 @@ def setup_logging(level: int = logging.INFO) -> Path:
         stream_handler = logging.StreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
         root.addHandler(stream_handler)
+
+    if degraded and sys.stderr is None:
+        # windowed 无控制台的降级路径：降级事实唯一的落点是 temp 文件，补记一次
+        logging.warning("日志目录 %s 不可写（且无控制台可用），降级到 %s", _log_dir(), log_path)
 
     return log_path
 

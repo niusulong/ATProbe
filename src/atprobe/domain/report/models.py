@@ -179,3 +179,24 @@ class ExecutionResult:
     # 启动级错误（如端口全部打开失败）：非空表示执行未能开始，
     # CLI 据此输出原因到 stderr，GUI 据此弹窗。空字符串表示无启动错误。
     error: str = ""
+
+
+def run_exit_code(result: ExecutionResult) -> int:
+    """run 退出码口径（单一决策点：CLI 退出码与 HTML 报告 exit 徽标共用）。
+
+    - 启动级错误（result.error 非空）：调用方在报告前已提前 Exit(1)，不走本函数；
+    - 失败/跳过 > 0 → 1（真实执行问题）。注意用例级 setup 失败连坐产生 SKIPPED
+      （CaseStatus.SKIPPED 唯一产生点）；**suite_setup 失败不产生任何 CaseResult**
+      （summary 全零），故单独检查 suite_setup_results 中的 FAIL；
+    - suite_setup 失败 → 1（套件前置没跑成，cases 整体未执行，是真实问题
+      而非"无用例"）；suite_teardown 失败维持引擎口径"仅记录，不影响结果"；
+    - 仅中断（用户 Ctrl+C 主动取消，无失败无跳过）→ 0（用户主动取消不是错误，
+      与 update 取消下载同口径）；
+    - 其余（含全部通过）→ 0。
+    """
+    s = result.summary
+    if s.failed or s.skipped:
+        return 1
+    if any(r.status == StepStatus.FAIL for r in result.suite_setup_results):
+        return 1
+    return 0

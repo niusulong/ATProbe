@@ -41,24 +41,35 @@ class HtmlReporter(IReporter):
     def render_html(self, result: ExecutionResult) -> str:
         """渲染为 HTML 字符串."""
         template = self._env.get_template("report.html.j2")
-        # 整体结果标识（§4.2）。判定口径（§4.4② 消费侧修复）：
-        #   启动级错误 > 全部通过（需 total>0，0/0 不得误判）> 全部跳过（含 0/0）
-        #   > 全部失败（需 failed>0）> 部分通过
+        # 整体结果标识（§4.2）。判定口径（§4.4② 消费侧修复，与 console._overall 同口径）：
+        #   启动级错误 > 无用例（total=0，引导检查过滤条件/路径）> 全部通过
+        #   > 全部中断（用户主动取消，非"跳过"）> 全部跳过 > 全部失败（需 failed>0）
+        #   > 部分通过
         s = result.summary
         if result.error:
             # 启动级错误（sender 解析失败/端口全部打开失败）：执行根本没开始，
             # 既非"全部通过"（total=0 时旧实现 0==0 误判）也非"全部跳过"。
             overall = ("执行错误", "fail")
-        elif (
-            s.total_cases > 0 and s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0
-        ):
+        elif s.total_cases == 0:
+            # 空执行：明示无用例并引导检查（旧实现落"全部跳过"，语义混淆）
+            overall = ("无用例（检查过滤条件/路径）", "neutral")
+        elif s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0:
             overall = ("全部通过", "pass")
+        elif s.interrupted > 0 and s.passed == 0 and s.failed == 0 and s.skipped == 0:
+            # 全部中断：用户 Ctrl+C 等主动取消——"执行已中断"，不是"全部跳过"
+            overall = ("执行已中断", "interrupted")
         elif s.passed == 0 and s.failed == 0:
-            # 全部跳过/中断/无结果（无通过、无失败，含 0/0 空执行）
             overall = ("全部跳过", "neutral")
         elif s.failed > 0 and s.passed == 0:
             # 有失败且无通过 → 全部失败（必须有 failed>0，否则全部跳过会被误判）
             overall = ("全部失败", "fail")
         else:
             overall = ("部分通过", "partial")
-        return template.render(result=result, summary=s, overall=overall)
+        # exit 徽标：与 CLI 退出码共用单一决策点（run_exit_code）——不再从
+        # overall 类别反推（T5 审查 M-1："部分通过"+零失败零跳过=用户中断时
+        # 已完成的用例，CLI 实际 exit 0，按类别反推会误显 exit 1）
+        from atprobe.domain.report.models import run_exit_code
+
+        return template.render(
+            result=result, summary=s, overall=overall, exit_code=run_exit_code(result)
+        )

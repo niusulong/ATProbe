@@ -114,18 +114,25 @@ class ConsoleReporter(IReporter):
 def _overall(result: ExecutionResult, color: bool) -> str:
     """整体判定文案（§4.4② 消费侧修复，与 HtmlReporter.render_html 同口径）.
 
-    优先级：启动级错误 > 全部通过（需 total>0，0/0 不得误判）> 全部跳过（含 0/0）
-    > 全部失败（需 failed>0）> 部分通过。
+    优先级：启动级错误 > 无用例（total=0，引导检查过滤条件/路径）> 全部通过
+    > 全部中断（用户主动取消，非"跳过"）> 全部跳过 > 全部失败（需 failed>0）
+    > 部分通过。
     """
     s = result.summary
     if result.error:
         # 启动级错误（sender 解析失败/端口全部打开失败）：执行没开始，
         # 0/0 旧实现会误判"全部通过"——不是跳过，是错误。
         return _color(f"执行错误：{result.error}", "FAIL", enabled=color)
-    if s.total_cases > 0 and s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0:
+    if s.total_cases == 0:
+        # 空执行：不是"全部跳过"——明示无用例并引导检查（旧实现 0/0 落
+        # "全部跳过"，与真空跑一晚的语义混淆）
+        return _color("无用例（检查过滤条件/路径）", "SKIPPED", enabled=color)
+    if s.passed == s.total_cases and s.failed == 0 and s.interrupted == 0:
         return _color("全部通过", "PASS", enabled=color)
+    if s.interrupted > 0 and s.passed == 0 and s.failed == 0 and s.skipped == 0:
+        # 全部中断：用户 Ctrl+C 等主动取消——"执行已中断"，不是"全部跳过"
+        return _color("执行已中断", "INTERRUPTED", enabled=color)
     if s.passed == 0 and s.failed == 0:
-        # 无通过、无失败（全部跳过/中断，含 0/0 空执行）
         return _color("全部跳过", "SKIPPED", enabled=color)
     if s.failed > 0 and s.passed == 0:
         return _color("全部失败", "FAIL", enabled=color)

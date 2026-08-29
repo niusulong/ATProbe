@@ -197,16 +197,26 @@ class TestHtmlReporter:
 
 
 class TestOverallVerdictHtml:
-    """整体判定口径（设计 §4.4②）：0/0 不判"全部通过"、启动级错误判"执行错误"."""
+    """整体判定口径（设计 §4.4②）：0/0 明示"无用例"、启动级错误判"执行错误"."""
 
-    def test_zero_zero_is_not_all_pass(self) -> None:
-        # total=0/passed=0/failed=0（如端口全部打开失败但 error 未设/空选集）：
-        # 旧实现 0==0 误判"全部通过"（绿色）——必须落"全部跳过"（neutral）
+    def test_zero_zero_says_no_cases(self) -> None:
+        # total=0（如端口全部打开失败但 error 未设/空选集）：旧实现 0==0 误判
+        # "全部通过"，修后落"全部跳过"，再修后明示"无用例"并引导检查
         result = ExecutionResult(summary=aggregate([]))
         html = HtmlReporter().render_html(result)
-        assert "全部跳过" in html
+        assert "无用例（检查过滤条件/路径）" in html
         assert "全部通过" not in html
+        assert "全部跳过" not in html
         assert "执行错误" not in html
+
+    def test_all_interrupted_says_interrupted(self) -> None:
+        # 全部中断（用户 Ctrl+C 主动取消）：不是"全部跳过"——明示"执行已中断"
+        case = CaseResult(case_name="中断用例", case_file="a.yaml", status=CaseStatus.INTERRUPTED)
+        result = ExecutionResult(summary=aggregate([case]), case_results=(case,))
+        html = HtmlReporter().render_html(result)
+        assert "执行已中断" in html
+        assert "全部跳过" not in html
+        assert "全部通过" not in html
 
     def test_startup_error_overrides_verdict(self) -> None:
         # 启动级错误：执行没开始——"执行错误"（fail 红色），且错误原因须可见
@@ -247,6 +257,41 @@ class TestOverallVerdictHtml:
         assert "全部失败" in html
         assert "全部通过" not in html
 
+    def test_exit_badge_matches_cli_on_mixed_interrupted(self) -> None:
+        """PASS+INTERRUPTED 混合零失败零跳过：verdict"部分通过"但 exit 徽标 0。
+
+        T5 审查 M-1：Ctrl+C 中途的典型态——CLI 按用户主动取消 exit 0，旧徽标
+        从 overall 类别反推（partial→1）与 CLI 矛盾。徽标现走 run_exit_code
+        单一决策点（渲染方传 exit_code）。
+        """
+        cases = (
+            CaseResult(case_name="已完成", case_file="a.yaml", status=CaseStatus.PASS),
+            CaseResult(case_name="在跑被中断", case_file="b.yaml", status=CaseStatus.INTERRUPTED),
+        )
+        result = ExecutionResult(summary=aggregate(list(cases)), case_results=cases)
+        html = HtmlReporter().render_html(result)
+        assert "部分通过" in html
+        assert "exit 0" in html
+
+    def test_exit_badge_one_on_fail_or_suite_setup_fail(self) -> None:
+        # 含失败 → exit 1；suite_setup 失败（summary 全零）→ 同样 exit 1（M-2）
+        fail_case = CaseResult(case_name="失败", case_file="a.yaml", status=CaseStatus.FAIL)
+        result = ExecutionResult(summary=aggregate([fail_case]), case_results=(fail_case,))
+        assert "exit 1" in HtmlReporter().render_html(result)
+
+        setup_fail = StepResult(
+            step_index=1,
+            phase="suite_setup",
+            input_type=InputType.COMMAND,
+            command="AT",
+            port="COM3",
+            status=StepStatus.FAIL,
+            request="AT",
+            response="ERROR",
+        )
+        result2 = ExecutionResult(summary=aggregate([]), suite_setup_results=(setup_fail,))
+        assert "exit 1" in HtmlReporter().render_html(result2)
+
 
 class TestOverallVerdictConsole:
     """console 汇总与 html 同口径（§4.4②）."""
@@ -255,11 +300,21 @@ class TestOverallVerdictConsole:
         ConsoleReporter().render(result, ReportOutput(to_console=True, color=False))
         return capsys.readouterr().out
 
-    def test_zero_zero_is_skipped_not_pass(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_zero_zero_says_no_cases(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # total=0：明示"无用例（检查过滤条件/路径）"，不落"全部跳过"
         out = self._render(ExecutionResult(summary=aggregate([])), capsys)
-        assert "全部跳过" in out
+        assert "无用例（检查过滤条件/路径）" in out
         assert "全部通过" not in out
+        assert "全部跳过" not in out
         assert "全部失败" not in out
+
+    def test_all_interrupted_says_interrupted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # 全部中断（用户主动取消）：不是"全部跳过"——"执行已中断"
+        case = CaseResult(case_name="中断用例", case_file="a.yaml", status=CaseStatus.INTERRUPTED)
+        out = self._render(ExecutionResult(summary=aggregate([case]), case_results=(case,)), capsys)
+        assert "执行已中断" in out
+        assert "全部跳过" not in out
+        assert "全部通过" not in out
 
     def test_startup_error_shown(self, capsys: pytest.CaptureFixture[str]) -> None:
         result = ExecutionResult(summary=aggregate([]), error="端口全部打开失败：COM3 不存在")
@@ -325,3 +380,81 @@ class TestConsoleReporter:
         assert "套件级前后置异常" in out
         assert "suite_setup" in out
         assert "AT+CFUN=1" in out
+
+
+class TestFormatStepLine:
+    """实时进度行点线填充（M4 §3.2）：按显示宽度截断+补点，长命令不撑爆行宽.
+
+    旧实现按码点数（len）拼点：CJK 命令占 2 列却按 1 列计，点数补多、
+    整行溢出换行错位。特征口径：命令按 truncate 列截断（超出加 …），
+    点线按显示宽度补齐——同 truncate 下 ASCII 与 CJK 命令总宽一致。
+    """
+
+    @staticmethod
+    def _disp_width(s: str) -> int:
+        import unicodedata
+
+        return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+    def test_long_ascii_command_truncated_with_ellipsis(self) -> None:
+        from atprobe.reporting.console import format_step_line
+
+        line = format_step_line(
+            phase="steps",
+            port="COM3",
+            command="AT+VERYLONGCOMMAND=" + "A" * 80,
+            status="PASS",
+            duration_ms=100.0,
+            color=False,
+        )
+        assert "…" in line  # 超宽截断加省略号
+        cmd = line.split("] ", 2)[2].split(" .")[0]
+        assert self._disp_width(cmd) <= 40  # 截断到 truncate 列
+
+    def test_long_cjk_command_same_total_width_as_ascii(self) -> None:
+        """CJK 宽字符按 2 列计：同 truncate 下与 ASCII 命令的点线段总宽一致.
+
+        旧实现按 len 拼点（CJK 记 1 列）：截断后的中文命令仍按码点数补点，
+        填充段比 ASCII 宽出近一倍、整行溢出换行。修后按显示宽度补点——
+        两侧填充段宽度差不超过 1（CJK 截断粒度是 2 列，奇偶差一列属精度内）。
+        """
+        from atprobe.reporting.console import format_step_line
+
+        line_a = format_step_line(
+            phase="steps",
+            port="COM3",
+            command="A" * 60,
+            status="PASS",
+            duration_ms=100.0,
+            color=False,
+        )
+        line_c = format_step_line(
+            phase="steps",
+            port="COM3",
+            command="查询信号质量" * 10,
+            status="PASS",
+            duration_ms=100.0,
+            color=False,
+        )
+        seg_a = line_a.split("] ", 2)[2]
+        seg_c = line_c.split("] ", 2)[2]
+        # 命令 + 空格 + 点线（到状态前的填充段）总显示宽度一致
+        fill_a = self._disp_width(seg_a.split("PASS")[0])
+        fill_c = self._disp_width(seg_c.split("PASS")[0])
+        assert abs(fill_a - fill_c) <= 1
+        assert line_c.count("…") == 1  # CJK 命令也走截断路径
+
+    def test_short_command_padded_with_dots(self) -> None:
+        from atprobe.reporting.console import format_step_line
+
+        line = format_step_line(
+            phase="steps",
+            port="COM3",
+            command="AT",
+            status="PASS",
+            duration_ms=100.0,
+            color=False,
+        )
+        assert "AT " in line
+        assert "..." in line  # 短命令有点线填充
+        assert "…" not in line  # 未超宽不截断

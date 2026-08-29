@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -175,3 +176,39 @@ class TestLogKeepRemoved:
         cfg = load_app_config("log:\n  dir: ./x\n  keep: 3")
         assert cfg.log_dir == "./x"
         assert not hasattr(cfg, "log_keep")
+
+
+class TestResolveConfigPath:
+    """配置定位单点（批 5 收敛）：显式 --config > 打包态 exe 同级 > cwd.
+
+    旧实现 run/list/mcp/GUI 四处复制同一三分支，此处钉单点行为。
+    """
+
+    def test_explicit_config_wins(self, tmp_path, monkeypatch) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.infra.config import appconfig
+
+        explicit = tmp_path / "my.yaml"
+        monkeypatch.setattr(appconfig, "is_frozen", lambda: True)  # 打包态也不越权
+        assert appconfig.resolve_config_path(explicit) == explicit
+
+    def test_dev_falls_back_to_cwd(self, monkeypatch) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.infra.config import appconfig
+
+        monkeypatch.setattr(appconfig, "is_frozen", lambda: False)
+        assert appconfig.resolve_config_path() == Path("atprobe.yaml")
+
+    def test_frozen_picks_beside_exe_when_exists(self, tmp_path, monkeypatch) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.infra.config import appconfig
+
+        exe_level = tmp_path / "atprobe.yaml"
+        exe_level.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(appconfig, "is_frozen", lambda: True)
+        monkeypatch.setattr(appconfig, "resolve_workspace_path", lambda raw: tmp_path / raw)
+        assert appconfig.resolve_config_path() == exe_level
+
+    def test_frozen_missing_beside_exe_falls_back_to_cwd(self, tmp_path, monkeypatch) -> None:  # noqa: ANN001, no-untyped-def
+        from atprobe.infra.config import appconfig
+
+        monkeypatch.setattr(appconfig, "is_frozen", lambda: True)
+        monkeypatch.setattr(appconfig, "resolve_workspace_path", lambda raw: tmp_path / raw)
+        assert appconfig.resolve_config_path() == Path("atprobe.yaml")

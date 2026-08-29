@@ -114,6 +114,35 @@ def test_serve_no_mcp_friendly_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res.exception is None or isinstance(res.exception, SystemExit)
 
 
+def test_serve_token_file_flag_is_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--token-file 指向目录 → exit 2 干净错误（无 traceback），不裸崩.
+
+    Windows 下对目录 read_text 抛 PermissionError（POSIX 抛 IsADirectoryError），
+    auth._read_token_file 已按 is_dir 统一前置分类；本测试钉 CLI flag 级呈现
+    （config mcp.token_file 路径见 test_serve_config_token_file_is_directory）。
+    """
+    monkeypatch.delenv("ATPROBE_MCP_TOKEN", raising=False)
+    d = tmp_path / "adir"
+    d.mkdir()
+    res = runner.invoke(
+        app,
+        [
+            "mcp",
+            "serve",
+            "--config",
+            str(tmp_path / "absent.yaml"),
+            "--token-file",
+            str(d),
+        ],
+    )
+    assert res.exit_code == 2
+    assert res.exception is None or isinstance(res.exception, SystemExit)
+    assert "Token 加载失败" in res.output
+    assert "目录" in res.output
+
+
 def test_serve_config_token_file_is_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
