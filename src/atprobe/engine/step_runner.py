@@ -73,6 +73,12 @@ class CaseContext:
     # （批 4 并入 mcp.allowed_roots）。None/空 = 无对应锚根。
     case_dir: Path | None = None
     data_allowed_roots: tuple[Path, ...] = ()
+    # 两阶段悬置跟踪（真机验收教训 2026-08-29）：command 步骤经 expect 命中
+    # 提示符完成（设备进入等数据态）后置为该 expect 正则；data 步骤收尾清除。
+    # 悬置期间执行任何 AT 命令步骤 → 告警（其字节会被设备当作数据吞掉——
+    # COM5 实证：断言中止后 teardown 前 16 字节被 FSWF 会话吞掉）。
+    # 引擎线程私有，串行执行无需同步。
+    pending_prompt: str | None = None
 
 
 @dataclass
@@ -168,6 +174,22 @@ def execute_step(
     input_type = InputType.DATA if step.data is not None else InputType.COMMAND
 
     # ------------------------------------------------------------------
+    # 0a. 两阶段悬置检查（真机验收教训 2026-08-29）：上一 command 步骤经
+    #     expect 命中提示符后设备进入等数据态，若声明的 data 步骤未执行
+    #     （漏写/when 跳过/断言中止在 data 之前/数据装配失败），本步骤的
+    #     AT 命令字节会被设备当作数据吞掉（COM5 实证）。一次性告警并清除
+    #     （设备随后按 <time> 超时自行退出等待态）。
+    # ------------------------------------------------------------------
+    if ctx.pending_prompt is not None and step.data is None:
+        _log.warning(
+            "步骤 %d 前存在两阶段悬置（expect %r 已命中提示符但数据未发送）："
+            "设备仍在等数据态，本命令的字节可能被当作数据吞掉",
+            index,
+            ctx.pending_prompt,
+        )
+        ctx.pending_prompt = None
+
+    # ------------------------------------------------------------------
     # 0. 内置变量注入（REQ-M2 §5.4）
     # ------------------------------------------------------------------
     ctx.variables["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -249,6 +271,33 @@ def execute_step(
     # 提交 extract 到变量池（仅匹配成功的变量；失败的等同未定义，REQ-M2 §5.1）——
     # 过滤口径唯一：与 until 判定/断言作用域共用 _filter_matched（设计 §4.1）
     ctx.variables.update(_filter_matched(attempt.extracted, attempt.matched))
+
+    # ------------------------------------------------------------------
+    # 两阶段悬置簿记（与入口 0a 检查配对，见 CaseContext.pending_prompt）：
+    # - command 步骤 expect 命中提示符完成（COMPLETE 且文本不以 OK 结尾——
+    #   OK 结尾说明设备回了终结行而非提示符等待）→ 置悬置标记（无论本步断言
+    #   结果如何——断言失败中止正是不发数据的常见路径）；
+    # - data 步骤收尾：收到 OK（COMPLETE）→ 会话完整关闭，清除；否则（设备
+    #   未确认）→ 立即告警（会话状态不明）并清除（一次性）。
+    # ------------------------------------------------------------------
+    if step.data is not None:
+        if (
+            ctx.pending_prompt is not None
+            and attempt.response.status is not ResponseStatus.COMPLETE
+        ):
+            _log.warning(
+                "步骤 %d 两阶段数据已发送但设备未回 OK（状态 %s）：会话状态不明，"
+                "后续 AT 命令或被当作数据吞掉",
+                index,
+                attempt.response.status.value,
+            )
+        ctx.pending_prompt = None
+    elif (
+        step.expect is not None
+        and attempt.response.status is ResponseStatus.COMPLETE
+        and not attempt.response.text.rstrip().endswith("OK")
+    ):
+        ctx.pending_prompt = step.expect
 
     # status 与 abort_case 一并算出（含 skip 区分，REQ-M2 §3.4）
     strategy: FailureStrategy | None = None

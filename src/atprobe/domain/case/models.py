@@ -342,6 +342,26 @@ class Step(BaseModel):
                 "重试/轮询重发的字节会被设备当 AT 命令解析、污染后续命令(设计 §2.2)",
                 src,
             )
+        # 自定义完成语义（expect/wait_urc）无断言告警（真机验收教训 2026-08-29）：
+        # 超时回退业务码路径（TIMEOUT 三态：文本完整以 \r\n 结尾 → 走正常断言），
+        # 无断言则无条件放行——expect 单独使用不是严格闸门（探针假 PASS 实证）。
+        # 建议配 matches: '^...$' 严格锚定提示符/URC 完整形态。
+        if (self.expect is not None or self.wait_urc is not None) and self.assert_ is None:
+            kind = "expect" if self.expect is not None else "wait_urc"
+            loc = (
+                self.command
+                or (self.data.file if self.data else None)
+                or (self.data.inline if self.data else None)
+                or (self.data.inline_hex if self.data else None)
+                or "?"
+            )
+            _log.warning(
+                "步骤 %s 配置 %s 但无 assert：%s 超时会回退业务码断言路径而无条件放行"
+                "（expect/wait_urc 单独使用不是严格闸门）——建议配 matches 严格断言锚定",
+                loc,
+                kind,
+                kind,
+            )
         return self
 
     @property
@@ -446,6 +466,25 @@ class Case(_Frozen):
                 "会被设备当 AT 命令解析、污染后续命令",
                 self.name,
             )
+        # 两阶段悬置静态检查（真机验收教训 2026-08-29）：command 步骤经 expect 命中
+        # 提示符后设备进入等数据态，其同阶段直接后继应是声明长度的 data 步骤——
+        # 后继是 command（漏写 data）或 expect 步骤为阶段末步时，后续 AT 命令的
+        # 字节会被设备当作数据吞掉（COM5 实证：teardown 前 16 字节被吞）。
+        # 引擎另有运行期悬置告警（step_runner 入口检查），此处拦截可静态发现的形态。
+        for phase_name, seq in (("setup", self.setup), ("steps", self.steps)):
+            for i, s in enumerate(seq):
+                if s.expect is None or s.command is None or s.data is not None:
+                    continue
+                nxt = seq[i + 1] if i + 1 < len(seq) else None
+                if nxt is None or nxt.data is None:
+                    _log.warning(
+                        "用例 %s 的 %s 阶段步骤 %d（%s，expect 提示符）直接后继不是 data "
+                        "步骤：设备将停在两阶段等待态，后续 AT 命令可能被当作数据吞掉",
+                        self.name,
+                        phase_name,
+                        i + 1,
+                        s.command,
+                    )
         return self
 
     @property
