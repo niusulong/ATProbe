@@ -30,8 +30,10 @@ _BARE_PREFIXES = ("AT", "ATI", "ATZ", "ATE0", "ATE1")
 _MAX_SEND_LEN = 4096
 # FSWF <size> 上限（用户盘 1M，手册 ch28 §28.1：0..1024*1024）
 _MAX_FS_SIZE = 1024 * 1024
-# FSWF <time> 上限 ms（手册参数表写 0~240000，但示例 60001 即 ERROR——按示例取 60000）
-_MAX_FS_TIME_MS = 60000
+# FSWF <time> 上限 ms。真机实测（2026-08-29，N58 V00F，COM5 二分探针）：
+# 0..120000 接受（出提示符），120001 起拒（+CME ERROR: 53）——手册参数表
+# （0~240000）与手册示例（60001 即 ERROR）**均与实机不符**，以实机为准
+_MAX_FS_TIME_MS = 120000
 
 
 def _line(text: str) -> bytes:
@@ -243,10 +245,11 @@ class AtResponder:
     def _h_fswf(self, cmd: str) -> list[str] | _Prompt | _Raw | None:
         """AT+FSWF="<file_name>",<mode>,<size>,<time> 写文件阶段一（手册 §28.1）.
 
-        mode 0=覆写起始 / 1=末尾追加；size 0..1048576；time 0..60000。注意：<time>
-        手册参数表写 0~240000 但示例 60001 即 ERROR——两者矛盾，按示例以 60000 为上限
-        模拟（真机观察项：240000 内其他值真机是否放行）。合法 → 提示符 ``\\r\\n>``
-        （形态手册未定义，默认同 TCPSEND 无尾空格）。
+        mode 0=覆写起始 / 1=末尾追加；size 0..1048576；time 0..120000（真机
+        实测上限，见 ``_MAX_FS_TIME_MS`` 注释——手册参数表与示例均与实机不符）。
+        合法 → 提示符 ``\\r\\n> ``（**带尾空格**——真机实测 2026-08-29 hex 取证
+        ``0D 0A 3E 20``，与 UDPSEND 手册形态一致；先前按 TCPSEND 无空格形态的
+        假设已在真机验收中证伪并回填，手册 §28.1 响应格式表未列提示符行）。
         """
         parsed = self._split_quoted(cmd.partition("=")[2])
         if parsed is None:
@@ -266,7 +269,7 @@ class AtResponder:
         self._pending = _PendingSend(
             kind="fs", link=0, remaining=size, filename=name, mode=mode, declared=size
         )
-        return _Prompt(b">")
+        return _Prompt(b"> ")
 
     def _h_fsrf(self, cmd: str) -> list[str] | _Prompt | _Raw | None:
         """AT+FSRF="<file_name>",<mode>,<size>[,<position>] 读文件（手册 §28.2）.

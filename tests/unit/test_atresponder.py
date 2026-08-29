@@ -211,7 +211,8 @@ class TestFswfTwoPhase:
 
     def test_write_ok_and_stored(self) -> None:
         r = _mute(AtResponder())
-        assert r.respond('AT+FSWF="test.txt",0,10,10000') == b"\r\n>"
+        # 提示符带尾空格（真机实测回填，见 test_time_120000_accepted 注释）
+        assert r.respond('AT+FSWF="test.txt",0,10,10000') == b"\r\n> "
         assert r.receive_data(b"0123456789") == b"\r\nOK\r\n"
         assert r._fs["test.txt"] == bytearray(b"0123456789")
 
@@ -238,12 +239,19 @@ class TestFswfTwoPhase:
         assert r.receive_data(b"def") == b"\r\nOK\r\n"
         assert bytes(r._fs["f.txt"]) == b"abcdef"
 
-    def test_time_60001_error(self) -> None:
-        # 手册示例：time=60001 即 ERROR（参数表 0~240000 与示例矛盾，按示例模拟）
-        assert _mute(AtResponder()).respond('AT+FSWF="t.txt",1,1024,60001') == b"\r\nERROR\r\n"
+    def test_time_boundary_120001_error(self) -> None:
+        # 真机实测（2026-08-29，N58 V00F，COM5 二分探针）：time 上限 120000——
+        # 手册参数表（0~240000）与手册示例（60001 即 ERROR）均与实机不符，
+        # 120001 起实机回 +CME ERROR: 53（vsim 按 ERROR 模拟）
+        assert _mute(AtResponder()).respond('AT+FSWF="t.txt",1,1024,120001') == b"\r\nERROR\r\n"
+
+    def test_time_120000_accepted_with_trailing_space_prompt(self) -> None:
+        # 上限含 120000；提示符带尾空格（真机 hex 取证 0D 0A 3E 20，同 UDPSEND 形态）
+        assert _mute(AtResponder()).respond('AT+FSWF="t.txt",0,0,120000') == b"\r\n> "
 
     def test_time_60000_accepted(self) -> None:
-        assert _mute(AtResponder()).respond('AT+FSWF="t.txt",0,0,60000') == b"\r\n>"
+        # 手册示例声称 60001 即 ERROR——实机 60000/60001/100000/120000 均接受
+        assert _mute(AtResponder()).respond('AT+FSWF="t.txt",0,0,60000') == b"\r\n> "
 
     def test_size_over_limit_error(self) -> None:
         assert _mute(AtResponder()).respond('AT+FSWF="t.txt",0,1048577,1000') == b"\r\nERROR\r\n"
