@@ -56,6 +56,8 @@ cache/
 # ============================================================
 # HTML 报告与用例执行会话目录（程序生成，勿提交）
 reports/
+# 本地手工验证产物目录（CLI/GUI 冒烟跑出的 reports_* 变体，勿提交）
+reports_*/
 logs/
 logs/**
 *.session.json
@@ -136,6 +138,9 @@ docs/*
 # .zcode/ 为本地工具目录；packaging/build.log 为构建日志，均不纳入版本控制
 .zcode/
 packaging/build.log
+
+# 根目录 skills/（本地技能实验目录，与 .agents/skills/ 无关），不入库
+skills/
 
 # 本地自用 skills（pdf / skill-creator），与本项目无关，不入库
 .agents/skills/pdf/

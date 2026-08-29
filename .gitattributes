@@ -1,0 +1,15 @@
+# 行尾归一（批 5 T10）：仓库统一 LF，Windows 检出亦 LF（core.autocrlf=false 环境，
+# 跨平台 diff 零噪音）。CRLF 只保留给 Windows 必需的脚本资源。
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF（cmd 解析器对 LF 脚本的 label/续行有兼容性问题）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做任何转换
+*.png binary
+*.ico binary
+*.zip binary
+*.minisig binary
+*.pub -text

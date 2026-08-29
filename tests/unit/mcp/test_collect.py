@@ -64,6 +64,18 @@ class TestCollectCasePaths:
         files, _ = collect_case_paths([tmp_path], cases_dir=tmp_path)
         assert sorted(f.name for f in files) == ["a.yaml", "b.yml"]
 
+    def test_dir_scan_suffix_case_insensitive(self, tmp_path: Path) -> None:
+        # 批 4 修复守护：_walk_yaml_files 用 suffix.lower() 判定后缀——
+        # .YAML/.Yml 必须照常收集（对齐 Windows pathlib glob 大小写不敏感
+        # 行为，否则大写后缀用例被静默漏收）；非 YAML 后缀（.TXT）即使
+        # 内容合法也不收
+        _write(tmp_path / "a.YAML", MINIMAL_CASE)
+        _write(tmp_path / "b.Yml", MINIMAL_CASE)
+        _write(tmp_path / "c.TXT", MINIMAL_CASE)
+        files, warnings = collect_case_paths([tmp_path], cases_dir=tmp_path)
+        assert sorted(f.name for f in files) == ["a.YAML", "b.Yml"]
+        assert warnings == []
+
     def test_skips_suite_prefix_in_dir_scan(self, tmp_path: Path) -> None:
         # suite- 前缀对两种后缀一致排除（.yml 同样不能漏）
         _write(tmp_path / "suite-x.yaml", "name: s\n")
@@ -101,6 +113,19 @@ class TestCollectCasePaths:
         sf_yml = _write(tmp_path / "suite-y.yml", "name: s\n")
         files, _ = collect_case_paths([sf_yaml, sf_yml], cases_dir=tmp_path)
         assert files == [sf_yaml, sf_yml]
+
+    def test_explicit_file_suffix_case_insensitive(self, tmp_path: Path) -> None:
+        # 单文件分支同样 suffix.lower() 判定：显式 .YAML 照收；显式 .TXT
+        # 不视为用例（走“路径不存在”警告分支，由 CLI/MCP 调用方呈现）
+        big = _write(tmp_path / "x.YAML", MINIMAL_CASE)
+        files, warnings = collect_case_paths([big], cases_dir=tmp_path)
+        assert files == [big]
+        assert warnings == []
+
+        txt = _write(tmp_path / "y.TXT", MINIMAL_CASE)
+        files2, warnings2 = collect_case_paths([txt], cases_dir=tmp_path)
+        assert files2 == []
+        assert len(warnings2) == 1
 
 
 class TestCollectCasePathsLimits:

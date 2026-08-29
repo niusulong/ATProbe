@@ -49,6 +49,10 @@ def _ok() -> Response:
     return Response(text="\r\nOK\r\n", status=ResponseStatus.COMPLETE)
 
 
+def _err() -> Response:
+    return Response(text="\r\nERROR\r\n", status=ResponseStatus.COMPLETE)
+
+
 def _case(
     on_failure: FailureStrategy | None,
     *,
@@ -178,6 +182,40 @@ class TestCaseLevelOnFailureNormalized:
         # 该步记 FAIL 而非 SKIPPED（若 case 级 SKIP 泄漏 → skipped_count==2）
         assert s.step_stats[0].fail_count == 2
         assert s.step_stats[0].skipped_count == 0
+
+
+class TestWarmupRoundExecutedButNotCounted:
+    """warmup 轮冒烟（M2 §13.2：warmup 轮执行但不计入统计）.
+
+    run_pressure 把 warmup 与正式轮收进同一循环、靠轮号区分（rnd<=warmup
+    整轮丢弃）。若无轮号区分：warmup 失败轮会被计入 failed_rounds（此处即
+    成功率 50% → passed=False 误判），且其步骤失败混入 step_stats。计数轮
+    从 warmup 之后开始。
+    """
+
+    def test_warmup_failure_discarded_counting_starts_after_warmup(self) -> None:
+        # warmup=1、count=2：轮 1（warmup）响应 ERROR 断言必败，轮 2（计数轮）OK
+        case = Case(
+            name="warmup 冒烟",
+            steps=(Step(command="AT", assert_=[AssertElement(contains="OK")]),),
+            loop=LoopConfig(count=2, warmup=1, interval=0),
+        )
+        sender = ScriptedSender([_err(), _ok()])
+        result = _run(case, sender)
+        s = result.stats
+        # warmup 轮确实执行了（2 轮发送都发生），只是不计统计
+        assert len(sender.sent) == 2
+        # 计数从 warmup 之后开始：仅轮 2 计入
+        assert s.total_rounds == 2
+        assert s.warmup_rounds == 1
+        assert s.counted_rounds == 1
+        assert s.success_rounds == 1
+        assert s.failed_rounds == 0
+        assert s.success_rate == 100.0
+        assert s.passed is True
+        # step_stats 同口径：warmup 轮的失败不进步骤统计
+        assert s.step_stats[0].success_count == 1
+        assert s.step_stats[0].fail_count == 0
 
 
 class _CancelAfterFirstSend(FakeCommandSender):
