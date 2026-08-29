@@ -216,9 +216,9 @@ class TestUrcFilterStripping:
         conn._awaiting.set()
         # 业务码行（无 OK 终结）+ 插队噪声 URC 单元
         conn._process_incoming(b"\r\n+UPDATETIME: No PPP Link\r\n" + b"\r\n" + _GPS + b"\r\n\r\n")
-        # 模拟 send_command 超时路径：取 buffer 快照
+        # 模拟 send_command 超时路径：快照并清缓冲（生产同款入口 snapshot_and_reset）
         with conn._buffer_lock:
-            partial = bytes(conn._buffer)
+            partial = conn._assembler.snapshot_and_reset()
         text = conn._strip_filtered_urcs(partial.decode("utf-8", errors="replace"))
         assert text == "\r\n+UPDATETIME: No PPP Link\r\n"
         assert text.endswith("\r\n"), "step_runner 业务码判定依赖尾部 CRLF"
@@ -231,7 +231,7 @@ class TestUrcFilterStripping:
             b"\r\n+UPDATETIME: No PPP Link\r\n\r\n" + _GPS[:20]
         )  # GPS 行只到一半
         with conn._buffer_lock:
-            partial = bytes(conn._buffer)
+            partial = conn._assembler.snapshot_and_reset()
         text = conn._strip_filtered_urcs(partial.decode("utf-8", errors="replace"))
         assert text == "\r\n+UPDATETIME: No PPP Link\r\n"
 
@@ -274,7 +274,7 @@ class TestOrphanContinuationDrop:
         # 入口清缓冲（等价 send_command 开头）：半行被清、置孤儿标记
         with conn._buffer_lock:
             conn._reset_buffer_locked()
-        assert conn._orphan_pending is True
+        assert conn._assembler.orphan_pending is True
 
         # 续行到达（补上 GPS 行剩余部分 + 尾随 CRLF），随后命令应答
         conn._awaiting.set()
@@ -292,7 +292,7 @@ class TestOrphanContinuationDrop:
         conn._process_incoming(b"\r\n+DONE: 1\r\n")  # 完整行（idle 已截断为 tail=''）
         with conn._buffer_lock:
             conn._reset_buffer_locked()
-        assert conn._orphan_pending is False
+        assert conn._assembler.orphan_pending is False
 
     def test_orphan_spanning_multiple_chunks(self, monkeypatch) -> None:
         """续行跨多个 chunk：全部丢弃直至行尾，之后的 chunk 正常处理."""
@@ -319,11 +319,11 @@ class TestOrphanContinuationDrop:
         conn._process_incoming(b"\r\n$MY")  # idle：tail 半行留在缓冲
         with conn._buffer_lock:
             conn._reset_buffer_locked()
-        assert conn._orphan_pending is True
+        assert conn._assembler.orphan_pending is True
         # 收割尾部/入口的清缓冲：缓冲空 → 赋值语义清 stale
         with conn._buffer_lock:
             conn._reset_buffer_locked()
-        assert conn._orphan_pending is False
+        assert conn._assembler.orphan_pending is False
         # 下一命令响应不再被吞前缀
         conn._awaiting.set()
         conn._process_incoming(b"\r\nOK\r\n")
@@ -336,8 +336,8 @@ class TestOrphanContinuationDrop:
         conn._process_incoming(b"\r\n$MY")  # 死链半行残留在缓冲
         with conn._buffer_lock:
             conn._reset_buffer_locked()
-            conn._orphan_pending = False  # _maybe_reconnect 的显式覆写
-        assert conn._orphan_pending is False
+            conn._assembler.clear_orphan()  # _maybe_reconnect 的显式覆写（生产同款入口）
+        assert conn._assembler.orphan_pending is False
         # 重连后新会话首行完整保留
         conn._awaiting.set()
         conn._process_incoming(b"\r\n+CFUN: 1\r\n\r\nOK\r\n")
@@ -414,7 +414,7 @@ class TestStaleResponseReap:
         assert r1.status is ResponseStatus.TIMEOUT
         assert conn._response_q.empty()
         with conn._buffer_lock:
-            assert len(conn._buffer) == 0
+            assert len(conn._assembler.buffer) == 0
 
 
 class TestWaitUrcTargetPriorityOverFilter:
@@ -462,10 +462,10 @@ class TestWaitUrcTargetPriorityOverFilter:
         conn._awaiting.set()
         with conn._buffer_lock:
             conn._wait_urc_re = re.compile(rb"\$MYGPSPOS")
-        # 只到半条目标行即超时（悬置尾行）
+        # 只到半条目标行即超时（悬置尾行）；快照并清缓冲（生产超时路径同款）
         conn._process_incoming(b"\r\nOK\r\n\r\n" + _GPS[:20])
         with conn._buffer_lock:
-            partial = bytes(conn._buffer)
+            partial = conn._assembler.snapshot_and_reset()
             keep_re = conn._wait_urc_re
         text = conn._strip_filtered_urcs(partial.decode("utf-8", errors="replace"), keep_re=keep_re)
         # OK 段保留 + 悬置的半条目标行保留（keep_re 豁免使其不被当噪声剥离）

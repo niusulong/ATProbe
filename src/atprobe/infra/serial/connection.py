@@ -131,7 +131,8 @@ class SerialConnection:
         self._response_q: queue.Queue[Response] = queue.Queue()
         # RX 行组装器（批 2a Task 4）：缓冲/已派发偏移/代次/孤儿标记四态收敛
         # 于此（迁移前为本类的 _buffer/_urc_dispatched/_buffer_generation/
-        # _orphan_pending 字段）。读线程 _process_incoming 持锁 feed，引擎线程
+        # _orphan_pending 字段；批 5 已删同名属性迁移桥——测试改经本实例的
+        # 公开只读属性观测）。读线程 _process_incoming 持锁 feed，引擎线程
         # 持锁 reset/snapshot_and_reset——P1-1 三处「锁外派发后回读当前 buffer」
         # 的交付路径结构性消除（交付一律用 feed 事件携带的快照）。
         self._assembler = LineAssembler()
@@ -140,19 +141,19 @@ class SerialConnection:
         self._awaiting = threading.Event()
         # 异步指令 URC 等待状态（wait_urc 模式）：非 None 时 OK 不终结，须等匹配此正则的
         # URC 才把整段响应（OK+URC）入队。由 send_command 进入时设置、退出时复位。
-        # 线程语义归本类：每周期经 _sync_cycle_locked 注入 assembler（feed 持锁
-        # 快照使用），终结事件经 RxEvent.keep_re 携带回读——锁外零读。
+        # 线程语义归本类：每周期在 feed 时注入 assembler（_process_incoming 持锁
+        # 快照使用，单点），终结事件经 RxEvent.keep_re 携带回读——锁外零读。
         self._wait_urc_re: re.Pattern[bytes] | None = None
 
         # 在途命令的回显行（strip 后的 bytes）：send_command 进入等待时设置、
         # 返回时清除。URC 结构化分类用——与刚发送命令逐字相等的行是回显，
         # 不派发为 URC 事件（其余行不按前缀过滤，见模块头注释）。线程语义归
-        # 本类，与 _wait_urc_re 同经 _sync_cycle_locked 逐周期注入 assembler。
+        # 本类，与 _wait_urc_re 同在 feed 时逐周期注入 assembler。
         self._echo_line: bytes | None = None
 
         # expect 附加完成条件正则（设计 §2.3，批 2a Task 5 接线）：send_command(expect=)
         # 进入周期时编译设置、_reset_wait_urc 复位。与 _wait_urc_re 同族：线程语义归
-        # 本类，周期参数经 _sync_cycle_locked 逐周期注入 assembler（feed 持锁快照
+        # 本类，周期参数在 feed 时逐周期注入 assembler（_process_incoming 持锁快照
         # 使用）。与 wait_urc 的互斥在 send_command 入口校验（均为自定义完成语义）。
         self._expect_re: re.Pattern[bytes] | None = None
 
@@ -457,10 +458,10 @@ class SerialConnection:
         # 却因 awaiting 未 set 而丢弃断连信号的竞态窗口。先 set 后，读线程的断连路径会
         # 把 ERROR 入队，drain 只会清掉这次命令之前入队的陈旧响应；若 drain 恰好清掉了
         # 刚入队的断连信号也无妨——紧接着 write 会失败或断连会再次触发，最终都能被感知）。
-        # set 与周期参数注入同锁原子——assembler 的 waiting 判定即刻生效。
+        # set 持锁完成——与读线程 feed 的取值在锁内原子交错（assembler 周期参数在
+        # feed 时统一注入，单点见 _process_incoming）。
         with self._buffer_lock:
             self._awaiting.set()
-            self._sync_cycle_locked()
         self._drain_response_q()
 
         self._log_tx(payload)
@@ -469,8 +470,8 @@ class SerialConnection:
             self._serial.write(payload)  # type: ignore[union-attr]
             self._serial.flush()  # type: ignore[union-attr]
         except (SerialException, OSError) as exc:
-            # 等待态退出 + wait_urc/echo 复位（_reset_wait_urc 内部持锁同步周期
-            # 参数，覆盖本处全部突变）
+            # 等待态退出 + wait_urc/echo 复位（_reset_wait_urc 持锁清除周期字段；
+            # assembler 侧注入在下次 feed 时按新值收敛，覆盖本处全部突变）
             self._awaiting.clear()
             self._reset_wait_urc()
             return Response(
@@ -515,7 +516,6 @@ class SerialConnection:
                 # Response（被 _single_attempt 当作普通 ERROR → FAIL，与 Fake 路径分叉）。
                 with self._buffer_lock:
                     self._awaiting.clear()
-                    self._sync_cycle_locked()
                 self._drain_response_q()
                 raise OperationCancelled("命令等待被取消")
             remaining = deadline - self._clock()
@@ -527,7 +527,6 @@ class SerialConnection:
                     resp = self._response_q.get_nowait()
                     with self._buffer_lock:
                         self._awaiting.clear()
-                        self._sync_cycle_locked()
                     return resp
                 except queue.Empty:
                     break
@@ -535,14 +534,12 @@ class SerialConnection:
                 resp = self._response_q.get(timeout=min(remaining, 0.2))
                 with self._buffer_lock:
                     self._awaiting.clear()
-                    self._sync_cycle_locked()
                 return resp
             except queue.Empty:
                 continue
         # 超时：把当前缓冲作为超时响应交付（§7.5：完整但超时）
         with self._buffer_lock:
             self._awaiting.clear()
-            self._sync_cycle_locked()
             # 快照后清缓冲：若存在未完结半行置孤儿标记（收割窗口内到达的
             # 续行由读线程字节级丢弃）
             partial = self._assembler.snapshot_and_reset()
@@ -573,13 +570,11 @@ class SerialConnection:
             reap_deadline = self._clock() + _STALE_REAP_GRACE_S
             with self._buffer_lock:
                 self._awaiting.set()
-                self._sync_cycle_locked()
         try:
             while reap:
                 if cancel is not None and cancel.cancelled:
                     with self._buffer_lock:
                         self._awaiting.clear()
-                        self._sync_cycle_locked()
                     self._drain_response_q()
                     raise OperationCancelled("命令等待被取消")
                 remain = reap_deadline - self._clock()
@@ -594,7 +589,6 @@ class SerialConnection:
         finally:
             with self._buffer_lock:
                 self._awaiting.clear()
-                self._sync_cycle_locked()
                 # 收割窗口内可能又累积了半行数据（迟到响应的尾巴）：清缓冲，
                 # 避免泄漏给下一条命令（其入口本也会清，此处提前消除）。
                 self._reset_buffer_locked()
@@ -612,73 +606,17 @@ class SerialConnection:
         self._assembler.reset()
 
     def _reset_wait_urc(self) -> None:
-        """复位周期等待状态（wait_urc/expect/echo 清除后同步周期参数）.
+        """复位周期等待状态（wait_urc/expect/echo 清除）.
 
         同时清除回显行与 expect 正则——等待窗口结束，后续空闲数据不再需要回显
-        排除，expect 也不再终结任何数据（assembler 的周期参数经下方 sync 即刻
-        更新，不留残留在途语义）。
+        排除，expect 也不再终结任何数据。assembler 的周期参数在下次 feed 时按
+        当前值统一注入（_process_incoming 单点），复位即刻作用于其后到达的
+        所有数据，不留残留在途语义。
         """
         with self._buffer_lock:
             self._wait_urc_re = None
             self._echo_line = None
             self._expect_re = None
-            self._sync_cycle_locked()
-
-    def _sync_cycle_locked(self) -> None:
-        """把线程语义状态注入 assembler 周期参数（调用方须已持 _buffer_lock）.
-
-        不变量：_process_incoming 的 feed 时 sync 是**机制本体**——消费者端
-        单一位置，对写点遗漏自愈（正是接线类 bug 的防线）；各写点后的 sync
-        为 belt-and-suspenders，供未来 feed 之外的新消费者。删除 feed 时
-        sync 须先迁移 35 处测试直写点（_awaiting/_wait_urc_re/_echo_line
-        等，批 5 删桥时处理）。
-        """
-        self._assembler.set_cycle(
-            waiting=self._awaiting.is_set(),
-            echo_line=self._echo_line,
-            wait_urc_re=self._wait_urc_re,
-            expect_re=self._expect_re,  # send_command(expect=) 设置/_reset_wait_urc 复位
-        )
-
-    # ------------------------------------------------------------------
-    # 迁移兼容桥（批 2a Task 4）：迁移前的缓冲族私有字段名（_buffer/
-    # _urc_dispatched/_buffer_generation/_orphan_pending）按属性委托到
-    # assembler——状态单一来源不变。行为锁测试（test_connection_urc_dedup/
-    # structural）直接读写这些名字构造竞态场景；生产代码不得使用（状态操作
-    # 一律经 _reset_buffer_locked/snapshot_and_reset/_process_incoming 及
-    # _maybe_reconnect 的 clear_orphan 一等方法）。
-    # ------------------------------------------------------------------
-    @property
-    def _buffer(self) -> bytearray:
-        """累积缓冲的活引用（ assembler.buffer 桥接，只读属性）."""
-        return self._assembler.buffer
-
-    @property
-    def _urc_dispatched(self) -> int:
-        """已拆行派发偏移（assembler.dispatched_offset 桥接）."""
-        return self._assembler.dispatched_offset
-
-    @_urc_dispatched.setter
-    def _urc_dispatched(self, value: int) -> None:
-        self._assembler.dispatched_offset = value
-
-    @property
-    def _buffer_generation(self) -> int:
-        """buffer 代次（assembler.generation 桥接）."""
-        return self._assembler.generation
-
-    @_buffer_generation.setter
-    def _buffer_generation(self, value: int) -> None:
-        self._assembler.generation = value
-
-    @property
-    def _orphan_pending(self) -> bool:
-        """孤儿续行标记（assembler.orphan_pending 桥接）."""
-        return self._assembler.orphan_pending
-
-    @_orphan_pending.setter
-    def _orphan_pending(self, value: bool) -> None:
-        self._assembler.orphan_pending = value
 
     def _drain_response_q(self) -> None:
         """排空响应队列残留，防止陈旧响应污染下次命令.
@@ -768,17 +706,15 @@ class SerialConnection:
             to = self.config.response_timeout if timeout is None else timeout
 
             # 置等待态：数据模式无回显排除（echo_line=None——排除的是与命令
-            # 逐字相等的回显行，原始数据无此概念）；周期参数注入同锁原子。
-            # 先 set awaiting 再排空队列（B3，同 send_command）；drain 须在
-            # 首块写入前完成——等待期超时帧可在分块期间到达，等待态须已生效，
-            # 阶段一残迹不泄入阶段二。
+            # 逐字相等的回显行，原始数据无此概念）。先 set awaiting 再排空
+            # 队列（B3，同 send_command）；drain 须在首块写入前完成——等待期
+            # 超时帧可在分块期间到达，等待态须已生效，阶段一残迹不泄入阶段二。
             with self._buffer_lock:
                 self._reset_buffer_locked()
                 self._echo_line = None
                 self._wait_urc_re = wait_urc_re
                 self._expect_re = expect_re
                 self._awaiting.set()
-                self._sync_cycle_locked()
             self._drain_response_q()
 
             try:
@@ -795,7 +731,6 @@ class SerialConnection:
                 # （inner finally 确保 _reset_wait_urc 在本 return 前执行）。
                 with self._buffer_lock:
                     self._awaiting.clear()
-                    self._sync_cycle_locked()
                 return Response(
                     text="",
                     status=ResponseStatus.ERROR,
@@ -807,7 +742,6 @@ class SerialConnection:
                 # 后透传（与 send_command 取消同语义）
                 with self._buffer_lock:
                     self._awaiting.clear()
-                    self._sync_cycle_locked()
                 raise
             finally:
                 # 与 _send_command_locked 同款：正常/异常/取消全部复位周期等待态
@@ -937,11 +871,20 @@ class SerialConnection:
             空行/终结行/在途命令回显行。
         """
         with self._buffer_lock:
-            # 周期参数注入（set_cycle 契约）：读路径每周期按当前值快照——
+            # 周期参数注入（set_cycle 契约）：读路径每个 chunk 前按当前值快照——
             # 等价迁移前在锁内读 _wait_urc_re/_echo_line 的语义（_awaiting
-            # 旧实现在锁外读，此处更紧）。此 sync 是机制本体（不变量见
-            # _sync_cycle_locked 注释）。
-            self._sync_cycle_locked()
+            # 旧实现在锁外读，此处更紧）。这是周期注入的**唯一单点**（批 5
+            # 双 sync 收敛）：assembler 的周期参数只有 feed 一个消费者，发送/
+            # 复位侧各写点不再重复 sync——对本锁外直接写 _awaiting/
+            # _wait_urc_re 等字段遗漏 set_cycle 的接线 bug 自愈（写点值在
+            # 下次 feed 前必然被此处拾取）；未来新增 feed 之外的消费者时
+            # 须自行注入周期参数。
+            self._assembler.set_cycle(
+                waiting=self._awaiting.is_set(),
+                echo_line=self._echo_line,
+                wait_urc_re=self._wait_urc_re,
+                expect_re=self._expect_re,  # send_command(expect=) 设置/_reset_wait_urc 复位
+            )
             events = self._assembler.feed(chunk)
         for ev in events:
             if ev.kind is RxEventKind.URC_LINE:

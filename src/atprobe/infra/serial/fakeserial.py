@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from atprobe.infra.serial.config import DataStreamSpec, PortConfig, Terminator
 from atprobe.infra.serial.exceptions import OperationCancelled
@@ -26,6 +27,9 @@ from atprobe.infra.serial.interfaces import (
     URCHandler,
 )
 from atprobe.infra.serial.rawlog import RawLogger
+
+if TYPE_CHECKING:
+    from atprobe.infra.serial.connection import SerialConnection
 
 
 @dataclass
@@ -57,10 +61,14 @@ class FakePortManager:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         raw_logger: RawLogger | None = None,
+        now_wall: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
         self._raw_logger = raw_logger
+        # 墙钟注入（对齐 SerialConnection.now_wall）：URC 时间戳统一走注入时钟，
+        # 假时钟可测 emit_urc 路径（与时钟/休眠注入同款模式）
+        self._now_wall = now_wall
         self._configs: dict[str, PortConfig] = {}
         self._connected: set[str] = set()
         # port -> 脚本响应队列
@@ -114,13 +122,14 @@ class FakePortManager:
     def emit_urc(self, port: str, text: str) -> None:
         """模拟设备主动上报 URC（测试 URC 处理）.
 
-        timestamp 格式与真实 ``SerialConnection._dispatch_urc`` 一致
-        （``%Y-%m-%d %H:%M:%S.%f`` 截毫秒）——消费者按时间戳渲染时 Fake 同构。
+        timestamp 经注入的 now_wall 生成（对齐真实 ``SerialConnection._dispatch_urc``
+        的注入时钟），格式一致（``%Y-%m-%d %H:%M:%S.%f`` 截毫秒）——消费者按
+        时间戳渲染时 Fake 同构，假时钟可测。
         """
         evt = URCEvent(
             port=port,
             text=text,
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            timestamp=self._now_wall().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         )
         for h in self._urc_handlers.get(port, []):
             h(evt)
@@ -156,6 +165,16 @@ class FakePortManager:
 
     def config_of(self, port: str) -> PortConfig:
         return self._configs.get(port, PortConfig(name=port))
+
+    def configs(self) -> list[str]:
+        # 对齐真实 PortManager.configs（排序定序的已注册端口名快照）——
+        # GUI connected_ports 等视图经 Fake 注入可达（T3 审查 Minor：API 面补齐）
+        return sorted(self._configs.keys())
+
+    def get_connection(self, port: str) -> SerialConnection | None:
+        # 对齐真实 PortManager.get_connection——Fake 无 SerialConnection 实体，
+        # 恒 None（调用方对 None 的容忍路径与真实未连接一致）
+        return None
 
     def set_case_log(self, port: str, log_file: Path | None) -> None:
         self._log_files[port] = log_file
@@ -374,21 +393,6 @@ class FakePortManager:
         """
         self.sent.append((port, command))
         self._emit_tx(port, command, terminator=terminator)
-
-    def write_bytes(self, port: str, data: bytes) -> None:
-        """流式写原始字节（不加结束符）——P2 修复：与 PortManager 接口对齐.
-
-        旧实现缺失本方法，Fake 无法完整替换真实 PortManager（文件发送等
-        write_bytes 路径在 Fake 驱动的测试中直接 AttributeError）。
-        """
-        self.sent.append((port, f"<bytes:{len(data)}>"))
-        for obs in self._tx_observers.get(port, []):
-            obs(data)
-        # 用例日志与 _emit_tx 同构（对齐真实 connection 的 write 路径走 _log_tx，
-        # 审查 M1）：绑定中的端口原始字节写同样落用例日志
-        lf = self._log_files.get(port)
-        if self._raw_logger is not None and lf is not None:
-            self._raw_logger.log(lf, "TX", data)
 
     def emit_rx(self, port: str, data: bytes) -> None:
         """测试辅助：向某端口的 RX 观察者投递字节（模拟模块回包）."""

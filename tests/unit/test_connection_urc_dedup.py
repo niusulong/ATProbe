@@ -144,33 +144,29 @@ class TestOffsetRaceWithEngineReset:
     场景（修复前）：读线程快照 offset 后在锁外做 URC 派发（handler 耗时），
     引擎 send_command 入口恰在此时清 buffer+归零 offset；读线程随后回写陈旧
     偏移（如 12）→ 下一条命令的单 chunk 响应（le <= 12）被误判历史行跳过
-    → 终结行不被识别 → 假 TIMEOUT。代次计数器修复后：回写被代次校验拦截。
+    → 终结行不被识别 → 假 TIMEOUT。批 2a 迁移 LineAssembler 后该回写路径
+    结构性不存在（feed 持锁同步推进偏移，无锁外回写点）；本用例改为经
+    assembler 公开只读属性锁定 reset 的归零/代次自增不变量 + 行为尾段。
     """
 
     def test_stale_offset_write_discarded_after_engine_reset(self, monkeypatch) -> None:
         conn = _make_connection(monkeypatch)
 
-        # 读线程视角构造：先喂一个含 URC 的 chunk 使 offset 推进有值可写
+        # 读线程视角构造：先喂一个含 URC 的 chunk 使 offset 推进有值
         conn._awaiting.set()
         conn._process_incoming(b"\r\n+U: 1\r\n")
-        assert conn._urc_dispatched > 0
-        stale_offset = conn._urc_dispatched
+        assert conn._assembler.dispatched_offset > 0
+        generation = conn._assembler.generation
 
-        # 模拟读线程已快照（generation、offset），在锁外派发期间引擎重置 buffer
+        # 引擎入口重置（等价 send_command 开头，经生产入口 _reset_buffer_locked）：
+        # 清 buffer + 归零 + 代次自增
         with conn._buffer_lock:
-            generation = conn._buffer_generation
-        # 引擎入口重置（等价 send_command 开头）：清 buffer + 归零 + 代次自增
-        with conn._buffer_lock:
-            conn._buffer.clear()
-            conn._urc_dispatched = 0
-            conn._buffer_generation += 1
+            conn._reset_buffer_locked()
 
-        # 读线程现在回写陈旧 offset（修复后的代码路径：代次变了 → 放弃）
-        with conn._buffer_lock:
-            if conn._buffer_generation == generation:  # pragma: no cover
-                conn._urc_dispatched = stale_offset  # 旧代码无条件写
-
-        assert conn._urc_dispatched == 0, "代次变化后陈旧 offset 必须被丢弃"
+        # 迁移后陈旧 offset 无法复活（直写访问器已删，回写代码路径不存在）；
+        # reset 不变量照常锁定：偏移归零、代次自增
+        assert conn._assembler.dispatched_offset == 0, "代次变化后陈旧 offset 必须被丢弃"
+        assert conn._assembler.generation > generation
 
         # 后续单 chunk 完整响应正常终结（le > 0 不被跳过）
         conn._process_incoming(b"\r\nOK\r\n")

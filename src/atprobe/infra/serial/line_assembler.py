@@ -123,43 +123,31 @@ class LineAssembler:
         return self._generation
 
     # ------------------------------------------------------------------
-    # 迁移桥（批 2a Task 4）：迁移前 connection 的缓冲族私有字段
-    # （_buffer/_urc_dispatched/_buffer_generation/_orphan_pending）已收敛到
-    # 本类——行为锁测试（test_connection_urc_dedup/structural）直接读写这些
-    # 状态名，connection 侧以同名属性委托到此处。单一状态源仍在 assembler；
-    # 生产代码的状态操作一律走 reset/clear_orphan/snapshot_and_reset/feed，
-    # 不使用本桥。
+    # 诊断只读访问器（批 5 删桥后保留）：缓冲族状态的观测面——测试经由
+    # connection 持有的 assembler 实例读取（不再伪装成 connection 的私有
+    # 字段协议）。不提供写访问器：偏移/代次/标记的直写会破坏
+    # _complete_through 的状态推进不变量，生产状态操作一律走
+    # reset/clear_orphan/snapshot_and_reset/feed 一等方法。
     # ------------------------------------------------------------------
-    @generation.setter
-    def generation(self, value: int) -> None:
-        self._generation = value
-
     @property
     def buffer(self) -> bytearray:
-        """累积缓冲的**活引用**（桥接只读；.clear() 等原位操作同步生效）."""
+        """累积缓冲的**活引用**（诊断只读观测；测试不得原位改写——buffer 的
+        清/换必须经 reset/_complete_through 同步保偏移与代次不变量）."""
         return self._buffer
 
     @property
     def dispatched_offset(self) -> int:
-        """已拆行派发偏移（原 _urc_dispatched）——桥接读写."""
+        """已拆行派发偏移（原 _urc_dispatched）——诊断只读."""
         return self._dispatched
-
-    @dispatched_offset.setter
-    def dispatched_offset(self, value: int) -> None:
-        self._dispatched = value
 
     @property
     def orphan_pending(self) -> bool:
-        """孤儿续行标记（原 _orphan_pending）——桥接读写.
+        """孤儿续行标记（原 _orphan_pending）——诊断只读.
 
         生产语义：reset() 按缓冲状态赋值重算；重连路径显式置 False
         （reset 后覆写——重开会话首行非死链续行，见 connection._maybe_reconnect）。
         """
         return self._orphan_pending
-
-    @orphan_pending.setter
-    def orphan_pending(self, value: bool) -> None:
-        self._orphan_pending = value
 
     def snapshot_and_reset(self) -> bytes:
         """超时快照：返回当前缓冲并 reset（供超时交付）.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,10 @@ class RawLogger:
     # P1-2：并发缓存的句柄对上限（LRU 兜底）。类属性——测试可 monkeypatch
     # 缩小上限以验证逐出行为。
     _MAX_STEMS = 64
+    # evicted 观测队列封顶（批 5）：常驻进程跨海量用例时逐出记录不得无界
+    # 增长，旧记录滚动丢弃（仅统计/测试断言用）。构造期取值——运行期改
+    # 上限不会作用到已建实例，观测面无此需求。
+    _MAX_EVICTED = 1024
 
     def __init__(self) -> None:
         # P1-2：有界队列——日志是 best-effort 通道，慢盘时丢弃新记录优于
@@ -59,7 +64,9 @@ class RawLogger:
         # P1-2 观测属性（仅观测/测试断言用，不参与控制流）：写入线程更新、
         # 任意线程读取，非原子可接受——只做统计。
         self.dropped_count = 0  # 队列满被丢弃的记录数
-        self.evicted: list[Path] = []  # 被 LRU 逐出（句柄已关）的 stem
+        # 被 LRU 逐出（句柄已关）的 stem——deque 封顶（_MAX_EVICTED），防观测
+        # 属性在常驻进程下无界增长
+        self.evicted: deque[Path] = deque(maxlen=self._MAX_EVICTED)
 
     # ------------------------------------------------------------------
     # 生命周期

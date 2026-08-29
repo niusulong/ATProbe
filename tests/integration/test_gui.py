@@ -2128,18 +2128,33 @@ class TestEngineThreadNoDirectUi:
 
     跨线程 UI 调用无法稳定复现崩溃，改用源码守护：run_cases 内不得出现
     ERROR 态的直接状态设置（"RUNNING" 设置在 :898 属主线程调用，合法保留）。
+    守护经 AST 判定（批 5 正则化）：按调用节点匹配方法名与首参常量——不受
+    注释文本/引号风格/拼接写法影响，子串匹配的两类失真（注释误报、改写漏报）
+    均消除。
     """
 
     def test_run_closure_has_no_error_status_call(self) -> None:
+        import ast
         import inspect
+        import textwrap
 
         from atprobe.gui.mainwindow import MainWindow
 
-        src = inspect.getsource(MainWindow.run_cases)
-        assert 'self._set_engine_status("ERROR"' not in src, (
-            "run_cases 的 _run 闭包在引擎线程执行，不得直接调用 _set_engine_status"
-            "——异常状态应由 progress 信号在主线程槽 _on_progress 设置"
-        )
+        tree = ast.parse(textwrap.dedent(inspect.getsource(MainWindow.run_cases)))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_set_engine_status"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "ERROR"
+            ):
+                pytest.fail(
+                    "run_cases 的 _run 闭包在引擎线程执行，不得直接调用 _set_engine_status"
+                    "——异常状态应由 progress 信号在主线程槽 _on_progress 设置",
+                    pytrace=False,
+                )
 
 
 class TestDownloadWorkerPassesSha256:

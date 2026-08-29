@@ -126,7 +126,7 @@ class TestStaleReapConditional:
         assert not conn._awaiting.is_set()  # noqa: SLF001
         assert conn._response_q.empty()  # noqa: SLF001
         with conn._buffer_lock:  # noqa: SLF001
-            assert len(conn._buffer) == 0  # noqa: SLF001
+            assert len(conn._assembler.buffer) == 0  # noqa: SLF001
 
     def test_large_timeout_next_command_receives_late_response(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """大超时超时返回后立即喂入迟到 OK：无收割窗口吞吃，下一条命令正常收到

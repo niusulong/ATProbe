@@ -8,7 +8,7 @@ SerialConnection 行为不一致，共享 PM 模式（GUI/MCP）下日志链路�
 
 from __future__ import annotations
 
-from atprobe.infra.serial.config import PortConfig
+from atprobe.infra.serial.config import DataStreamSpec, PortConfig
 from atprobe.infra.serial.fakeserial import FakePortManager
 from atprobe.infra.serial.interfaces import Response
 from atprobe.infra.serial.rawlog import RawLogger
@@ -126,11 +126,13 @@ def test_fake_close_clears_log_binding(tmp_path):
     assert "V0" not in fake._log_files  # noqa: SLF001
 
 
-def test_write_bytes_writes_case_log(tmp_path):
-    """write_bytes 写用例日志（对齐真实 connection._log_tx 的 write 路径）.
+def test_write_data_writes_case_log(tmp_path):
+    """write_data 写用例日志（对齐真实 connection._log_tx 的字节写路径）.
 
-    审查 M1：write_bytes 旧实现只派发 observer 不写用例日志——绑定端口的
-    原始字节流写（文件发送等）在 Fake 驱动的测试里丢失日志。
+    审查 M1：原始字节流写（文件发送等）在 Fake 驱动的测试里曾丢失日志。
+    迁移注记（批 5）：FakePortManager.write_bytes 已随真实 PortManager 的
+    同名方法删除（API 面对齐——真实有的 Fake 才有），原始字节写的用例
+    日志语义由持锁分块写 write_data 的同款路径承载。
     """
     logger = RawLogger()
     logger.start()
@@ -139,12 +141,12 @@ def test_write_bytes_writes_case_log(tmp_path):
         fake.open(PortConfig(name="V0"))
         fake.set_case_log("V0", tmp_path / "wb")
 
-        fake.write_bytes("V0", b"\x01\x02")
+        fake.write_data("V0", DataStreamSpec(data=b"\x01\x02"))
     finally:
         logger.stop()  # drain 确保落盘
 
     hex_log = tmp_path / "wb.hex.log"
-    assert hex_log.exists(), "write_bytes 未写用例日志"
+    assert hex_log.exists(), "write_data 未写用例日志"
     assert "[TX] 01 02" in hex_log.read_text(encoding="utf-8")
     # text.log 同帧记录（\x01\x02 为控制字符，仅断言 TX 行存在）
     assert "[TX]" in (tmp_path / "wb.text.log").read_text(encoding="utf-8")
