@@ -31,6 +31,7 @@ import functools
 import re as _re
 from collections.abc import Mapping
 
+from atprobe.domain.case.errors import UndefinedReferenceError
 from atprobe.domain.case.templater import EnvLookup, render
 
 
@@ -385,8 +386,17 @@ def _preprocess(expr: str, scope: Mapping[str, object], env: EnvLookup | None) -
             end = expr.find("}}", i + 2)
             name = expr[i + 2 : end].strip() if end != -1 else ""
             if name and "{" not in name and "}" not in name:
-                # 严格渲染（未定义即抛 UndefinedReferenceError）
-                value = render("{{" + name + "}}", scope, env=env, allow_partial=False)
+                # 严格渲染（未定义即抛 UndefinedReferenceError）。T6-4：报错附上
+                # 中间态上下文（已替换部分）——替换发生在预处理的中间态，用户
+                # 看到的是原始表达式，仅凭变量名难以定位是哪个占位符失败。
+                # （注：替换值会随之进入错误消息；本仓库测试值无敏感内容。）
+                try:
+                    value = render("{{" + name + "}}", scope, env=env, allow_partial=False)
+                except UndefinedReferenceError as exc:
+                    done = "".join(out)
+                    raise UndefinedReferenceError(
+                        f"{exc}（表达式预处理中断于 {name!r}；已替换部分：{done!r}）"
+                    ) from exc
                 escaped = _escape_str_value(value)
                 # in-string：嵌在既有字面量内，只转义不加引号；out-of-string：整体加引号
                 out.append(escaped if in_str else f'"{escaped}"')
@@ -438,5 +448,14 @@ def evaluate(expr: str, scope: Mapping[str, object], *, env: EnvLookup | None = 
         UndefinedReferenceError: 旧写法 {{var}} 中 var 未定义。
     """
     processed = _preprocess(expr, scope, env)
-    node = _parse_cached(processed)
+    try:
+        node = _parse_cached(processed)
+    except ExpressionError as exc:
+        # T6-4：旧写法（{{var}} 文本替换）的语法错误发生在「预处理后」文本上——
+        # 用户写的是原始表达式，替换发生在中间态，报错若不带预处理结果则难以
+        # 定位。附带预处理后表达式文本；新写法（无替换发生，processed == expr）
+        # 不重复附带，错误信息保持原样。
+        if processed != expr:
+            raise ExpressionError(f"{exc}（预处理后表达式：{processed!r}）") from exc
+        raise
     return node.eval(scope)

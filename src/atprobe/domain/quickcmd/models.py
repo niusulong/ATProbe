@@ -118,7 +118,41 @@ class CommandLibrary:
         if p is not None:
             p.groups = [g for g in p.groups if g.name != name]
 
-    def remove_command(self, project: str, group: str, command: str) -> None:
+    # ------------------------------------------------------------------
+    # 按索引操作命令（GUI 树节点自带位置上下文；同组命令允许重复，按文本操作
+    # 会误伤全部同文命令——批 5 T6-9）
+    # ------------------------------------------------------------------
+    def remove_command_at(self, project: str, group: str, index: int) -> None:
+        """按索引删除命令（只删点中的那一条，同文重复命令不受牵连）.
+
+        Raises:
+            ValueError: 项目/功能组不存在。
+            IndexError: 索引越界（附组内命令数与有效范围，便于 UI 提示）。
+        """
         g = self.find_group(project, group)
-        if g is not None:
-            g.commands = [c for c in g.commands if c != command]
+        if g is None:
+            raise ValueError(f"功能组 {project!r}/{group!r} 不存在")
+        if not 0 <= index < len(g.commands):
+            raise IndexError(
+                f"命令索引 {index} 越界：功能组 {project!r}/{group!r} 共 {len(g.commands)} 条"
+                f"（有效范围 0..{max(len(g.commands) - 1, 0)}）"
+            )
+        del g.commands[index]
+
+    def replace_command_at(self, project: str, group: str, index: int, command: str) -> None:
+        """按索引原位修改命令（保持组内顺序；与 add+remove 的"挪到末尾"相对）.
+
+        校验口径与 add_command 一致（strip + 非空）。Raises 同 remove_command_at。
+        """
+        command = command.strip()
+        if not command:
+            raise ValueError("命令不能为空")
+        g = self.find_group(project, group)
+        if g is None:
+            raise ValueError(f"功能组 {project!r}/{group!r} 不存在")
+        if not 0 <= index < len(g.commands):
+            raise IndexError(
+                f"命令索引 {index} 越界：功能组 {project!r}/{group!r} 共 {len(g.commands)} 条"
+                f"（有效范围 0..{max(len(g.commands) - 1, 0)}）"
+            )
+        g.commands[index] = command

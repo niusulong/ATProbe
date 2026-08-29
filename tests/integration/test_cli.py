@@ -357,3 +357,47 @@ cases:
         assert result.exit_code == 0
         assert "用例A" in result.stdout
         assert "用例B" not in result.stdout  # 被 tag 过滤
+
+
+class TestMaskCredentials:
+    """批 5 T6-10：console.mask_credentials 开启后 CLI 呈现脱敏（默认关零变化）.
+
+    vsim 应答器不识别 AT+CPIN= 写形态 → 步骤 FAIL → progress 级即打印步骤行
+    与失败汇总（两处呈现都应脱敏）。
+    """
+
+    def _pin_case(self, tmp_path: Path) -> Path:
+        case_file = tmp_path / "pin.yaml"
+        case_file.write_text(
+            """
+name: PIN 输入
+steps:
+  - command: 'AT+CPIN=1234'
+    assert: { contains: "OK" }
+""",
+            encoding="utf-8",
+        )
+        return case_file
+
+    def test_mask_on_shows_asterisks(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+        cfg = tmp_path / "atprobe.yaml"
+        cfg.write_text(
+            "ports: [COM3]\ncases_dir: .\nconsole:\n  mask_credentials: true\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app, ["run", "--config", str(cfg), "--vsim", str(self._pin_case(tmp_path))]
+        )
+        assert result.exit_code == 1  # vsim 对未知写形态回 ERROR → 用例失败
+        assert "AT+CPIN=****" in result.stdout, "步骤行/失败汇总应呈现脱敏命令"
+        assert "AT+CPIN=1234" not in result.stdout, "明文 PIN 不得出现在任何呈现"
+
+    def test_mask_off_default_keeps_plaintext(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+        """默认关（未配置）：行为零变化，命令明文呈现."""
+        cfg = tmp_path / "atprobe.yaml"
+        cfg.write_text("ports: [COM3]\ncases_dir: .\n", encoding="utf-8")
+        result = runner.invoke(
+            app, ["run", "--config", str(cfg), "--vsim", str(self._pin_case(tmp_path))]
+        )
+        assert result.exit_code == 1
+        assert "AT+CPIN=1234" in result.stdout

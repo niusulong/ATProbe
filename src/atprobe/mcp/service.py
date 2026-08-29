@@ -102,6 +102,7 @@ class McpService:
         self.jobs = JobManager(
             report_root or resolve_workspace_path(app_cfg.report_dir),
             raw_logger=self._raw_logger,
+            mask_credentials=app_cfg.mask_credentials,
         )
         self.urc_registry = UrcRegistry()
         # port → pm 层 URC 转发句柄（每端口只挂一次 urc_registry.feed）；

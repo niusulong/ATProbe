@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from atprobe.domain.case.models import Case, Step
+from atprobe.domain.case.models import Case, FailureStrategy, Step
 from atprobe.domain.report.models import CaseStatus, StepStatus
 from atprobe.engine.config import EngineConfig, EngineState
 from atprobe.engine.interfaces import EngineFinishedEvent
@@ -282,6 +282,112 @@ class TestSetupSafetyValvePriority:
         assert cr.error_msg == "连续断连达到安全阀，放弃用例", (
             "安全阀处置应优先于普通 setup 失败中止（旧顺序报『setup 失败（步骤 1）』）"
         )
+
+
+# ---------------------------------------------------------------------------
+# T6-6：_case_ports 覆盖 setup/teardown 显式端口（用例日志绑定完整性）
+# ---------------------------------------------------------------------------
+class _RecordingLogFake(FakePortManager):
+    """记录 set_case_log 绑定过的端口（驱动用例日志绑定断言）."""
+
+    def __init__(self) -> None:
+        super().__init__(sleep=lambda s: None)
+        self.bound_ports: list[str] = []
+
+    def set_case_log(self, port: str, log_file: Path | None) -> None:
+        self.bound_ports.append(port)
+        super().set_case_log(port, log_file)
+
+
+class TestCasePortsCoverSetupTeardown:
+    def test_setup_teardown_explicit_ports_bound(self, tmp_path: Path) -> None:
+        """setup/teardown 显式端口的原始日志也落用例目录.
+
+        旧实现 _case_ports 只遍历 steps——setup/teardown 显式端口不建
+        begin_case，该端口的流量落不进用例级日志。
+        """
+        fake = _RecordingLogFake()
+        for p in ("V0", "V1", "V2"):
+            fake.script_text(p, "OK\r\n", persistent=True)
+        engine = Engine(sender_factory=lambda: fake, sleep=lambda s: None, raw_logger=_StubLogger())
+        case = Case(
+            name="端口绑定",
+            setup=(Step(command="AT+SETUP", port="V1"),),
+            steps=(Step(command="AT"),),
+            teardown=(Step(command="AT+TEARDOWN", port="V2"),),
+        )
+        engine.start(
+            _cfg(
+                ports=(PortConfig(name="V0"), PortConfig(name="V1"), PortConfig(name="V2")),
+                cases=(case,),
+                log_dir=str(tmp_path),
+            )
+        )
+        assert set(fake.bound_ports) == {"V0", "V1", "V2"}, (
+            "setup/teardown 显式端口应纳入用例日志绑定（旧实现只绑 default+steps 端口）"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T6-7：suite_setup 断连安全阀（on_failure: continue 缺口）
+# ---------------------------------------------------------------------------
+class TestSuiteSetupDisconnectValve:
+    def test_disconnect_with_continue_stops_remaining_setup(self, tmp_path: Path) -> None:
+        """suite_setup 步骤 DISCONNECT 且 on_failure: continue 时立即终止.
+
+        旧实现该组合下 abort_case=False，循环继续向已断开的端口发剩余 setup
+        步骤（每步都超时，白白拖满 n×步骤超时）；安全阀断连即弃（返回 True →
+        跳过 cases，仍执行 suite_teardown）。
+        """
+        fake = _DisconnectFake()
+        engine = Engine(sender_factory=lambda: fake, sleep=lambda s: None)
+        cfg = _cfg(
+            cases=(Case(name="不应执行", steps=(Step(command="AT"),)),),
+            suite_setup=(
+                Step(command="AT+S1", on_failure=FailureStrategy.CONTINUE),
+                Step(command="AT+S2"),
+            ),
+            log_dir=str(tmp_path),
+        )
+        result = engine.start(cfg)
+        assert len(result.suite_setup_results) == 1, "断连后不应继续执行剩余 suite_setup 步骤"
+        assert result.suite_setup_results[0].error_kind == ERROR_KIND_DISCONNECT
+        assert result.case_results == (), "suite_setup 断连终止 → cases 跳过"
+
+    def test_disconnect_default_abort_still_stops(self, tmp_path: Path) -> None:
+        """默认策略（ABORT）下断连照旧终止——既有正确路径回归钉住."""
+        fake = _DisconnectFake()
+        engine = Engine(sender_factory=lambda: fake, sleep=lambda s: None)
+        cfg = _cfg(
+            cases=(Case(name="默认中止", steps=(Step(command="AT"),)),),
+            suite_setup=(Step(command="AT+S1"), Step(command="AT+S2")),
+            log_dir=str(tmp_path),
+        )
+        result = engine.start(cfg)
+        assert len(result.suite_setup_results) == 1
+        assert result.case_results == ()
+
+    def test_disconnect_with_skip_stops_remaining_setup(self, tmp_path: Path) -> None:
+        """suite_setup 步骤 DISCONNECT 且 on_failure: skip 时同样立即终止.
+
+        T6 审查 M-1：skip 策略下步骤状态是 SKIPPED 而非 FAIL，旧阀条件
+        （仅判 FAIL）被绕过——剩余 setup 步骤照发向已断端口。断连即弃不区分
+        continue/skip 显式配置。
+        """
+        fake = _DisconnectFake()
+        engine = Engine(sender_factory=lambda: fake, sleep=lambda s: None)
+        cfg = _cfg(
+            cases=(Case(name="不应执行", steps=(Step(command="AT"),)),),
+            suite_setup=(
+                Step(command="AT+S1", on_failure=FailureStrategy.SKIP),
+                Step(command="AT+S2"),
+            ),
+            log_dir=str(tmp_path),
+        )
+        result = engine.start(cfg)
+        assert len(result.suite_setup_results) == 1, "断连后不应继续执行剩余 suite_setup 步骤"
+        assert result.suite_setup_results[0].error_kind == ERROR_KIND_DISCONNECT
+        assert result.case_results == (), "suite_setup 断连终止 → cases 跳过"
 
 
 # ---------------------------------------------------------------------------

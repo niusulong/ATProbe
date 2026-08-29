@@ -59,6 +59,10 @@ class AppConfig:
     report_dir: str = "./reports"
     env_config: str = "./examples/env.yaml"
     console_color: bool = True
+    # 呈现层凭据脱敏开关（批 5 T6-10）：True 时控制台/HTML 报告/事件流中的
+    # 凭据类 AT 命令（AT+CPIN=/AT+CPWD= 等）参数段掩为 ****；rawlog 原始字节
+    # 日志不掩（字节级核对用）。默认 False，行为零变化。
+    mask_credentials: bool = False
     command_truncate: int = 40
     log_dir: str = "./logs"
     pressure_pass_rate_threshold: float = 95.0
@@ -94,6 +98,22 @@ def _to_float(value: object, *, what: str, source: str | None) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise AppConfigError(f"{what} 必须是数值，实际为 {value!r}", source=source) from exc
+
+
+def _to_bool(value: object, *, what: str, source: str | None) -> bool:
+    """bool 配置项严格解析：值必须是 bool 类型（YAML true/false）.
+
+    旧实现 ``bool(value)`` 把字符串 "false" 强转为 True（任何非空串都真值），
+    用户写 ``color: "false"`` 会得到与字面相反的行为且无任何提示。此处按
+    类型硬校验：非 bool（带引号字符串/数字等）即 AppConfigError，报错带键
+    定位与去引号提示。与 _to_int/_to_float 同款口径（P2 异常收敛家族）。
+    """
+    if not isinstance(value, bool):
+        raise AppConfigError(
+            f"{what} 须为 true/false 布尔值（YAML 裸写，不要加引号），实际为 {value!r}",
+            source=source,
+        )
+    return value
 
 
 def load_app_config(data: str | bytes | None, *, source: str | None = None) -> AppConfig:
@@ -165,7 +185,18 @@ def load_app_config(data: str | bytes | None, *, source: str | None = None) -> A
     console = raw.get("console") or {}
     if isinstance(console, dict):
         if "color" in console:
-            cfg = _replace(cfg, console_color=bool(console["color"]))
+            # T6-2：严格 bool——旧实现 bool(console["color"]) 把字符串 "false"
+            # 强转 True，行为与字面相反且无提示（详见 _to_bool docstring）。
+            cfg = _replace(
+                cfg, console_color=_to_bool(console["color"], what="console.color", source=source)
+            )
+        if "mask_credentials" in console:
+            cfg = _replace(
+                cfg,
+                mask_credentials=_to_bool(
+                    console["mask_credentials"], what="console.mask_credentials", source=source
+                ),
+            )
         if "command_truncate" in console:
             cfg = _replace(
                 cfg,

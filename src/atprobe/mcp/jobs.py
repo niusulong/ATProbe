@@ -77,6 +77,7 @@ class JobManager:
         report_root: Path | str = "reports",
         max_history: int = DEFAULT_MAX_HISTORY,
         raw_logger: RawLogger | None = None,
+        mask_credentials: bool = False,
     ) -> None:
         self._report_root = Path(report_root)
         self._max_history = max_history
@@ -84,6 +85,9 @@ class JobManager:
         # 每次自建（stop 随 engine.start 结束）。注入后作业原始日志经共享
         # PortManager 的 connection 写入（M8 修复：共享 PM 模式此前不落盘）。
         self._raw_logger = raw_logger
+        # T6-10 凭据脱敏（console.mask_credentials，service 从 AppConfig 透传）：
+        # 作用于作业事件流的 command 字段与 HTML 报告呈现副本；rawlog 不掩
+        self._mask_credentials = mask_credentials
         self._jobs: dict[str, _Job] = {}
         self._order: list[str] = []  # 创建顺序（历史淘汰弹最旧）
         self._engines: dict[str, Engine] = {}  # running 作业的引擎（cancel 用）
@@ -317,6 +321,11 @@ class JobManager:
             with self._lock:
                 if len(job.events) >= EVENT_BUFFER:
                     job.events_dropped += 1
+                command = event.command
+                if self._mask_credentials:
+                    from atprobe.infra.masking import mask_at_command
+
+                    command = mask_at_command(command)
                 job.events.append(
                     {
                         "event": "step_result",
@@ -324,7 +333,7 @@ class JobManager:
                         "phase": event.phase,
                         "step_index": event.step_index,
                         "status": event.status,
-                        "command": event.command[:EVENT_CMD_TRUNCATE],
+                        "command": command[:EVENT_CMD_TRUNCATE],
                         "error": event.error_msg[:EVENT_ERROR_TRUNCATE],
                     }
                 )
@@ -332,6 +341,10 @@ class JobManager:
     def _render_report(self, job: _Job, result: ExecutionResult) -> None:
         html_path = self._report_root / job.id / "report.html"
         try:
+            if self._mask_credentials:
+                from atprobe.infra.masking import mask_execution_result
+
+                result = mask_execution_result(result)
             HtmlReporter().render(result, ReportOutput(html_path=html_path, to_console=False))
         except Exception:  # noqa: BLE001 - 渲染失败不影响 job 状态
             _log.exception("报告渲染失败 job=%s", job.id)

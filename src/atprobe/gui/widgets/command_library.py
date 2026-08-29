@@ -47,7 +47,10 @@ from atprobe.infra.quickcmd import (
     load_library,
 )
 
-# 树节点角色：data 存元组 ("project",name) / ("group",proj,grp) / ("command",proj,grp,cmd)
+# 树节点角色：data 存元组
+#   ("project",name) / ("group",proj,grp) / ("command",proj,grp,cmd,idx)
+# 命令节点带组内索引（0 基）——同组命令允许重复，按文本操作会误伤全部同文
+# 命令，增删改一律按索引走（remove_command_at/replace_command_at，批 5 T6-9）。
 _NODE_ROLE = Qt.ItemDataRole.UserRole
 
 
@@ -137,7 +140,8 @@ class _LibraryTreeEditor:
             self._rename_group(node[1], node[2])
         elif lvl == _LEVEL_COMMAND:
             assert node is not None
-            self._edit_command(node[1], node[2], node[3])
+            # 节点元组统一标注 tuple[str, ...]，命令节点的索引位在此收窄回 int
+            self._edit_command(node[1], node[2], node[3], int(node[4]))
 
     def _on_context_menu(self, pos: QPoint) -> None:
         """右键菜单：按节点层级提供 重命名/删除/新增下级."""
@@ -200,7 +204,12 @@ class _LibraryTreeEditor:
         except ValueError as exc:
             QMessageBox.warning(self._as_widget(), "无法新增", str(exc))
             return
-        self._commit_and_refresh(select=(_LEVEL_COMMAND, proj_name, grp_name, cmd))
+        # 新命令追加在组末：select 元组带其索引（与节点角色 5 元组格式一致）
+        grp = self._library.find_group(proj_name, grp_name)
+        idx = len(grp.commands) - 1 if grp is not None else 0
+        self._commit_and_refresh(
+            select=(_LEVEL_COMMAND, proj_name, grp_name, cmd, idx)  # type: ignore[arg-type]
+        )
 
     def _rename_project(self, old: str) -> None:
         new, ok = QInputDialog.getText(self._as_widget(), "重命名项目", "新项目名:", text=old)
@@ -217,9 +226,10 @@ class _LibraryTreeEditor:
     def _rename_group(self, proj: str, old: str) -> None:
         """重命名功能组：add 新组迁移命令 + remove 旧组（model 无原生 rename_group）.
 
-        P3 事务化：迁移命令中途异常（如手改 YAML 混入空命令串）时回滚已迁移
-        项与新组再提示——旧实现留下"新组半迁移 + 旧组全量"的半改状态且异常
-        裸抛进 Qt 事件循环（无提示、树与库不一致）。
+        P3 事务化：迁移命令中途异常（如手改 YAML 混入空命令串）时回滚再提示
+        ——旧实现留下"新组半迁移 + 旧组全量"的半改状态且异常裸抛进 Qt 事件
+        循环（无提示、树与库不一致）。回滚 = 删除本事务新建的组（add_group
+        成功即新建空组，整组删除即完全撤销，无需逐条撤命令）。
         """
         new, ok = QInputDialog.getText(self._as_widget(), "重命名功能组", "新功能组名:", text=old)
         if not (ok and new.strip() and new.strip() != old):
@@ -232,33 +242,34 @@ class _LibraryTreeEditor:
         except ValueError as exc:
             QMessageBox.warning(self._as_widget(), "无法重命名", str(exc))
             return
-        migrated: list[str] = []
         try:
             for c in cmds:
                 self._library.add_command(proj, new, c)
-                migrated.append(c)
         except ValueError as exc:
-            # 回滚：撤回已迁移命令 + 删除本事务新建的组（add_group 成功即新建）
-            for c in reversed(migrated):
-                self._library.remove_command(proj, new, c)
+            # 回滚：删除本事务新建的组（连带已迁入的命令，一步完全撤销）
             self._library.remove_group(proj, new)
             QMessageBox.warning(self._as_widget(), "无法重命名", f"迁移命令失败，已回滚：{exc}")
             return
         self._library.remove_group(proj, old)
         self._commit_and_refresh(select=(_LEVEL_GROUP, proj, new))
 
-    def _edit_command(self, proj: str, grp: str, old: str) -> None:
+    def _edit_command(self, proj: str, grp: str, old: str, index: int) -> None:
+        """按索引原位修改命令（批 5 T6-9）.
+
+        旧实现 add 新 + 按文本 remove 旧：同组存在同文重复命令时全被删掉
+        （数据丢失），且被改命令挪到组末（顺序漂移）。改走 replace_command_at。
+        """
         new, ok = QInputDialog.getText(self._as_widget(), "修改命令", "AT 指令:", text=old)
         if not (ok and new.strip() and new.strip() != old):
-            return  # 空或未改动 → 无操作（避免 add+remove 重排序）
-        new = new.strip()
+            return  # 空或未改动 → 无操作
         try:
-            self._library.add_command(proj, grp, new)
-        except ValueError as exc:
+            self._library.replace_command_at(proj, grp, index, new)
+        except (ValueError, IndexError) as exc:
             QMessageBox.warning(self._as_widget(), "无法修改", str(exc))
             return
-        self._library.remove_command(proj, grp, old)
-        self._commit_and_refresh(select=(_LEVEL_COMMAND, proj, grp, new))
+        self._commit_and_refresh(
+            select=(_LEVEL_COMMAND, proj, grp, new, index)  # type: ignore[arg-type]
+        )
 
     def _delete_project(self, name: str) -> None:
         if not _confirm_delete(self._as_widget(), "项目", name):
@@ -272,8 +283,14 @@ class _LibraryTreeEditor:
         self._library.remove_group(proj, name)
         self._commit_and_refresh()
 
-    def _delete_command(self, proj: str, grp: str, cmd: str) -> None:
-        self._library.remove_command(proj, grp, cmd)
+    def _delete_command(self, proj: str, grp: str, index: int) -> None:
+        """按索引删除命令（批 5 T6-9）：只删点中的那一条，同文重复命令不受牵连."""
+        try:
+            self._library.remove_command_at(proj, grp, index)
+        except (ValueError, IndexError) as exc:
+            # 树与库短暂不同步（如并发改文件后未刷新）时给出提示而非静默无操作
+            QMessageBox.warning(self._as_widget(), "无法删除", str(exc))
+            return
         self._commit_and_refresh()
 
 
@@ -379,9 +396,9 @@ class CommandLibraryPanel(QWidget, _LibraryTreeEditor):
                 gitem = QTreeWidgetItem([grp.name])
                 gitem.setData(0, _NODE_ROLE, (_LEVEL_GROUP, proj.name, grp.name))
                 gitem.setIcon(0, make_icon("env_config", color=self._tokens["accent"]))
-                for cmd in grp.commands:
+                for idx, cmd in enumerate(grp.commands):
                     citem = QTreeWidgetItem([cmd])
-                    citem.setData(0, _NODE_ROLE, (_LEVEL_COMMAND, proj.name, grp.name, cmd))
+                    citem.setData(0, _NODE_ROLE, (_LEVEL_COMMAND, proj.name, grp.name, cmd, idx))
                     citem.setToolTip(0, cmd)
                     gitem.addChild(citem)
                 pitem.addChild(gitem)
@@ -516,9 +533,9 @@ class LibraryManagerDialog(QDialog, _LibraryTreeEditor):
             for grp in proj.groups:
                 gitem = QTreeWidgetItem([grp.name])
                 gitem.setData(0, _NODE_ROLE, (_LEVEL_GROUP, proj.name, grp.name))
-                for cmd in grp.commands:
+                for idx, cmd in enumerate(grp.commands):
                     citem = QTreeWidgetItem([cmd])
-                    citem.setData(0, _NODE_ROLE, (_LEVEL_COMMAND, proj.name, grp.name, cmd))
+                    citem.setData(0, _NODE_ROLE, (_LEVEL_COMMAND, proj.name, grp.name, cmd, idx))
                     gitem.addChild(citem)
                 pitem.addChild(gitem)
             self.tree.addTopLevelItem(pitem)
@@ -702,12 +719,13 @@ def _build_node_menu(
         a_del.triggered.connect(lambda: target._delete_group(proj, grp))
     elif lvl == _LEVEL_COMMAND:
         assert node is not None
-        proj, grp, cmd = node[1], node[2], node[3]
+        # 节点元组统一标注 tuple[str, ...]，命令节点的索引位在此收窄回 int
+        proj, grp, cmd, idx = node[1], node[2], node[3], int(node[4])
         a_edit = _menu_action(menu, _MENU_EDIT, make_icon("edit", color=accent))
-        a_edit.triggered.connect(lambda: target._edit_command(proj, grp, cmd))
+        a_edit.triggered.connect(lambda: target._edit_command(proj, grp, cmd, idx))
         menu.addSeparator()
         a_del = _menu_action(menu, _MENU_DEL_COMMAND, make_icon("remove", color=danger))
-        a_del.triggered.connect(lambda: target._delete_command(proj, grp, cmd))
+        a_del.triggered.connect(lambda: target._delete_command(proj, grp, idx))
     else:
         # 空白 / hint 节点：只能加项目
         a_add_proj = _menu_action(menu, _MENU_ADD_PROJECT, make_icon("add", color=accent))

@@ -40,7 +40,7 @@ from atprobe.engine.pressure import run_pressure
 from atprobe.engine.step_runner import CaseContext, StepExecResult, execute_step
 from atprobe.infra.config.envconfig import EnvConfig
 from atprobe.infra.serial.exceptions import OperationCancelled
-from atprobe.infra.serial.interfaces import CancelToken, ICommandSender
+from atprobe.infra.serial.interfaces import ERROR_KIND_DISCONNECT, CancelToken, ICommandSender
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.rawlog import RawLogger
 
@@ -345,6 +345,18 @@ class Engine:
             )
             results.append(r.step_result)
             self._emit_step(handler, r)
+            # 批 5 T6-7：断连安全阀——suite_setup 步骤 DISCONNECT 失败时立即终止
+            # （返回 True → 跳过 cases，但仍执行 suite_teardown）。默认策略
+            # （ABORT）下 r.abort_case 已正确终止；缺口在 on_failure: continue/skip
+            # 显式配置——continue 下 FAIL 不置 abort_case，skip 下状态是 SKIPPED
+            # 而非 FAIL（T6 审查 M-1：skip 分支曾绕过本阀），两种显式配置都会让
+            # 循环继续向已断开的端口发剩余 setup 步骤（每步都超时重试，白白拖满
+            # n×步骤超时）。与用例级 setup 的 F-13 安全阀同族，但 suite 级无变量
+            # 池连续计数，断连即弃。
+            if r.step_result.status in (StepStatus.FAIL, StepStatus.SKIPPED) and (
+                r.step_result.error_kind == ERROR_KIND_DISCONNECT
+            ):
+                return True
             if r.abort_case:  # 失败 → 跳过 cases（StepResult 仅记录，不进 aggregate）
                 return True
         return False
@@ -838,15 +850,18 @@ class Engine:
     def _case_ports(self, case: Case, default_port: str = "") -> list[str]:
         """收集本用例实际执行会用到的端口（用于绑定用例级原始日志）.
 
-        以 ``default_port``（执行配置端口，如 GUI 选的 / CLI --port）为基础，叠加步骤
-        显式指定的 ``step.port``。**不使用 ``case.port``**——它在执行流里不影响实际发送
-        端口（步骤用 ``step.port or default_port``），若用它会导致日志目录建到错误端口
-        名下（如用例硬编码 COM5，实际执行 COM28 时日志目录错建为 COM5 且可能失败）。
+        以 ``default_port``（执行配置端口，如 GUI 选的 / CLI --port）为基础，叠加
+        **setup/steps/teardown 全部阶段**步骤显式指定的 ``step.port``。**不使用
+        ``case.port``**——它在执行流里不影响实际发送端口（步骤用
+        ``step.port or default_port``），若用它会导致日志目录建到错误端口名下
+        （如用例硬编码 COM5，实际执行 COM28 时日志目录错建为 COM5 且可能失败）。
+        批 5 T6-6：旧实现只遍历 steps——setup/teardown 显式端口的原始日志不落
+        用例目录（该端口的 begin_case 未建立，流量走不到用例级日志）。
         """
         ports: list[str] = []
         if default_port:
             ports.append(default_port)
-        for s in case.steps:
+        for s in (*case.setup, *case.steps, *case.teardown):
             if s.port and s.port not in ports:
                 ports.append(s.port)
         return ports

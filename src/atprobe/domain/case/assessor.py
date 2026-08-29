@@ -57,7 +57,21 @@ def _try_float(s: str) -> float | None:
 
 
 def assess(el: AssertElement, response: str, variables: Mapping[str, object]) -> AssertionOutcome:
-    """评估单个断言元素."""
+    """评估单个断言元素.
+
+    eq/ne 的比较口径（本函数不改行为，仅钉语义）：
+      - **始终按字符串比较**，比较前两侧都经 ``_to_str`` 归一：bool → ``true``/``false``，
+        **整数值的 float 归一为整数形式**（``3.0`` → ``"3"``），None → 空串。
+      - 因此 ``value: 3.0``（YAML 数字字面量）与提取出的字符串 ``"3.0"`` **不相等**：
+        字面量侧归一为 ``"3"``，提取侧保持原文本 ``"3.0"``。用例侧应对齐设备的
+        实际文本形态（写 ``value: "3.0"`` 或提取后补零），而非依赖数值等价。
+      - 浮点精度：eq/ne **无任何 epsilon 容差**（纯字符串等值）；数值大小比较
+        （gt/lt/ge/le/between）才走 ``float()`` 转换，受 IEEE-754 二进制浮点
+        表示限制（如 0.1+0.2 != 0.3），无特殊处理。
+
+    数值类操作（gt/lt/ge/le/between）对变量值与期望值各尝试 ``float()`` 转换，
+    任一失败 → 该断言元素判失败（记录原因，不抛异常，§4.5）。
+    """
     name = _display_name(el)
 
     # ---- A. 响应原文断言 ----

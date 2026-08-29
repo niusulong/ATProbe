@@ -153,6 +153,40 @@ class TestErrorConvergence:
             load_app_config("ports: COM3")
 
 
+class TestConsoleStrictBool:
+    """批 5 T6-2：console 段布尔配置严格类型校验.
+
+    旧实现 ``bool(console["color"])`` 把字符串 "false" 强转 True——行为与字面
+    相反且无提示。现在非 bool 类型（带引号字符串/数字）一律 AppConfigError，
+    错误带键定位与「不要加引号」提示。color 与 mask_credentials（T6-10 新增）
+    两个布尔项同口径。
+    """
+
+    def test_color_string_false_rejected(self) -> None:
+        """color: "false"（带引号）→ 报错而非强转为 True."""
+        with pytest.raises(AppConfigError, match=r"console\.color 须为 true/false 布尔值"):
+            load_app_config('console:\n  color: "false"\n')
+
+    def test_color_int_rejected(self) -> None:
+        with pytest.raises(AppConfigError, match=r"console\.color"):
+            load_app_config("console:\n  color: 1\n")
+
+    def test_mask_credentials_string_true_rejected(self) -> None:
+        """mask_credentials 同款严格化（第二个布尔项代表）."""
+        with pytest.raises(AppConfigError, match=r"console\.mask_credentials"):
+            load_app_config('console:\n  mask_credentials: "true"\n')
+
+    def test_bare_bools_ok(self) -> None:
+        """YAML 裸 true/false 正常解析."""
+        cfg = load_app_config("console:\n  color: false\n  mask_credentials: true\n")
+        assert cfg.console_color is False
+        assert cfg.mask_credentials is True
+
+    def test_mask_credentials_default_off(self) -> None:
+        """缺省关闭（行为零变化）."""
+        assert load_app_config(None).mask_credentials is False
+
+
 class TestParsePortExpr:
     def test_full_expr(self) -> None:
         p = parse_port_expr("COM3:115200:8N1")

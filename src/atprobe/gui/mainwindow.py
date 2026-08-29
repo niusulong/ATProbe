@@ -515,6 +515,15 @@ class MainWindow(QMainWindow):
         """共享用例解析缓存（Pf-3）：case_execute 目录加载填充、run_cases 复用."""
         return self._case_cache
 
+    @property
+    def mask_credentials(self) -> bool:
+        """凭据脱敏开关（T6-10，console.mask_credentials）——供各视图读取.
+
+        报告渲染侧（本类 worker）与事件呈现侧（execution_progress 面板）同源；
+        rawlog 原始字节流不受此开关影响（功能预期）。
+        """
+        return self._app_config.mask_credentials
+
     def env_config_path(self) -> str | None:
         # 优先用用户配置（app.yaml 的 env_config）；不存在则回退到项目内置示例，
         # 确保环境配置页默认打开就有内容可编辑，而非空白页。
@@ -925,9 +934,14 @@ class MainWindow(QMainWindow):
                     ("done_noreport", "", result.summary.passed, result.summary.failed)
                 )
                 return
-            # 生成报告
+            # 生成报告（T6-10 脱敏：mask_credentials 开启时渲染呈现副本——
+            # 与 CLI run 同口径，rawlog 原始字节流不掩）
             try:
                 rdir = resolve_workspace_path(self._app_config.report_dir) / session / "report.html"
+                if self._app_config.mask_credentials:
+                    from atprobe.infra.masking import mask_execution_result
+
+                    result = mask_execution_result(result)
                 HtmlReporter().render(result, ReportOutput(html_path=rdir, to_console=False))
                 _log.info(
                     "执行结束: %d通过/%d失败, 报告: %s",

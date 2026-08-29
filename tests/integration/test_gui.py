@@ -1727,11 +1727,13 @@ class TestLibraryManagerDialogToolbar:
 
         dlg._add_command_interactive(gnode[1], gnode[2])  # noqa: SLF001
 
-        # 重建后 currentItem 应为新加的命令节点（其 role 元组第四项为 "AT+CGSN"）
+        # 重建后 currentItem 应为新加的命令节点（role 元组第四项为 "AT+CGSN"，
+        # 第五项为组内索引——批 5 T6-9 起命令节点带索引）
         cur = dlg.tree.currentItem()
         assert cur is not None
         role = cur.data(0, _Qt.ItemDataRole.UserRole)
-        assert role == ("command", gnode[1], gnode[2], "AT+CGSN")
+        assert role[:4] == ("command", gnode[1], gnode[2], "AT+CGSN")
+        assert isinstance(role[4], int)
 
     def test_add_group_keeps_position(self, qapp, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """添加功能组后，新功能组节点被选中并居中滚动到位."""
@@ -1854,9 +1856,9 @@ class TestCommandLibraryPanelContextMenu:
         from PySide6.QtCore import Qt as _Qt
 
         node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
-        proj, grp, cmd = node[1], node[2], node[3]
+        proj, grp, cmd, idx = node[1], node[2], node[3], node[4]
 
-        panel._delete_command(proj, grp, cmd)  # noqa: SLF001
+        panel._delete_command(proj, grp, idx)  # noqa: SLF001
 
         assert not question_called, "删命令不应弹确认"
         grp_obj = panel._library.find_group(proj, grp)  # noqa: SLF001
@@ -1896,6 +1898,60 @@ class TestCommandLibraryPanelContextMenu:
         proj_name2 = first_proj2.data(0, _Qt.ItemDataRole.UserRole)[1]
         panel2._delete_project(proj_name2)  # noqa: SLF001
         assert panel2._library.find_project(proj_name2) is None  # noqa: SLF001  # 已删
+
+
+class TestCommandIndexOperations:
+    """批 5 T6-9：命令树增删改按索引（同文重复命令不再被按文本误伤）.
+
+    旧实现 _delete_command/_edit_command 按文本 remove_command——组内存在
+    同文重复命令时删除会全部消失（数据丢失）、修改会误删重复项且挪序。
+    """
+
+    @staticmethod
+    def _dialog_with_duplicates(qapp, tmp_path):  # type: ignore[no-untyped-def]
+        from atprobe.domain.quickcmd import CommandLibrary
+        from atprobe.gui.widgets.command_library import LibraryManagerDialog
+        from atprobe.infra.quickcmd import dump_library, load_library
+
+        lib = CommandLibrary.empty()
+        lib.add_project("P1")
+        grp = lib.add_group("P1", "G1")
+        grp.commands += ["AT", "AT", "AT+CSQ"]
+        path = tmp_path / "lib.yaml"
+        dump_library(lib, path)
+        return LibraryManagerDialog(load_library(path), path), path
+
+    def test_node_carries_index(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """命令节点角色元组带组内索引（5 元组）."""
+        from PySide6.QtCore import Qt as _Qt
+
+        dlg, _ = self._dialog_with_duplicates(qapp, tmp_path)
+        first_cmd = dlg.tree.topLevelItem(0).child(0).child(0)
+        node = first_cmd.data(0, _Qt.ItemDataRole.UserRole)
+        assert node[:4] == ("command", "P1", "G1", "AT")
+        assert node[4] == 0
+        second = dlg.tree.topLevelItem(0).child(0).child(1)
+        assert second.data(0, _Qt.ItemDataRole.UserRole)[4] == 1
+
+    def test_delete_by_index_removes_only_that_duplicate(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """按索引删除：只删点中的那一条（旧实现按文本删会两个 AT 全没）."""
+        dlg, _ = self._dialog_with_duplicates(qapp, tmp_path)
+        dlg._delete_command("P1", "G1", 1)  # noqa: SLF001
+        grp = dlg._library.find_group("P1", "G1")  # noqa: SLF001
+        assert grp is not None
+        assert grp.commands == ["AT", "AT+CSQ"]
+
+    def test_edit_replaces_in_place(self, qapp, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """修改命令原位替换：保序且不动同文重复项（旧实现 add+remove 全删同文）."""
+        import PySide6.QtWidgets as _qw
+
+        monkeypatch.setattr(_qw.QInputDialog, "getText", lambda *a, **k: ("ATZ", True))
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        dlg, _ = self._dialog_with_duplicates(qapp, tmp_path)
+        dlg._edit_command("P1", "G1", "AT", 1)  # noqa: SLF001
+        grp = dlg._library.find_group("P1", "G1")  # noqa: SLF001
+        assert grp is not None
+        assert grp.commands == ["AT", "ATZ", "AT+CSQ"]
 
 
 class TestLibraryManagerDialogNoFormPanel:

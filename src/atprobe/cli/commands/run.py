@@ -79,6 +79,7 @@ def run(
         resolve_config_path,
     )
     from atprobe.infra.config.envconfig import EnvConfigError, load_env_config_file
+    from atprobe.infra.masking import mask_at_command
     from atprobe.infra.resources import resolve_workspace_path
     from atprobe.reporting.console import (
         format_case_result,
@@ -179,6 +180,9 @@ def run(
             raise typer.Exit(2) from exc
 
     color = (not no_color) and app_cfg.console_color and sys.stdout.isatty()
+    # T6-10 凭据脱敏（console.mask_credentials，默认关）：开启后事件流与报告中的
+    # 凭据类 AT 命令（AT+CPIN= 等）参数段掩为 ****；rawlog 原始日志不掩。
+    mask_on = app_cfg.mask_credentials
 
     # 6. dry-run（§3.6）
     if dry_run:
@@ -255,7 +259,7 @@ def run(
                     format_step_line(
                         phase=ev.phase,
                         port=ev.port,
-                        command=ev.command,
+                        command=mask_at_command(ev.command) if mask_on else ev.command,
                         status=ev.status,
                         duration_ms=ev.duration_ms,
                         truncate=app_cfg.command_truncate,
@@ -268,7 +272,10 @@ def run(
                 # （失败时必须能看到实际响应，否则无法定位文档与实测的差异——这是断言校准的前提）。
                 show_resp = ev.response and (log_level == "debug" or ev.status != "PASS")
                 if show_resp:
-                    vis = ev.response.replace("\r", "<CR>").replace("\n", "<LF>")
+                    # 脱敏先于 <CR>/<LF> 转义：掩码按真实换行定行界（命令回显
+                    # 通常跟在 \r\n 后），转义后行界消失会漏掩。
+                    resp_text = mask_at_command(ev.response) if mask_on else ev.response
+                    vis = resp_text.replace("\r", "<CR>").replace("\n", "<LF>")
                     typer.echo(f"           resp: {vis}")
         elif isinstance(ev, PressureProgressEvent):
             typer.echo(
@@ -285,6 +292,13 @@ def run(
     if result.error:
         typer.secho(f"执行失败：{result.error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+
+    # T6-10：脱敏结果单点（console 汇总与 HTML 报告共用同一 result 呈现）——
+    # 开关开启时替换为脱敏副本，原 result 的统计/判定数据不受影响。
+    if mask_on:
+        from atprobe.infra.masking import mask_execution_result
+
+        result = mask_execution_result(result)
 
     # 8. 控制台汇总 + 报告
     from atprobe.reporting.console import ConsoleReporter

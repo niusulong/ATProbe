@@ -13,7 +13,7 @@ import pytest
 import atprobe.mcp.jobs as jobs_mod
 from atprobe.domain.suite.collect import load_cases
 from atprobe.engine.config import EngineConfig
-from atprobe.engine.interfaces import CaseStartEvent
+from atprobe.engine.interfaces import CaseStartEvent, StepResultEvent
 from atprobe.infra.serial.config import PortConfig
 from atprobe.infra.serial.portmanager import PortManager
 from atprobe.infra.serial.vsim import VSIM_PORT, VsimPortManager
@@ -297,3 +297,28 @@ def test_events_truncated_counted(tmp_path):
     snap = jobs.snapshot("evt-job")
     assert len(snap["events"]) == EVENT_BUFFER
     assert snap["events_truncated"] == 10
+
+
+def test_step_event_command_masked_when_enabled(tmp_path):
+    """T6-10：mask_credentials 开启时 step_result 事件的 command 字段脱敏."""
+
+    def _step_event(command: str) -> StepResultEvent:
+        return StepResultEvent(
+            step_index=1,
+            phase="steps",
+            port="V0",
+            command=command,
+            status="FAIL",
+            duration_ms=1.0,
+            response="",
+            error_msg="",
+        )
+
+    for mask, expected in ((True, "AT+CPIN=****"), (False, "AT+CPIN=1234")):
+        jobs = JobManager(report_root=tmp_path / "reports", mask_credentials=mask)
+        job = _Job("m-job")
+        jobs._jobs["m-job"] = job
+        jobs._record_event(job, _step_event("AT+CPIN=1234"))
+        snap = jobs.snapshot("m-job")
+        step_evs = [e for e in snap["events"] if e["event"] == "step_result"]
+        assert step_evs and step_evs[0]["command"] == expected

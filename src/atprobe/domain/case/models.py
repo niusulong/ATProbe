@@ -176,9 +176,11 @@ class AssertElement(_Frozen):
             raise ValueError("断言元素须指定响应原文断言或变量断言")
         if len(present) > 1:
             raise ValueError(f"响应原文断言互斥，不可同时指定：{present}")
-        # L5：not_contains/matches 为空字符串时行为反直觉（'' in anything 恒 True → 永远失败）
-        # 给明确错误，而非让用户困惑于"恒失败"结果。equals='' 是合法语义（断言响应为空）。
-        for field_name in ("not_contains", "matches"):
+        # L5：contains/not_contains/matches 为空字符串时行为反直觉——contains:'' 恒真
+        # （'' in anything 恒 True，断言静默通过且无意义）、not_contains:'' 恒失败、
+        # matches:'' 恒命中；均给带字段定位的明确错误，而非让用户困惑于恒定结果。
+        # equals='' 是合法语义（断言响应为空）。
+        for field_name in ("contains", "not_contains", "matches"):
             v = getattr(self, field_name)
             if v is not None and v == "":
                 raise ValueError(f"{field_name} 不可为空字符串（行为反直觉/无意义）")
@@ -426,6 +428,16 @@ class Case(_Frozen):
                 f"压测 warmup（{self.loop.warmup}）须小于 count（{self.loop.count}）："
                 f"否则统计轮数为 0，全 warmup 压测必判 FAIL"
             )
+        # 批 3 终审⑧：case 级 parameters 键名与内置保留字（timestamp/port）冲突。
+        # 两个保留字由 step_runner 每步注入步骤上下文（§0），parameters 注入的
+        # 同名参数会被每步覆盖、静默失效——与 extract 保留字同款错误风格，
+        # 解析期拒绝（extract 侧已有校验，此处补齐 case 级对称性）。
+        for row in self.parameters:
+            for key in row:
+                if key in ("timestamp", "port"):
+                    raise ValueError(
+                        f"parameters 键名 {key!r} 与内置保留字冲突（每步注入，会被覆盖）"
+                    )
         # 2b 终审⑨：data 步骤×压测不硬拒但按用例粒度告警（与 Step 级 data×retry/poll
         # 同族）——数据流不可重入，压测每轮重发的字节会被设备当 AT 命令解析、污染后续命令。
         if self.loop is not None and any(s.data is not None for s in self.steps):

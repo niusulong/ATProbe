@@ -91,11 +91,18 @@ def load_library(path: Path) -> CommandLibrary:
             cmds_raw = grp_raw.get("commands", []) or []
             if not isinstance(cmds_raw, list):
                 raise QuickCmdStoreError(f"功能组 {name!r}/{gname!r} 的 'commands' 必须是列表")
-            for c in cmds_raw:
-                # 强制转 str，兼容用户手写整数等；None（YAML ~）跳过而非存 "None"
+            for k, c in enumerate(cmds_raw, start=1):
+                # T6-9：非字符串标量硬拒（旧实现 str(c) 静默强转——手写 YAML 的
+                # 整数/布尔被转成 "123"/"True" 存回文件，污染数据且用户无感知）。
+                # None（YAML ~）跳过语义保留。
                 if c is None:
                     continue
-                grp.commands.append(str(c))
+                if not isinstance(c, str):
+                    raise QuickCmdStoreError(
+                        f"项目 {name!r} 功能组 {gname!r} 第 {k} 条命令必须是字符串"
+                        f"（如 AT+CSQ），实际为 {c!r}（{type(c).__name__}）"
+                    )
+                grp.commands.append(c)
     return lib
 
 
@@ -103,7 +110,12 @@ def load_library(path: Path) -> CommandLibrary:
 # 保存（原子写）
 # ---------------------------------------------------------------------------
 def dump_library(library: CommandLibrary, path: Path) -> None:
-    """把命令库写回 YAML 文件（原子写：先写 .tmp 再 os.replace）。"""
+    """把命令库写回 YAML 文件（原子写：先写 .tmp 再 os.replace）.
+
+    T6-9：IO/序列化失败统一包装为 QuickCmdStoreError（旧实现裸抛 OSError/
+    YAMLError，GUI 侧的 ``except QuickCmdStoreError`` 捕不到——异常逃进 Qt
+    事件循环无提示）。失败时尽力清理残留 .tmp（原子写的卫生收尾）。
+    """
     data = {
         "projects": [
             {
@@ -113,17 +125,31 @@ def dump_library(library: CommandLibrary, path: Path) -> None:
             for p in library.projects
         ]
     }
-    out = StringIO()
-    yaml_write = YAML()
-    yaml_write.default_flow_style = False
-    yaml_write.indent(mapping=2, sequence=4, offset=2)
-    yaml_write.dump(data, out)
-    text = out.getvalue()
-
     tmp = path.with_suffix(path.suffix + ".tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)  # Windows 上原子覆盖
+    try:
+        out = StringIO()
+        yaml_write = YAML()
+        yaml_write.default_flow_style = False
+        yaml_write.indent(mapping=2, sequence=4, offset=2)
+        yaml_write.dump(data, out)
+        text = out.getvalue()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)  # Windows 上原子覆盖
+    except YAMLError as exc:
+        _cleanup_tmp(tmp)
+        raise QuickCmdStoreError(f"命令库序列化失败：{exc}") from exc
+    except OSError as exc:
+        _cleanup_tmp(tmp)
+        raise QuickCmdStoreError(f"无法写入命令库文件 {path}：{exc}") from exc
+
+
+def _cleanup_tmp(tmp: Path) -> None:
+    """原子写失败后清理残留 .tmp（best-effort，清理失败不再报错）."""
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

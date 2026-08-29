@@ -64,6 +64,53 @@ class TestLoad:
             load_library(f)
 
 
+class TestLoadNonStringCommand:
+    """批 5 T6-9：非字符串标量命令硬拒（旧实现 str(c) 静默强转污染数据）."""
+
+    def test_int_command_rejected(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad.yaml"
+        f.write_text(
+            "projects:\n"
+            "  - name: P\n"
+            "    groups:\n"
+            "      - name: G\n"
+            "        commands:\n"
+            "          - 123\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(QuickCmdStoreError, match="第 1 条命令必须是字符串") as ei:
+            load_library(f)
+        assert "P" in str(ei.value) and "G" in str(ei.value), "报错应带项目/组定位"
+        assert "123" in str(ei.value), "报错应带实际值"
+
+    def test_bool_command_rejected(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad.yaml"
+        f.write_text(
+            "projects:\n  - name: P\n    groups:\n      - name: G\n        commands:\n          - true\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(QuickCmdStoreError, match="bool"):
+            load_library(f)
+
+    def test_none_command_skipped(self, tmp_path: Path) -> None:
+        """None（YAML ~）跳过语义保留，其余命令照常加载."""
+        f = tmp_path / "lib.yaml"
+        f.write_text(
+            "projects:\n"
+            "  - name: P\n"
+            "    groups:\n"
+            "      - name: G\n"
+            "        commands:\n"
+            "          - ~\n"
+            "          - AT\n",
+            encoding="utf-8",
+        )
+        lib = load_library(f)
+        grp = lib.find_group("P", "G")
+        assert grp is not None
+        assert grp.commands == ["AT"]
+
+
 class TestDumpRoundTrip:
     def test_dump_then_load_roundtrip(self, tmp_path: Path) -> None:
         lib = CommandLibrary.empty()
@@ -88,6 +135,43 @@ class TestDumpRoundTrip:
         dump_library(CommandLibrary.empty(), f)
         lib = load_library(f)
         assert lib.projects == []
+
+
+class TestDumpErrorWrapping:
+    """批 5 T6-9：dump_library IO/序列化失败包装为 QuickCmdStoreError.
+
+    旧实现裸抛 OSError——GUI 侧 ``except QuickCmdStoreError`` 捕不到，异常
+    逃进 Qt 事件循环无提示。
+    """
+
+    @staticmethod
+    def _lib() -> CommandLibrary:
+        lib = CommandLibrary.empty()
+        lib.add_project("P1")
+        lib.add_group("P1", "G1")
+        lib.add_command("P1", "G1", "AT")
+        return lib
+
+    def test_mkdir_failure_wrapped(self, tmp_path: Path) -> None:
+        """父路径中段是普通文件 → mkdir 抛 OSError → 包装."""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        target = blocker / "sub" / "lib.yaml"
+        with pytest.raises(QuickCmdStoreError, match="无法写入命令库文件"):
+            dump_library(self._lib(), target)
+
+    def test_replace_failure_wrapped_and_tmp_cleaned(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+        """os.replace 失败 → 包装，且残留 .tmp 被清理（原子写卫生收尾）."""
+        import atprobe.infra.quickcmd.store as store_mod
+
+        def _boom(src: object, dst: object) -> None:
+            raise OSError("replace boom")
+
+        monkeypatch.setattr(store_mod.os, "replace", _boom)
+        target = tmp_path / "out.yaml"
+        with pytest.raises(QuickCmdStoreError, match="无法写入命令库文件"):
+            dump_library(self._lib(), target)
+        assert not (tmp_path / "out.yaml.tmp").exists(), "失败后应清理残留 .tmp"
 
 
 class TestDefaults:

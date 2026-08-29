@@ -137,6 +137,35 @@ class TestLegacySyntax:
         assert evaluate('{{val}} == "NO"', {"val": "OK"}) is False
 
 
+class TestLegacyErrorContext:
+    """批 5 T6-4：旧写法（{{var}} 文本替换）失败报错附预处理中间态.
+
+    替换发生在求值前的中间态——用户写的是原始表达式，词法/语法错误定位的
+    是替换后文本的位置，报错若不带预处理结果则难以对回原始表达式。
+    """
+
+    def test_syntax_error_includes_processed_expr(self) -> None:
+        """旧写法语法错误：错误消息附预处理后的表达式文本."""
+        with pytest.raises(ExpressionError) as ei:
+            evaluate("{{v}} == ", {"v": "OK"})
+        assert "预处理后表达式" in str(ei.value)
+        assert '"OK" == ' in str(ei.value), "应含预处理结果文本，便于定位"
+
+    def test_new_style_error_has_no_processed_suffix(self) -> None:
+        """新写法（无替换发生）错误信息保持原样，不附带预处理后缀."""
+        with pytest.raises(ExpressionError) as ei:
+            evaluate("v == ", {"v": "OK"})
+        assert str(ei.value) == "表达式不完整，意外的结尾"
+
+    def test_undefined_ref_includes_partial_processed(self) -> None:
+        """旧写法变量未定义：错误消息附已替换部分（定位哪个占位符失败）."""
+        with pytest.raises(UndefinedReferenceError) as ei:
+            evaluate('{{v}} == "{{missing}}"', {"v": "OK"})
+        msg = str(ei.value)
+        assert "已替换部分" in msg
+        assert '"OK" == "' in msg, "已替换前缀应进入错误上下文"
+
+
 class TestErrors:
     def test_empty_expr(self) -> None:
         with pytest.raises(ExpressionError):

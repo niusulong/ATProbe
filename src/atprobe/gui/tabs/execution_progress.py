@@ -170,8 +170,14 @@ class ExecutionProgressWidget(QWidget):
             StepStatus.SKIPPED.value: "⤳",
             StepStatus.INTERRUPTED.value: "⏹",
         }.get(ev.status, "·")
-        # 步骤明细追加到 detail_label
-        prefix = f"[{ev.port}] {ev.command}"
+        # 步骤明细追加到 detail_label（T6-10 脱敏：开关开时掩密码类 AT 命令，
+        # 与 CLI 事件行/HTML 报告同源开关——经 MainWindow.mask_credentials 只读）
+        command = ev.command
+        if getattr(self._main, "mask_credentials", False):
+            from atprobe.infra.masking import mask_at_command
+
+            command = mask_at_command(command)
+        prefix = f"[{ev.port}] {command}"
         suffix = f" {glyph} {ev.duration_ms:.0f}ms"
         if ev.error_msg:
             suffix += f"  {ev.error_msg}"

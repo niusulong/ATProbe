@@ -163,6 +163,38 @@ class TestAssertVarResponseExclusive:
         assert a.var is None
 
 
+class TestAssertEmptyString:
+    """L5 对称性补齐（批 5 T6-1）：contains 空串恒真——解析期拒绝.
+
+    ``contains: ""`` 时 ``'' in anything`` 恒 True，断言静默通过且无意义；
+    not_contains/matches 已拦（既有口径），此处补齐 contains，错误带字段定位。
+    显式空串才拦：None（未设置该字段）是合法缺省。
+    """
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            pytest.param({"contains": ""}, id="contains"),
+            pytest.param({"not_contains": ""}, id="not_contains"),
+            pytest.param({"matches": ""}, id="matches"),
+        ],
+    )
+    def test_empty_string_rejected(self, field: dict[str, str]) -> None:
+        name = next(iter(field))
+        with pytest.raises(ValueError, match=f"{name} 不可为空字符串"):
+            AssertElement(**field)
+
+    def test_equals_empty_string_still_legal(self) -> None:
+        """equals='' 是合法语义（断言响应为空），不受影响."""
+        a = AssertElement(equals="")
+        assert a.equals == ""
+
+    def test_unset_fields_not_blocked(self) -> None:
+        """None（未设置）不拦——只拦显式空串."""
+        a = AssertElement(contains="OK")
+        assert a.not_contains is None and a.matches is None
+
+
 class TestExtractReservedWords:
     """extract 变量名不可与内置保留字冲突（timestamp/port 每步注入，会被覆盖）."""
 
@@ -175,6 +207,64 @@ class TestExtractReservedWords:
         """近似名（ported/timestamps）不冲突，正常通过."""
         s = Step(command="AT", extract={"ported": r"\d+", "timestamps": r"\d+"})
         assert set(s.extract) == {"ported", "timestamps"}
+
+
+class TestCaseParametersReservedWords:
+    """批 3 终审⑧ / 批 5 T6-5：case 级 parameters 键名保留字拒绝.
+
+    timestamp/port 由 step_runner 每步注入，parameters 同名参数会被覆盖、
+    静默失效——与 extract 保留字同款错误风格（解析期拒绝，带键定位）。
+    """
+
+    @pytest.mark.parametrize("key", ["timestamp", "port"])
+    def test_reserved_key_rejected(self, key: str) -> None:
+        with pytest.raises(ValueError, match=f"parameters 键名 {key!r}"):
+            Case(name="p", parameters=({key: "x"},), steps=(Step(command="AT"),))
+
+    def test_mixed_row_reports_the_reserved_one(self) -> None:
+        """多键参数行：只报保留字键（错误信息带定位）."""
+        with pytest.raises(ValueError, match="parameters 键名 'port'"):
+            Case(
+                name="p",
+                parameters=({"apn": "cmnet", "port": "COM5"},),
+                steps=(Step(command="AT"),),
+            )
+
+    def test_normal_keys_ok(self) -> None:
+        """常规键名不受影响（含近似名 ported/timestamps）."""
+        c = Case(
+            name="p",
+            parameters=({"apn": "cmnet", "ported": "1", "timestamps": "2"},),
+            steps=(Step(command="AT"),),
+        )
+        assert c.parameters[0]["apn"] == "cmnet"
+
+
+class TestCaseParametersIsolation:
+    """批 5 T6-8：parameters 行 dict 不与构造入参共享（跨实例不传染）.
+
+    pydantic v2 校验时会重建内层 dict——本测试钉住该不变量：外部改动传入
+    dict（或改 model.parameters[0]）不得影响已构造的 Case 实例。
+    """
+
+    def test_external_dict_mutation_isolated(self) -> None:
+        row = {"apn": "cmnet"}
+        c = Case(name="p", parameters=(row,), steps=(Step(command="AT"),))
+        row["apn"] = "changed"
+        assert c.parameters[0]["apn"] == "cmnet", "构造后外部改动不得传染进模型"
+
+    def test_list_input_mutation_isolated(self) -> None:
+        row = {"k": "v"}
+        c = Case(name="p", parameters=[row], steps=(Step(command="AT"),))
+        row["k"] = "zzz"
+        assert c.parameters[0]["k"] == "v"
+
+    def test_two_cases_do_not_share_row(self) -> None:
+        row = {"k": "v"}
+        a = Case(name="a", parameters=(row,), steps=(Step(command="AT"),))
+        b = Case(name="b", parameters=(row,), steps=(Step(command="AT"),))
+        a.parameters[0]["k"] = "mutated-via-a"
+        assert b.parameters[0]["k"] == "v", "两个 Case 实例不得共享同一 row dict"
 
 
 class TestLoopWarmupLessThanCount:
