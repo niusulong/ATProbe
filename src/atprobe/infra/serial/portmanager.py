@@ -403,18 +403,6 @@ class PortManager(ICommandSender, IConnectionManager, IURCSubscriber):
             raise KeyError(f"端口 {port} 未打开")
         conn.write_command(command, terminator=terminator)
 
-    def write_bytes(self, port: str, data: bytes) -> None:
-        """写原始字节（不加结束符、不分块）——**锁外裸写，生产代码勿用**.
-
-        批 2b 后文件/数据流发送统一走持锁 write_data/send_data（整个写周期
-        持有连接级命令锁）；本方法不参与互斥，仅为测试兼容保留（批 5 卫生批
-        删除，届时迁移 test_write_bytes.py）。
-        """
-        conn = self._connections.get(port)
-        if conn is None:
-            raise KeyError(f"端口 {port} 未打开")
-        conn.write_bytes(data)
-
     def write_data(
         self,
         port: str,

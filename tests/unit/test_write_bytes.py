@@ -1,6 +1,12 @@
-"""write_bytes / PortManager.write_bytes 单元测试.
+"""SerialConnection.write_bytes 内部原语单元测试.
 
-覆盖：TX 观察者通知（咽喉点完整性）、断连抛 SendError、PortManager 转调。
+覆盖：TX 观察者通知（咽喉点完整性）、断连抛 SendError、_await_response
+手动组合周期。write_bytes 是 send_data/write_data 分块写的内部裸写原语
+（不参与命令互斥，锁由外层发送周期持有），此处为内部原语直测。
+
+注：PortManager.write_bytes 包装（锁外裸写）已随批 5 删除；其包装级语义
+（未开端口 KeyError、转调 connection）由 test_send_data.py 的
+TestPortManagerWriteData 对持锁 write_data 的同款覆盖承载。
 
 用「_connected=True + 桩串口对象」绕过真实 pyserial.open（沿用
 tests/unit/test_persistent_subscribe.py 的 mock 模式）。
@@ -69,36 +75,13 @@ class TestWriteBytesNotifiesTx:
             conn.write_bytes(b"x")
 
 
-class TestPortManagerWriteBytes:
-    def test_portmanager_write_bytes_delegates_to_connection(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        from atprobe.infra.serial.portmanager import PortManager
-
-        conn = _make_connection(monkeypatch)
-        written: list[bytes] = []
-        monkeypatch.setattr(conn, "write_bytes", lambda data: written.append(data))
-
-        pm = PortManager()
-        monkeypatch.setattr(pm, "_connections", {"COM9": conn})
-
-        pm.write_bytes("COM9", b"\xaa\xbb")
-
-        assert written == [b"\xaa\xbb"]
-
-    def test_portmanager_write_bytes_unopened_port_raises(self) -> None:  # type: ignore[no-untyped-def]
-        from atprobe.infra.serial.portmanager import PortManager
-
-        pm = PortManager()
-        with pytest.raises(KeyError):
-            pm.write_bytes("COM9", b"data")
-
-
 class TestAwaitResponsePrimitive:
     """批 2a T1：_await_response 可独立于 send_command 组合使用（数据路径前置）.
 
     手动组合「置等待态 → write_bytes → _await_response」等价一次命令等待。
     """
 
-    def test_manual_cycle_returns_complete(self, monkeypatch) -> None:
+    def test_manual_cycle_returns_complete(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         conn = _make_connection(monkeypatch)
         # 等价 send_command 前半（置等待态 → 清排 → 清缓冲/记回显），不经过 send_command
         conn._awaiting.set()

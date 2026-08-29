@@ -20,7 +20,6 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable
-from pathlib import Path
 
 # 复用库级应答状态机（同一份事实源，src/ 自包含，不依赖 tools/）
 from atprobe.infra.serial.atresponder import AtResponder
@@ -31,7 +30,6 @@ from atprobe.infra.serial.interfaces import (
     PortInfo,
     Response,
     ResponseStatus,
-    URCHandler,
 )
 from atprobe.infra.serial.rawlog import RawLogger
 
@@ -157,11 +155,5 @@ class VsimPortManager(FakePortManager):
             return Response(text=text, status=ResponseStatus.COMPLETE)
         return Response(text="", status=ResponseStatus.TIMEOUT, error="等待数据超时")
 
-    # ------------------------------------------------------------------
-    # URC：演示模式默认不主动上报（如需可由调用方调用继承的 emit_urc）
-    # ------------------------------------------------------------------
-    def subscribe_urc(self, port: str, handler: URCHandler) -> object:
-        return super().subscribe_urc(port, handler)
-
-    def set_case_log(self, port: str, log_file: Path | None) -> None:
-        self._log_files[port] = log_file
+    # URC 订阅/用例日志绑定（subscribe_urc/set_case_log）继承 FakePortManager：
+    # 演示模式默认不主动上报，如需可由调用方调用继承的 emit_urc。

@@ -38,10 +38,9 @@ STALE_SUBSCRIPTION_S = 1800.0
 
 
 class _Subscription:
-    """单个订阅的私有状态（id 字段保留作调试自描述，当前无消费方）."""
+    """单个订阅的私有状态（订阅身份由注册表 ``_subs`` 的 dict 键 sid 承载）."""
 
-    def __init__(self, sub_id: str, port: str, pattern: re.Pattern[str] | None, size: int) -> None:
-        self.id = sub_id
+    def __init__(self, port: str, pattern: re.Pattern[str] | None, size: int) -> None:
         self.port = port
         self.pattern = pattern
         # (seq, timestamp, text) 三元组；maxlen 满后自动挤掉最旧事件（环形缓冲）
@@ -95,7 +94,7 @@ class UrcRegistry:
         if len(self._subs) >= MAX_SUBSCRIPTIONS:
             raise invalid_input(f"URC 订阅数超上限（{MAX_SUBSCRIPTIONS}），请先 unsubscribe 释放")
         sub_id = uuid.uuid4().hex[:12]
-        self._subs[sub_id] = _Subscription(sub_id, port, compiled, self._buffer_size)
+        self._subs[sub_id] = _Subscription(port, compiled, self._buffer_size)
         return sub_id
 
     def unsubscribe(self, sub_id: str) -> None:

@@ -280,6 +280,3 @@ def parse_port_expr(expr: str, *, source: str | None = None) -> PortConfig:
             # P2 修复：帧格式错误收敛为 AppConfigError（旧实现裸 ValueError 逃逸）
             raise AppConfigError(f"帧格式无效：{parts[2]!r}（{exc}）", source=source) from exc
     return PortConfig(name=name, baudrate=baud, frame=frame)
-
-
-_parse_port_expr = parse_port_expr  # 别名用于内部
