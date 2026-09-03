@@ -76,7 +76,12 @@ jobs:
             Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile minisign.zip -ErrorAction Stop
           } catch { Write-Host "::error::minisign 二进制下载失败：$($_.Exception.Message)"; exit 1 }
           Expand-Archive minisign.zip -DestinationPath minisign
-          $ms = (Get-ChildItem minisign -Recurse -Filter minisign.exe).FullName
+          # zip 内含 aarch64 与 x86_64 两个架构——.FullName 在多文件时是数组，
+          # & $ms 会把两条路径拼成一个命令名解析失败（run 33735264736 实证
+          # 'aarch64\... x86_64\...' is not recognized）——必须显式选 x86_64
+          $ms = (Get-ChildItem minisign -Recurse -Filter minisign.exe |
+            Where-Object { $_.FullName -like '*x86_64*' } | Select-Object -First 1).FullName
+          if (-not $ms) { Write-Host "::error::解压产物中未找到 x86_64/minisign.exe"; exit 1 }
           Get-ChildItem dist/*.zip | ForEach-Object {
             if ($env:MINISIGN_KEY_PASSWORD) {
               # 密码经 stdin 传入（无 tty 时 minisign 从 stdin 读密码）
