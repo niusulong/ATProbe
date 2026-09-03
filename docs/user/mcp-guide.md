@@ -418,11 +418,18 @@ mcp:
   host: 127.0.0.1            # serve 监听地址。默认故意回环——远程访问需显式 0.0.0.0
   port: 8470                 # serve 监听端口
   # token_file: ./mcp-token.txt   # serve 的第 4 级 Token 来源（可选）
+  # allowed_roots:                # MCP 路径参数白名单追加根（可选，v0.10+）
+  #   - D:\shared-testcases
 ```
 
 - 仅 `serve` 形态消费这些键；`stdio` 形态忽略（stdio 无认证）。
 - 优先级：命令行（`--host`/`--port`/`--token-file`）> 配置 > 内置默认。
 - 值非法（如 `mcp.port` 不是整数）→ 启动红字报错 exit 2；`mcp` 段缺失或留空 = 全默认。
+- `allowed_roots`（S-3/S-8，**stdio 与 serve 均生效**）：客户端传入的路径参数
+  （用例/套件/data 文件）只允许落在「cases_dir ∪ allowed_roots」内，越界返回
+  INVALID_INPUT——不可信会话不能借 MCP 通道读任意目录。注意这是**管理员语义的
+  整目录放行**（配父目录即放行整棵子树），始终配最小必要目录；详见
+  `config-reference.md` §3.9。
 - 其余通用键（`cases_dir`、`ports`、`report_dir`、`urc_filter` 等）对 MCP 同样生效，
   含义见 `config-reference.md`。
 
