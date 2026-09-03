@@ -56,6 +56,9 @@ cache/
 # ============================================================
 # HTML 报告与用例执行会话目录（程序生成，勿提交）
 reports/
+
+# S-6 minisign 签名密钥对（本地保管——私钥绝不入库；见 docs/user/update-signing.md）
+keys/
 # 本地手工验证产物目录（CLI/GUI 冒烟跑出的 reports_* 变体，勿提交）
 reports_*/
 logs/
