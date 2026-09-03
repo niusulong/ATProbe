@@ -65,8 +65,16 @@ jobs:
           if (-not $env:MINISIGN_PRIVATE_KEY) { Write-Host "::error::未配置 MINISIGN_PRIVATE_KEY secret——发布必须签名（见 docs/user/update-signing.md）"; exit 1 }
           $keyFile = New-TemporaryFile
           Set-Content -Path $keyFile -Value $env:MINISIGN_PRIVATE_KEY
+          # 自诊断（::error:: 会成为 run annotation，无需日志权限即可定位）：
+          # 私钥文件应为两行（untrusted comment + base64）——行数/首行不符说明
+          # secret 粘贴内容不完整或贴错文件（如贴成公钥）。只报形态不报内容。
+          $keyLines = @(Get-Content $keyFile | Where-Object { $_ -ne '' })
+          if ($keyLines.Count -ne 2) { Write-Host "::error::MINISIGN_PRIVATE_KEY 内容应为两行（untrusted comment + base64），当前非空行数 $($keyLines.Count)——请核对已粘贴完整私钥文件（keys/atprobe-update.key 全文）"; exit 1 }
+          if (-not $keyLines[0].StartsWith('untrusted comment:')) { Write-Host "::error::私钥首行应为 'untrusted comment: ...'——疑似只贴了 base64 行或误贴公钥文件"; exit 1 }
           # 下载 minisign（官方 release 二进制）
-          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile minisign.zip
+          try {
+            Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile minisign.zip -ErrorAction Stop
+          } catch { Write-Host "::error::minisign 二进制下载失败：$($_.Exception.Message)"; exit 1 }
           Expand-Archive minisign.zip -DestinationPath minisign
           $ms = (Get-ChildItem minisign -Recurse -Filter minisign.exe).FullName
           Get-ChildItem dist/*.zip | ForEach-Object {
@@ -78,7 +86,7 @@ jobs:
               # （exit 2）——必须喂一个空行（本地 Windows 实测 2026-09-03）
               Write-Output '' | & $ms -S -m $_.FullName -s $keyFile
             }
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::minisign 签名失败（$($_.Name)）"; exit 1 }
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::minisign 签名失败（$($_.Name)，exit $LASTEXITCODE——私钥内容与密码分支已过前置校验，多为 secret 值与生成时不一致）"; exit 1 }
           }
           Remove-Item $keyFile -Force
           Get-ChildItem dist/*.minisig | ForEach-Object { Write-Host "已生成签名：$($_.Name)" }
