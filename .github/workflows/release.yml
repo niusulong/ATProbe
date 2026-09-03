@@ -74,7 +74,9 @@ jobs:
               # 密码经 stdin 传入（无 tty 时 minisign 从 stdin 读密码）
               $env:MINISIGN_KEY_PASSWORD | & $ms -S -m $_.FullName -s $keyFile
             } else {
-              & $ms -S -m $_.FullName -s $keyFile
+              # 空密码私钥：minisign 无 tty 时仍从 stdin 读密码，EOF 即失败
+              # （exit 2）——必须喂一个空行（本地 Windows 实测 2026-09-03）
+              Write-Output '' | & $ms -S -m $_.FullName -s $keyFile
             }
             if ($LASTEXITCODE -ne 0) { Write-Host "::error::minisign 签名失败（$($_.Name)）"; exit 1 }
           }

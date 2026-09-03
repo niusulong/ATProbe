@@ -366,11 +366,20 @@ def test_verify_minisign_rejects_missing_files(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S-6：verifier——public_key_path（过渡期定位）
+# S-6：verifier——public_key_path（已激活：2026-09-03 公钥内置）
 # ---------------------------------------------------------------------------
-def test_public_key_path_none_when_not_shipped() -> None:
-    """公钥未内置（当前过渡期）→ None（不可用而非硬失败）。"""
-    assert public_key_path() is None
+def test_public_key_path_shipped_and_parses() -> None:
+    """公钥已内置（S-6 激活，key ID 718171F117CC85D3）→ 可定位且为合法 32 字节 Ed 公钥.
+
+    旧测试钉"过渡期未内置 → None"——公钥入库后按激活语义翻转；None 分支保留为
+    防御代码（未内置的旧版本二进制上返回 None 走 SHA256 过渡），不再对仓库现状断言。
+    """
+    from atprobe.infra.update.verifier import _payload_line, parse_minisign_key
+
+    p = public_key_path()
+    assert p is not None and p.is_file()
+    pk = parse_minisign_key(_payload_line(p))
+    assert len(pk) == 32
 
 
 def test_public_key_path_found_in_resources_package(
