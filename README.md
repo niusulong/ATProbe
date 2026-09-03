@@ -5,7 +5,7 @@
 
 > 串口 AT 命令自动化测试工具 (Serial AT Command Automation Testing Tool)
 
-面向嵌入式通信模组（蜂窝/WiFi/蓝牙）的本地串口 AT 命令自动化测试工具，同时提供 CLI 与桌面 GUI 两个入口。
+面向嵌入式通信模组（蜂窝/WiFi/蓝牙）的本地串口 AT 命令自动化测试工具，提供 CLI、桌面 GUI 与面向大模型的 MCP 服务（stdio / HTTP）三类入口。
 
 ## 特性
 
