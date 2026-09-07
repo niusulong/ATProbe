@@ -142,8 +142,13 @@ docs/*
 .zcode/
 packaging/build.log
 
-# 根目录 skills/（本地技能实验目录，与 .agents/skills/ 无关），不入库
-skills/
+# 根目录 skills/atprobe-case-author/ 是 .agents/skills/ 项目技能的镜像副本（两份内容
+# 同步维护，均入库，ZCode 按其一加载）；docs/、pdf/、skill-creator/ 为本地自用非项目
+# 技能，不入库；敏感本地参考（公司测试集群真实地址）两份路径均忽略，只留本地
+skills/docs/
+skills/pdf/
+skills/skill-creator/
+skills/atprobe-case-author/references/server-cluster.local.md
 
 # 本地自用 skills（pdf / skill-creator），与本项目无关，不入库
 .agents/skills/pdf/
