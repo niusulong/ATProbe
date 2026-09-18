@@ -491,16 +491,18 @@ class MainWindow(QMainWindow):
         # 会 RuntimeError（F-3 同型崩溃点），且越封装访问私有字段（§3.3）。
         return [p for p in self._port_manager.configs() if self._port_manager.is_connected(p)]
 
-    def available_ports(self) -> list[str]:
+    def available_ports(self, force: bool = False) -> list[str]:
         """枚举系统全部可用串口名（含未连接的，如 COM1）。供下拉框填充.
 
         P2 修复：2 秒 TTL 缓存——多个 tab 构造/刷新都调用本方法，USB 串口多时
         枚举可达秒级，反复调用会连续阻塞 GUI 线程。
+        force=True（用户点「刷新」按钮）：绕过 TTL 缓存强制重枚举并回填缓存，
+        否则热插拔后 2 秒内的显式刷新仍拿旧列表。
         """
         import time as _time
 
         now = _time.monotonic()
-        if self._ports_cache is not None and now - self._ports_cache_at < 2.0:
+        if not force and self._ports_cache is not None and now - self._ports_cache_at < 2.0:
             return list(self._ports_cache)
         try:
             names = [p.name for p in self._port_manager.enumerate_ports()]
@@ -512,6 +514,13 @@ class MainWindow(QMainWindow):
 
     def cases_dir(self) -> Path:
         return resolve_workspace_path(self._app_config.cases_dir)
+
+    def default_baud(self) -> int:
+        """默认波特率（atprobe.yaml default.baud，未配置即 115200）.
+
+        供 case_execute 波特率下拉取初始值——GUI 与 CLI（--baud 缺省链）同源。
+        """
+        return int(self._app_config.baud)
 
     @property
     def case_parse_cache(self) -> CaseParseCache:
@@ -792,6 +801,7 @@ class MainWindow(QMainWindow):
         port: str,
         threshold: int,
         *,
+        baud: int | None = None,
         dry_run: bool = False,
         no_report: bool = False,
     ) -> None:
@@ -799,6 +809,9 @@ class MainWindow(QMainWindow):
 
         dry_run=True 时只解析用例、检查端口，不实际执行（M5 §3.6 等价）。
         no_report=True 时不生成 HTML 报告。
+        baud：用例执行页选择的波特率；仅对**本次新开**的端口生效——端口已
+        连接（如手动调试页先打开）时沿用现有连接，不重开不断订（所见即所跑
+        的例外：已连接端口以现有波特率为准）。None 时回退 default.baud 链。
         """
         # B8 修复：防重入——引擎在跑时拒绝再次执行，避免两个引擎线程并发操作同一串口。
         from atprobe.engine.config import EngineState
@@ -806,6 +819,10 @@ class MainWindow(QMainWindow):
         if self._engine is not None and self._engine.state() is EngineState.RUNNING:
             QMessageBox.warning(self, "正在执行", "已有用例正在执行中，请先停止后再开始。")
             return
+
+        # 波特率缺省链：未显式给（旧调用方）→ atprobe.yaml default.baud → 115200
+        if baud is None:
+            baud = self.default_baud()
 
         # 2b⑧ 启动前探测（终审 Important）：manual_debug 文件发送进行中（分块写
         # 持端口命令锁）时启动引擎，首条 send_command 即 PortBusyError——步骤串
@@ -830,18 +847,28 @@ class MainWindow(QMainWindow):
         # dry-run：只解析 + 端口可用性检查，不执行
         if dry_run:
             was_open = self._port_manager.is_connected(port)
-            try:
-                self._port_manager.open(
-                    PortConfig(name=port, urc_filter=self._app_config.urc_filter)
-                )
-                open_ok = True
-            except Exception:  # noqa: BLE001
-                open_ok = False
-            # P2 修复：dry-run 打开的端口用后即关（预演不改变连接状态）；
-            # 外部已连接的端口不动
-            if open_ok and not was_open:
-                self._port_manager.close(port)
-            status = "可用" if open_ok or was_open else "不可用"
+            # 已连接端口不做 open 探测：PortManager.open 对「同名不同配置」抛
+            # PortOpenError（无法在不中断连接的情况下换配置），用所选 baud 探测
+            # 会把「可用（波特率不同）」误报成「不可用」，且可能扰动现有连接。
+            open_ok = True
+            if not was_open:
+                try:
+                    self._port_manager.open(
+                        PortConfig(name=port, baudrate=baud, urc_filter=self._app_config.urc_filter)
+                    )
+                except Exception:  # noqa: BLE001
+                    open_ok = False
+                else:
+                    # P2 修复：dry-run 打开的端口用后即关（预演不改变连接状态）
+                    self._port_manager.close(port)
+            status = "可用" if open_ok else "不可用"
+            # 波特率注记：已连接端口沿用现有连接（不重开），显示其实际波特率；
+            # 未连接端口显示本次将按何值打开——避免「控件写了 9600 实际仍 115200」的暗坑
+            if was_open:
+                actual = self._port_manager.config_of(port).baudrate
+                status += f"（已连接，按现有连接波特率 {actual} 执行，不重开）"
+            else:
+                status += f"（将按 {baud} 打开）"
             QMessageBox.information(
                 self,
                 "预演 (Dry Run)",
@@ -849,11 +876,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 确保端口已连接
+        # 确保端口已连接（已连接则沿用现有连接，波特率以现有连接为准）
         if not self._port_manager.is_connected(port):
             try:
                 self._port_manager.open(
-                    PortConfig(name=port, urc_filter=self._app_config.urc_filter)
+                    PortConfig(name=port, baudrate=baud, urc_filter=self._app_config.urc_filter)
                 )
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "端口错误", f"打开端口 {port} 失败：{exc}")
@@ -891,7 +918,7 @@ class MainWindow(QMainWindow):
 
         session = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4)
         cfg = EngineConfig(
-            ports=(PortConfig(name=port, urc_filter=self._app_config.urc_filter),),
+            ports=(PortConfig(name=port, baudrate=baud, urc_filter=self._app_config.urc_filter),),
             cases=tuple(cases),  # type: ignore[arg-type]
             step_timeout_default=self._app_config.step_timeout,
             pressure_pass_threshold=float(threshold),
@@ -902,7 +929,20 @@ class MainWindow(QMainWindow):
             data_allowed_roots=(str(self.cases_dir().resolve()),),
         )
 
-        _log.info("开始执行: %d 个用例, 端口 %s, 阈值 %d%%", len(cases), port, threshold)
+        # 日志记录**实际生效**波特率：已连接端口沿用现有连接，所选 baud 不生效——
+        # 与 dry-run 弹窗同一口径，避免日志重新引入「控件写 9600 实际 115200」暗坑
+        eff_baud = (
+            self._port_manager.config_of(port).baudrate
+            if self._port_manager.is_connected(port)
+            else baud
+        )
+        _log.info(
+            "开始执行: %d 个用例, 端口 %s, 波特率 %d, 阈值 %d%%",
+            len(cases),
+            port,
+            eff_baud,
+            threshold,
+        )
 
         self._set_engine_status("RUNNING", self._tokens["accent"])
         self._engine = Engine(

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from atprobe.gui.tabs.manual_debug import _BAUDRATES, _CUSTOM_BAUD_LABEL, _MAX_BAUDRATE
 from atprobe.gui.tabs.registry import ITabView, TabBinding
 
 # 叶子节点（用例）在第 0 列存储用例文件绝对路径，用于选中收集
@@ -176,6 +178,31 @@ class CaseExecuteWidget(QWidget):
         self.ports_combo = QComboBox()
         self._refresh_ports()
         param.addWidget(self.ports_combo)
+        # 显式刷新（force 绕过主窗口 2s TTL 缓存）——热插拔串口后无需重开 tab
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.setToolTip("重新枚举系统串口（● 前缀 = 已连接）")
+        refresh_btn.clicked.connect(self._on_refresh_clicked)
+        param.addWidget(refresh_btn)
+        param.addWidget(QLabel("波特率:"))
+        self.baud_combo = QComboBox()
+        self.baud_combo.setEditable(True)
+        self.baud_combo.addItems(_BAUDRATES)
+        self.baud_combo.addItem(_CUSTOM_BAUD_LABEL)  # 末尾固定项：触发自定义输入
+        self.baud_combo.setMinimumWidth(110)
+        # 初始值：atprobe.yaml default.baud（主窗口读取，GUI/CLI 同源），否则 115200
+        default_baud = getattr(self._main, "default_baud", None)
+        init_baud = str(default_baud()) if callable(default_baud) else "115200"
+        if init_baud in _BAUDRATES:
+            self.baud_combo.setCurrentIndex(_BAUDRATES.index(init_baud))
+        else:
+            self.baud_combo.setCurrentText(init_baud)
+        # 上一个有效波特率：「自定义…」对话框的初值与取消回退目标（对齐手动调试页
+        # 的 _last_valid_baud 模式——取消自定义输入不得把配置静默改回 115200）
+        self._last_valid_baud = int(init_baud) if init_baud.isdigit() else 115200
+        # 先设初值再接线（editable combo 的 setCurrentText 不更新 currentIndex，
+        # 见 manual_debug 同款注释），避免构造期误触自定义对话框
+        self.baud_combo.currentIndexChanged.connect(self._on_baud_index_changed)
+        param.addWidget(self.baud_combo)
         param.addWidget(QLabel("压测阈值%:"))
         self.threshold_spin = QSpinBox()
         self.threshold_spin.setRange(0, 100)
@@ -211,14 +238,112 @@ class CaseExecuteWidget(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-    def _refresh_ports(self) -> None:
+    def _on_refresh_clicked(self) -> None:
+        """「刷新」按钮：用户显式要求重枚举 → force 绕过 available_ports 的 TTL 缓存."""
+        self._refresh_ports(force=True)
+
+    def _refresh_ports(self, force: bool = False) -> None:
+        """重填端口下拉；已连接端口加 ● 前缀徽标，并尽量保留当前选中.
+
+        force=True 时请求主窗口绕过 2s TTL 缓存重枚举（旧主窗口/测试替身不收
+        该参数时 TypeError 回退为普通调用，行为与历史一致）。
+        """
+        current = self.ports_combo.currentData() or self.ports_combo.currentText()
         self.ports_combo.clear()
         getter = getattr(self._main, "available_ports", None) or getattr(
             self._main, "connected_ports", None
         )
+        ports: list[str] = []
         if callable(getter):
-            for p in getter():
-                self.ports_combo.addItem(p)
+            try:
+                ports = list(getter(force) if force else getter())
+            except TypeError:
+                # 仅预期「旧主窗口/测试替身的 available_ports(self) 不收 force」这一种
+                # TypeError：签名不匹配 → 回退无参调用。生产 getter 已支持 force，且其
+                # 枚举异常在 available_ports 内部自兜底，不会以 TypeError 形态到达这里。
+                ports = list(getter())
+        is_connected = getattr(self._main, "is_port_connected", None)
+        select_idx = 0
+        for i, p in enumerate(ports):
+            connected = bool(is_connected(p)) if callable(is_connected) else False
+            # 真实端口名存 data（● 只是展示前缀），_run 读 currentData 不受污染
+            self.ports_combo.addItem(f"● {p}" if connected else p, p)
+            if p == current:
+                select_idx = i
+        if ports:
+            self.ports_combo.setCurrentIndex(select_idx)
+
+    # ------------------------------------------------------------------
+    # 波特率（对齐手动调试页：常用值下拉 + 自定义输入 + 校验）
+    # ------------------------------------------------------------------
+    def _on_baud_index_changed(self, index: int) -> None:
+        """选中「自定义…」项时弹输入框；取消则回退上一个有效值，避免残留标签文本."""
+        if index < 0:
+            return
+        text = self.baud_combo.itemText(index)
+        if text != _CUSTOM_BAUD_LABEL:
+            # 普通常用值：同步 last-valid（对齐手动调试页预设分支）
+            if text.isdigit():
+                self._last_valid_baud = int(text)
+            return
+        value, ok = QInputDialog.getInt(
+            self,
+            "自定义波特率",
+            f"输入波特率（1 ~ {_MAX_BAUDRATE}）:",
+            self._last_valid_baud,  # 对话框初值 = 上一个有效值（非硬编码）
+            1,
+            _MAX_BAUDRATE,
+        )
+        self.baud_combo.blockSignals(True)
+        try:
+            if ok:
+                self._remember_baud(value)  # 自定义值记入候选（去重升序）
+                self._last_valid_baud = value
+            # 取消 → 回退上一个有效值（非 115200），不残留「自定义…」标签
+            self.baud_combo.setCurrentText(str(value) if ok else str(self._last_valid_baud))
+        finally:
+            self.baud_combo.blockSignals(False)
+
+    def _current_baud(self) -> int | None:
+        """解析当前波特率输入（支持下拉值/手输自定义），非法时弹窗提示并返回 None."""
+        from PySide6.QtWidgets import QMessageBox
+
+        raw = self.baud_combo.currentText().strip()
+        if raw == _CUSTOM_BAUD_LABEL:
+            QMessageBox.warning(self, "波特率无效", "请先输入自定义波特率")
+            return None
+        try:
+            baud = int(raw)
+        except ValueError:
+            QMessageBox.warning(self, "波特率无效", f"波特率必须为整数，当前输入：{raw!r}")
+            return None
+        if baud < 1 or baud > _MAX_BAUDRATE:
+            QMessageBox.warning(
+                self, "波特率无效", f"波特率需在 1 ~ {_MAX_BAUDRATE} 之间，当前：{baud}"
+            )
+            return None
+        # 收口：校验通过即更新 last-valid（对话框初值/取消回退随后以此为准）
+        self._last_valid_baud = baud
+        self._remember_baud(baud)
+        return baud
+
+    def _remember_baud(self, baud: int) -> None:
+        """把用过的自定义波特率加入下拉候选（去重、按数值升序，末尾保留自定义项）."""
+        items = [self.baud_combo.itemText(i) for i in range(self.baud_combo.count())]
+        if str(baud) in items:
+            return
+        values = sorted({int(x) for x in items if x.isdigit()} | {baud})
+        cur = self.baud_combo.currentText()
+        # blockSignals 是布尔标志非计数器：保存并恢复先前态，避免嵌套调用
+        # （如 _on_baud_index_changed 外层已阻塞）被此处提前解锁击穿
+        was_blocked = self.baud_combo.blockSignals(True)
+        try:
+            self.baud_combo.clear()
+            self.baud_combo.addItems([str(v) for v in values])
+            self.baud_combo.addItem(_CUSTOM_BAUD_LABEL)
+            self.baud_combo.setCurrentText(cur)
+        finally:
+            self.baud_combo.blockSignals(was_blocked)
 
     def _load_default_dir(self) -> None:
         if hasattr(self._main, "cases_dir"):
@@ -505,14 +630,18 @@ class CaseExecuteWidget(QWidget):
         selected = self._selected_files()
         if not selected:
             return
-        port = self.ports_combo.currentText()
+        port = self.ports_combo.currentData() or self.ports_combo.currentText()
         if not port:
             return
+        baud = self._current_baud()
+        if baud is None:
+            return  # 波特率校验失败（已弹提示），放弃执行
         if hasattr(self._main, "run_cases"):
             self._main.run_cases(
                 selected,
                 port,
                 self.threshold_spin.value(),
+                baud=baud,
                 no_report=not self.report_check.isChecked(),
             )
 
@@ -525,11 +654,16 @@ class CaseExecuteWidget(QWidget):
         selected = self._selected_files()
         if not selected:
             return
-        port = self.ports_combo.currentText()
+        port = self.ports_combo.currentData() or self.ports_combo.currentText()
         if not port:
             return
+        baud = self._current_baud()
+        if baud is None:
+            return  # 波特率校验失败（已弹提示），放弃预演
         if hasattr(self._main, "run_cases"):
-            self._main.run_cases(selected, port, self.threshold_spin.value(), dry_run=True)
+            self._main.run_cases(
+                selected, port, self.threshold_spin.value(), baud=baud, dry_run=True
+            )
 
     def _stop(self) -> None:
         # 优先用带对话框的停止（中断当前 / 停止全部）；兜底直接停止全部

@@ -612,11 +612,20 @@ class TestCaseExecuteExtras:
             def __init__(self):
                 self.tabs = _qw.QTabWidget()
 
-            def available_ports(self):
+            def available_ports(self, force: bool = False):
                 return ["COM3"]
 
-            def run_cases(self, files, port, threshold, *, dry_run=False, no_report=False):
-                run_calls.append({"files": list(files), "dry_run": dry_run, "no_report": no_report})
+            def run_cases(
+                self, files, port, threshold, *, baud=None, dry_run=False, no_report=False
+            ):
+                run_calls.append(
+                    {
+                        "files": list(files),
+                        "baud": baud,
+                        "dry_run": dry_run,
+                        "no_report": no_report,
+                    }
+                )
 
             def stop_engine_dialog(self):
                 pass
@@ -664,23 +673,46 @@ class TestCaseExecuteExtras:
 
 
 class _CaseMain:
-    """case_execute 测试用的最小主窗口替身（端口 + run_cases 记录）."""
+    """case_execute 测试用的最小主窗口替身（端口 + run_cases 记录）.
 
-    def __init__(self) -> None:  # noqa: D107
+    ports 构造参数可注入下拉候选；connected 集合控制 ● 徽标；available_ports
+    记录 force 调用（验证「刷新」按钮绕过 TTL 缓存的语义）。
+    """
+
+    def __init__(self, ports=None, connected=(), default_baud: int = 115200) -> None:  # noqa: ANN001
         import PySide6.QtWidgets as _qw
 
         self.tabs = _qw.QTabWidget()
         self.run_calls: list[dict] = []
+        self._ports = list(ports) if ports is not None else ["COM3"]
+        self._connected = set(connected)
+        self._default_baud = default_baud
+        self.port_force_calls: list[bool] = []
 
-    def available_ports(self) -> list[str]:
-        return ["COM3"]
+    def available_ports(self, force: bool = False) -> list[str]:
+        self.port_force_calls.append(force)
+        return list(self._ports)
 
-    def run_cases(self, files, port, threshold, *, dry_run=False, no_report=False):  # noqa: ANN001
-        self.run_calls.append({"files": list(files), "dry_run": dry_run, "no_report": no_report})
+    def is_port_connected(self, port: str) -> bool:
+        return port in self._connected
+
+    def default_baud(self) -> int:
+        return self._default_baud
+
+    def run_cases(self, files, port, threshold, *, baud=None, dry_run=False, no_report=False):  # noqa: ANN001
+        self.run_calls.append(
+            {
+                "files": list(files),
+                "port": port,
+                "baud": baud,
+                "dry_run": dry_run,
+                "no_report": no_report,
+            }
+        )
 
 
 def _write_case_cases(tmp_path) -> None:  # noqa: ANN001
-    """写 3 个用例：根目录 2 个（network/sms 标签）+ tcp/ 子目录 1 个."""
+    """写 3 个用例：根目录 2 个（network/sms 标签）+ tcp/ 子目录 1 个（幂等，可重复调用）."""
     (tmp_path / "net.yaml").write_text(
         "name: 网络用例\ntags: [network]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
         encoding="utf-8",
@@ -689,7 +721,7 @@ def _write_case_cases(tmp_path) -> None:  # noqa: ANN001
         "name: 短信用例\ntags: [sms]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
         encoding="utf-8",
     )
-    (tmp_path / "tcp").mkdir()
+    (tmp_path / "tcp").mkdir(exist_ok=True)
     (tmp_path / "tcp" / "t1.yaml").write_text(
         "name: TCP用例\ntags: [tcp]\nsteps:\n  - command: AT\n    assert: {contains: OK}\n",
         encoding="utf-8",
@@ -805,6 +837,158 @@ class TestCaseExecuteSearchDebounce:
         # 只应用第二批（无论两个 worker 的完成顺序如何）
         names = [c[0] for c in widget._cases]  # noqa: SLF001
         assert names == ["乙用例"]
+
+
+class TestCaseExecutePortBaud:
+    """用例执行页端口刷新（force 绕 TTL + ● 徽标）与波特率（默认值/校验/透传）."""
+
+    def _make_widget(self, tmp_path, main=None):  # noqa: ANN001, no-untyped-def
+        from atprobe.gui.tabs.case_execute import CaseExecuteWidget
+        from atprobe.gui.tabs.registry import TabBinding
+
+        _write_case_cases(tmp_path)
+        main = main if main is not None else _CaseMain()
+        widget = CaseExecuteWidget(TabBinding(type_name="case_execute", params={}), main)  # type: ignore[arg-type]
+        widget._load_path(tmp_path)  # noqa: SLF001
+        TestCaseExecuteExtras._wait_cases_applied(widget)
+        return widget, main
+
+    def test_baud_default_from_main(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """初始波特率取主窗口 default_baud()（与 CLI default.baud 同源）；配置外值直接落编辑框."""
+        w, m = self._make_widget(tmp_path, main=_CaseMain(default_baud=9600))
+        assert w.baud_combo.currentText() == "9600"
+        w2, _ = self._make_widget(tmp_path, main=_CaseMain(default_baud=250000))
+        assert w2.baud_combo.currentText() == "250000"
+        assert m.port_force_calls == [False]  # 构造期填充不走 force
+
+    def test_baud_passthrough_on_run(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """_run/_dry_run 把选中的波特率透传给 run_cases（端口名取 data，无 ● 污染）."""
+        widget, main = self._make_widget(tmp_path)
+        widget.baud_combo.setCurrentText("921600")
+        widget._run()  # noqa: SLF001
+        assert main.run_calls[-1]["baud"] == 921600
+        assert main.run_calls[-1]["port"] == "COM3"
+
+        widget._dry_run()  # noqa: SLF001
+        assert main.run_calls[-1]["baud"] == 921600
+        assert main.run_calls[-1]["dry_run"] is True
+
+    def test_baud_invalid_rejected(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """非法波特率（非整数 / 超上限 / 负值）→ 弹窗提示且不发起执行."""
+        import PySide6.QtWidgets as _qw
+
+        warns: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "warning", lambda p, t, x, *a, **k: warns.append((t, x))
+        )
+        widget, main = self._make_widget(tmp_path)
+
+        widget.baud_combo.setCurrentText("abc")
+        widget._run()  # noqa: SLF001
+        assert main.run_calls == [], "波特率非法时不得发起执行"
+
+        widget.baud_combo.setCurrentText("99999999")
+        widget._run()  # noqa: SLF001
+        assert main.run_calls == [], "波特率越界时不得发起执行"
+        assert len(warns) == 2 and all(t == "波特率无效" for t, _ in warns)
+
+        # 负值：int 可解析但走范围分支（与超上限同路径不同侧）
+        widget.baud_combo.setCurrentText("-5")
+        widget._run()  # noqa: SLF001
+        assert main.run_calls == []
+        assert "需在 1 ~" in warns[-1][1]
+
+        # 直接调用校验同样返回 None（并再弹一次提示）
+        widget.baud_combo.setCurrentText("abc")
+        assert widget._current_baud() is None  # noqa: SLF001
+        assert len(warns) == 4
+
+    def test_custom_baud_dialog(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """选「自定义…」弹输入框：确定 → 记入候选；取消 → 回退上一个有效值."""
+        from PySide6.QtWidgets import QInputDialog
+
+        from atprobe.gui.tabs.manual_debug import _CUSTOM_BAUD_LABEL  # noqa: SLF001
+
+        widget, _ = self._make_widget(tmp_path)
+        custom_idx = widget.baud_combo.findText(_CUSTOM_BAUD_LABEL)
+        assert custom_idx >= 0
+
+        monkeypatch.setattr(QInputDialog, "getInt", lambda *a, **k: (12345, True))
+        widget._on_baud_index_changed(custom_idx)  # noqa: SLF001
+        assert widget.baud_combo.currentText() == "12345"
+        assert widget.baud_combo.findText("12345") >= 0, "自定义值应记入候选"
+        assert widget._current_baud() == 12345  # noqa: SLF001
+
+        monkeypatch.setattr(QInputDialog, "getInt", lambda *a, **k: (0, False))
+        custom_idx = widget.baud_combo.findText(_CUSTOM_BAUD_LABEL)  # 插入 12345 后索引已变，重取
+        widget._on_baud_index_changed(custom_idx)  # noqa: SLF001
+        assert widget.baud_combo.currentText() == "12345", (
+            "取消应回退上一个有效值，而非残留「自定义…」或硬编码 115200"
+        )
+
+    def test_custom_cancel_falls_back_to_last_valid(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """取消自定义输入回退 last-valid（default.baud=9600 时不得静默变 115200）；对话框初值同源."""
+        from PySide6.QtWidgets import QInputDialog
+
+        from atprobe.gui.tabs.manual_debug import _CUSTOM_BAUD_LABEL  # noqa: SLF001
+
+        widget, _ = self._make_widget(tmp_path, main=_CaseMain(default_baud=9600))
+        assert widget.baud_combo.currentText() == "9600"
+
+        captured_init: list[int] = []
+
+        def _fake_get_int(*a, **k):  # noqa: ANN002, ANN003
+            captured_init.append(a[3])  # getInt(parent, title, label, value, ...) 第 4 位置参数
+            return (0, False)
+
+        monkeypatch.setattr(QInputDialog, "getInt", _fake_get_int)
+        widget._on_baud_index_changed(widget.baud_combo.findText(_CUSTOM_BAUD_LABEL))  # noqa: SLF001
+        assert widget.baud_combo.currentText() == "9600", "取消不得把配置静默改回 115200"
+        assert captured_init == [9600], "对话框初值应为上一个有效值 9600"
+
+        # 下拉真实选中预设 921600（setCurrentIndex 触发信号；editable combo 的
+        # setCurrentText 只改编辑框文本不触发 index 变化——manual_debug 同款坑）
+        widget.baud_combo.setCurrentIndex(widget.baud_combo.findText("921600"))
+        widget._on_baud_index_changed(widget.baud_combo.findText(_CUSTOM_BAUD_LABEL))  # noqa: SLF001
+        assert widget.baud_combo.currentText() == "921600"
+        assert captured_init[-1] == 921600
+
+    def test_refresh_fallback_old_signature_main(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """旧签名替身 available_ports(self)（不收 force）：强制刷新经 TypeError 回退无参调用."""
+
+        class _OldSignatureMain(_CaseMain):
+            def available_ports(self):  # type: ignore[no-untyped-def]  # 故意旧签名
+                return ["COM9"]
+
+        widget, _ = self._make_widget(tmp_path, main=_OldSignatureMain())
+        widget._refresh_ports(force=True)  # noqa: SLF001  不得抛 TypeError
+        items = [widget.ports_combo.itemData(i) for i in range(widget.ports_combo.count())]
+        assert items == ["COM9"]
+
+    def test_refresh_forces_and_badges(self, qapp, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """「刷新」→ force=True 绕过 TTL；已连接端口加 ● 徽标且选中保留、data 干净."""
+        main = _CaseMain(ports=["COM3", "COM4"], connected={"COM4"})
+        widget, _ = self._make_widget(tmp_path, main=main)
+
+        # 模拟用户当前选 COM3（下拉文本，无徽标）
+        widget.ports_combo.setCurrentIndex(0)
+        assert widget.ports_combo.currentData() == "COM3"
+
+        widget._refresh_ports(force=True)  # noqa: SLF001
+        assert main.port_force_calls[-1] is True
+        items = [
+            (widget.ports_combo.itemText(i), widget.ports_combo.itemData(i))
+            for i in range(widget.ports_combo.count())
+        ]
+        assert items == [("COM3", "COM3"), ("● COM4", "COM4")]
+        # 选中跨刷新保留（仍指向 COM3）
+        assert widget.ports_combo.currentData() == "COM3"
+
+        # 选中已连接端口执行 → 传给 run_cases 的端口名无 ● 前缀
+        widget.ports_combo.setCurrentIndex(1)
+        widget.baud_combo.setCurrentText("115200")
+        widget._run()  # noqa: SLF001
+        assert main.run_calls[-1]["port"] == "COM4"
 
 
 class _FakeMain:
@@ -2343,6 +2527,131 @@ class TestStartupErrorConsumption:
         )
         err = next(ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "engine_error")
         assert "执行失败" in err[1] and "COM9 不存在" in err[1]  # type: ignore[union-attr]
+
+
+class TestRunCasesBaudPropagation:
+    """run_cases baud 透传：新开端口按所选波特率打开 + 写入 EngineConfig；已连接沿用."""
+
+    @staticmethod
+    def _make_win(monkeypatch, captured: list) -> None:  # noqa: ANN001
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.domain.report.models import ExecutionResult, Summary
+        from atprobe.gui import mainwindow as mw
+        from atprobe.gui.mainwindow import MainWindow
+        from atprobe.infra.serial.fakeserial import FakePortManager
+
+        monkeypatch.setattr(_qw.QMessageBox, "critical", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "warning", lambda *a, **k: 0)
+        monkeypatch.setattr(_qw.QMessageBox, "information", lambda *a, **k: 0)
+
+        class _FakeEngine:
+            def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                pass
+
+            def start(self, cfg, handler=None):  # noqa: ANN001
+                captured.append(cfg)
+                return ExecutionResult(summary=Summary(total_cases=1, passed=1))
+
+        monkeypatch.setattr(mw, "Engine", _FakeEngine)
+        win = MainWindow()
+        win._port_manager = FakePortManager(sleep=lambda s: None)  # noqa: SLF001
+        return win
+
+    def test_baud_used_for_open_and_engine_config(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        captured: list = []
+        win = self._make_win(monkeypatch, captured)
+        case_file = tmp_path / "c1.yaml"
+        case_file.write_text(
+            "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+        )
+        try:
+            win.run_cases([str(case_file)], "COM9", 90, baud=9600)
+            if win._engine_thread is not None:
+                win._engine_thread.join(timeout=5)
+            qapp.processEvents()
+            # 新开端口按 9600 打开（端口管理器保存的连接配置）
+            assert win._port_manager.config_of("COM9").baudrate == 9600  # noqa: SLF001
+            # 引擎配置携带同一波特率（引擎侧 _open_ports/重开路径同源）
+            assert captured and captured[0].ports[0].baudrate == 9600
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+            win.close()
+
+    def test_baud_none_falls_back_to_default_chain(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """baud=None（旧调用方）→ 走 default.baud 链（MainWindow.default_baud）."""
+        captured: list = []
+        win = self._make_win(monkeypatch, captured)
+        case_file = tmp_path / "c1.yaml"
+        case_file.write_text(
+            "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+        )
+        try:
+            win.run_cases([str(case_file)], "COM9", 90)
+            if win._engine_thread is not None:
+                win._engine_thread.join(timeout=5)
+            qapp.processEvents()
+            assert captured[0].ports[0].baudrate == win.default_baud()
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+            win.close()
+
+    def test_connected_port_not_reopened_on_run(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """决策主路径：已连接端口**正式执行**沿用现有连接——连接与波特率不被所选值重写.
+
+        Fake.open 会无条件覆盖配置（与真实 open 的「同名不同配置抛错」不同）：
+        若 GUI 错误地重开了已连接端口，config_of 的波特率立即变成所选值 → 断言必挂。
+        """
+        from atprobe.infra.serial.config import PortConfig
+
+        captured: list = []
+        win = self._make_win(monkeypatch, captured)
+        case_file = tmp_path / "c1.yaml"
+        case_file.write_text(
+            "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+        )
+        try:
+            win._port_manager.open(PortConfig(name="COM7"))  # noqa: SLF001  外部已连接（默认 115200）
+            win.run_cases([str(case_file)], "COM7", 90, baud=9600)
+            if win._engine_thread is not None:
+                win._engine_thread.join(timeout=5)
+            qapp.processEvents()
+            assert win._port_manager.config_of("COM7").baudrate == 115200, (  # noqa: SLF001
+                "已连接端口被按所选波特率重开（沿用连接语义被破坏）"
+            )
+            assert win._port_manager.is_connected("COM7"), "已连接端口不得被关闭/重开"  # noqa: SLF001
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+            win.close()
+
+    def test_dry_run_reports_baud_semantics(self, qapp, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """dry-run 提示注明波特率语义：未连接「将按 N 打开」；已连接「按现有连接 N 执行」."""
+        import PySide6.QtWidgets as _qw
+
+        from atprobe.infra.serial.config import PortConfig
+
+        captured: list = []
+        win = self._make_win(monkeypatch, captured)
+        # 注意：必须在 _make_win 之后打收集补丁（同属性后打的生效）
+        infos: list[str] = []
+        monkeypatch.setattr(
+            _qw.QMessageBox, "information", lambda p, t, x, *a, **k: infos.append(x)
+        )
+        case_file = tmp_path / "c1.yaml"
+        case_file.write_text(
+            "name: c1\nsteps:\n  - command: AT\n    assert: {contains: OK}\n", encoding="utf-8"
+        )
+        try:
+            # 未连接 → 注明将按所选值打开
+            win.run_cases([str(case_file)], "COM9", 90, baud=9600, dry_run=True)
+            assert any("将按 9600 打开" in x for x in infos)
+            # 已连接（先按默认 115200 打开）→ 注明沿用现有连接，所选 9600 不生效
+            win._port_manager.open(PortConfig(name="COM8"))  # noqa: SLF001
+            win.run_cases([str(case_file)], "COM8", 90, baud=9600, dry_run=True)
+            assert any("已连接，按现有连接波特率 115200 执行" in x and "不重开" in x for x in infos)
+        finally:
+            win._raw_logger.stop()  # noqa: SLF001
+            win.close()
 
 
 class TestSendManualFalseSemantics:
